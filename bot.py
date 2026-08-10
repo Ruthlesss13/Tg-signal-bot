@@ -240,6 +240,46 @@ def generate_trade_plan(symbol: str) -> TradePlan | None:
     )
 
 
+def generate_weekly_summary(symbol: str, code: str, chat_id: int) -> str:
+    """خلاصه‌ی آماری ۷ روز اخیر بر پایه کندل‌های روزانه. دلیل خبری/بنیادی حرکت قیمت در این ابزار موجود نیست."""
+    df = fetch_ohlcv(symbol, timeframe="1d", limit=8)
+    if len(df) < 2:
+        return f"🔸 *{code}*\n\nداده‌ی کافی برای تحلیل هفتگی در دسترس نیست."
+
+    week_ago_price = df["close"].iloc[0]
+    current_price = df["close"].iloc[-1]
+    pct_change = (current_price - week_ago_price) / week_ago_price * 100
+    highest = df["high"].max()
+    lowest = df["low"].min()
+
+    daily_pct = df["close"].pct_change() * 100
+    idx_max = daily_pct.abs().idxmax()
+    best_day_pct = daily_pct.loc[idx_max] if pd.notna(daily_pct.loc[idx_max]) else 0.0
+    best_day_date = df.loc[idx_max, "timestamp"].strftime("%Y-%m-%d")
+
+    if pct_change > 10:
+        trend_desc = "صعودی قوی 📈"
+    elif pct_change > 0:
+        trend_desc = "صعودی ملایم 📈"
+    elif pct_change > -10:
+        trend_desc = "نزولی ملایم 📉"
+    else:
+        trend_desc = "نزولی قوی 📉"
+
+    return (
+        f"📊 *تحلیل ۷ روز اخیر {code}*\n{DIVIDER}\n"
+        f"قیمت ۷ روز پیش: {fmt_amount(week_ago_price, chat_id)}\n"
+        f"قیمت الان: {fmt_amount(current_price, chat_id)}\n"
+        f"تغییر هفتگی: *{pct_change:+.2f}٪* — {trend_desc}\n\n"
+        f"بیشترین قیمت هفته: {fmt_amount(highest, chat_id)}\n"
+        f"کمترین قیمت هفته: {fmt_amount(lowest, chat_id)}\n"
+        f"{DIVIDER}\n"
+        f"بیشترین نوسان یک‌روزه: *{best_day_pct:+.2f}٪* در تاریخ {best_day_date}\n\n"
+        f"ℹ️ این خلاصه فقط بر پایه‌ی داده‌ی قیمته. دلیل دقیق خبری/بنیادی افت یا رشد "
+        f"(مثل اخبار یا رویدادهای خاص) در این ابزار در دسترس نیست."
+    )
+
+
 def refresh_all_plans() -> dict[str, TradePlan]:
     for symbol in SYMBOLS:
         try:
@@ -402,6 +442,7 @@ def kb_main(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💰 قیمت لحظه‌ای ارزها", callback_data="menu_prices")],
         [InlineKeyboardButton("🪙 انتخاب ارز مورد نظر", callback_data="menu_coins")],
         [InlineKeyboardButton("📋 نمایش همه پیشنهادات", callback_data="menu_all")],
+        [InlineKeyboardButton("🔁 شروع مجدد / تغییر واحد پولی", callback_data="restart_currency")],
     ]
     if is_admin(user_id):
         rows.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
@@ -431,7 +472,15 @@ def kb_coins() -> InlineKeyboardMarkup:
 def kb_coin_detail(code: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎯 پیشنهاد لحظه‌ای", callback_data=f"suggest_{code}")],
+        [InlineKeyboardButton("📊 تحلیل ۷ روز اخیر", callback_data=f"weekly_{code}")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")],
+    ])
+
+
+def kb_weekly(code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"coin_{code}")],
+        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")],
     ])
 
 
@@ -476,10 +525,23 @@ def welcome_text() -> str:
 
 
 async def finish_start(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
-    await context.bot.set_my_commands(
-        [BotCommand("menu", "🤖 نمایش منوی اصلی")],
-        scope=BotCommandScopeChat(chat_id=chat_id),
-    )
+    if not is_admin(user_id):
+        # فقط برای کاربر عادی، بعد از استارت لیست دستورات محدود به «منو» بشه
+        await context.bot.set_my_commands(
+            [BotCommand("menu", "🤖 نمایش منوی اصلی")],
+            scope=BotCommandScopeChat(chat_id=chat_id),
+        )
+    else:
+        # برای ادمین، همیشه لیست کامل دستورات فعال بمونه
+        await context.bot.set_my_commands(
+            [
+                BotCommand("start", "🚀 شروع / انتخاب واحد پولی"),
+                BotCommand("menu", "🤖 نمایش منوی اصلی"),
+                BotCommand("status", "📊 وضعیت ربات"),
+                BotCommand("stop", "❌ توقف اشتراک"),
+            ],
+            scope=BotCommandScopeChat(chat_id=chat_id),
+        )
     await send_tracked(
         context, chat_id, welcome_text(),
         reply_markup=kb_main(user_id), parse_mode="Markdown",
@@ -538,7 +600,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("suggest_"):
         code = data.split("_", 1)[1]
-        await query.edit_message_text("⏳ در حال تحلیل بازار...")
         symbol = SYMBOL_MAP.get(code)
         try:
             plan = generate_trade_plan(symbol)
@@ -562,6 +623,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context, chat_id, code,
                 caption=format_no_signal(code), reply_markup=kb_suggestion(code),
             )
+
+    elif data.startswith("weekly_"):
+        code = data.split("_", 1)[1]
+        symbol = SYMBOL_MAP.get(code)
+        try:
+            summary = generate_weekly_summary(symbol, code, chat_id)
+        except Exception as e:
+            logger.error(f"خطا در تحلیل هفتگی {symbol}: {e}")
+            summary = f"🔸 *{code}*\n\nخطا در دریافت داده‌ی هفتگی. کمی بعد دوباره امتحان کن."
+
+        try:
+            await query.edit_message_caption(caption=summary, reply_markup=kb_weekly(code), parse_mode="Markdown")
+        except Exception:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await send_tracked(context, chat_id, summary, reply_markup=kb_weekly(code), parse_mode="Markdown")
+
+    elif data == "restart_currency":
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        chat_message_history.pop(chat_id, None)
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text="👋 واحد پولی نمایش قیمت‌ها رو دوباره انتخاب کن:",
+            reply_markup=kb_currency(),
+        )
+        await track_message(context, chat_id, msg.message_id)
 
     elif data == "menu_all":
         await query.edit_message_text("⏳ در حال تحلیل همه‌ی ارزها (چند ثانیه طول می‌کشه)...")
