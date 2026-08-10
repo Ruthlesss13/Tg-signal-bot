@@ -1,5 +1,5 @@
 """
-ربات تلگرام سیگنال‌دهی فیوچرز (نوسان‌گیری) - نسخه نهایی
+ربات تلگرام سیگنال‌دهی فیوچرز (نوسان‌گیری) - نسخه نهایی با منوی شیشه‌ای
 --------------------------------------------------------------------------
 ارزها: DOGE, SOL, SHIB, BTC, ETH (فیوچرز Bybit، در برابر USDT)
 استراتژی: EMA(12/26) برای جهت + EMA200 برای فیلتر روند + RSI(14) + ATR برای پله‌بندی
@@ -31,7 +31,7 @@ import pandas as pd
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator
 from ta.volatility import AverageTrueRange
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from dotenv import load_dotenv
 
@@ -46,9 +46,12 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # --- تنظیمات قابل تغییر ---
+# نکته: Binance و Bybit از لوکیشن سرور مسدود بودن (خطای 451 / 403 CloudFront)
+# با KuCoin (اسپات) جایگزین کردیم چون محدودیت جغرافیایی کمتری داره؛
+# قیمت اسپات برای تحلیل و سیگنال‌دهی تفاوت ناچیزی با فیوچرز داره
 COIN_ICONS = {"DOGE": "🐕", "SOL": "◎", "SHIB": "🦴", "BTC": "₿", "ETH": "Ξ"}
 COIN_CODES = ["DOGE", "SOL", "SHIB", "BTC", "ETH"]
-SYMBOL_MAP = {code: f"{code}/USDT:USDT" for code in COIN_CODES}  # صرافی Bybit (فیوچرز/سواپ)
+SYMBOL_MAP = {code: f"{code}/USDT" for code in COIN_CODES}
 SYMBOLS = list(SYMBOL_MAP.values())
 
 TIMEFRAME = "15m"
@@ -61,7 +64,7 @@ SL_LADDER_ATR = [1.0, 1.25, 1.5]
 SL_BASE = SL_LADDER_ATR[0]
 TP_LADDER_ATR = [SL_BASE * 1.2, SL_BASE * 2.0, SL_BASE * 3.0]
 
-exchange = ccxt.bybit({"options": {"defaultType": "swap"}})
+exchange = ccxt.kucoin()
 
 
 @dataclass
@@ -353,6 +356,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(app: Application):
+    await app.bot.set_my_commands([
+        BotCommand("start", "🚀 شروع و عضویت در سیگنال‌ها"),
+        BotCommand("menu", "🤖 نمایش منوی اصلی"),
+        BotCommand("status", "📊 وضعیت بات و ارزهای تحت رصد"),
+        BotCommand("stop", "❌ توقف اشتراک سیگنال‌ها"),
+    ])
     asyncio.create_task(auto_report_loop(app))
 
 
