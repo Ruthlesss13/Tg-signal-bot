@@ -6,9 +6,10 @@
 صرافی قیمت/تحلیل: KuCoin (اسپات)
 نرخ تتر به تومان: نوبیتکس (اول) و در صورت خطا Wallex (دوم)
 
-⚠️ نکته مهم: تمام حالت‌های داخل این فایل (اشتراک، واحد پولی، سیگنال‌ها) توی
-حافظه‌ی برنامه نگه داشته می‌شن، نه دیتابیس. یعنی با هر ری‌استارت/دیپلوی جدید
-سرور، این اطلاعات پاک می‌شه و کاربرها باید دوباره /start بزنن.
+⚠️ نکته مهم درباره ذخیره‌سازی: تنظیمات کاربرها (اشتراک، واحد پولی) توی یه فایل JSON
+روی دیسک ذخیره می‌شه. اگه روی سرویس Railway یه Volume وصل نکرده باشی، این فایل با
+هر دیپلوی جدید پاک می‌شه. برای ماندگاری دائمی، از داشبورد Railway یه Volume با
+مسیر اتصال (mount path) دقیقاً "/data" به این سرویس اضافه کن.
 
 ⚠️ این ربات ابزار تحلیل تکنیکال خودکار است، نه توصیه مالی.
 ⚠️ «امتیاز اطمینان» تخمین بر پایه قدرت اندیکاتورهاست، نه احتمال آماری واقعی.
@@ -16,6 +17,7 @@
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -84,6 +86,36 @@ user_currency: dict[int, str] = {}
 auto_message_history: dict[int, list[int]] = {}          # پیام‌های پیشنهاد خودکار (نگه‌داری ۳ تای آخر)
 interactive_screen_messages: dict[int, list[int]] = {}    # پیام‌های صفحه‌ی تعاملی فعلی (فقط آخری بمونه)
 _irt_rate_cache = {"value": None, "ts": 0.0, "source": None}
+
+# ---------- ذخیره‌سازی دائمی (نیازمند Volume روی Railway، وگرنه با هر دیپلوی پاک می‌شه) ----------
+DATA_DIR = os.getenv("DATA_DIR", "/data")
+STATE_FILE = os.path.join(DATA_DIR, "state.json")
+
+
+def load_state():
+    global subscribed_chat_ids, user_currency
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        subscribed_chat_ids = set(data.get("subscribed_chat_ids", []))
+        user_currency = {int(k): v for k, v in data.get("user_currency", {}).items()}
+        logger.info(f"وضعیت قبلی بازیابی شد: {len(subscribed_chat_ids)} کاربر از {STATE_FILE}")
+    except FileNotFoundError:
+        logger.info(f"فایل ذخیره‌سازی ({STATE_FILE}) پیدا نشد؛ از صفر شروع می‌شه.")
+    except Exception as e:
+        logger.warning(f"خطا در خواندن وضعیت ذخیره‌شده: {e}")
+
+
+def save_state():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "subscribed_chat_ids": list(subscribed_chat_ids),
+                "user_currency": user_currency,
+            }, f)
+    except Exception as e:
+        logger.warning(f"خطا در ذخیره‌ی وضعیت (احتمالاً Volume وصل نیست): {e}")
 
 
 @dataclass
@@ -583,6 +615,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---- انتخاب واحد پولی (اولین بار یا از «شروع مجدد») ----
     if data.startswith("cur_"):
         user_currency[chat_id] = data.split("_", 1)[1]
+        save_state()
         try:
             await query.message.delete()
         except Exception:
@@ -844,6 +877,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     subscribed_chat_ids.add(chat_id)
+    save_state()
     await clear_interactive_screen(context, chat_id)
     # /start همیشه از انتخاب واحد پولی شروع می‌شه (حتی اگه قبلاً انتخاب شده بود)
     msg = await update.message.reply_text(
@@ -856,6 +890,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard(update):
         return
     subscribed_chat_ids.discard(update.effective_chat.id)
+    save_state()
     await update.message.reply_text("❌ اشتراک قطع شد. هر وقت خواستی، از منو گزینه‌ی «🔁 شروع مجدد» رو بزن یا /start رو بزن.")
 
 
@@ -896,6 +931,8 @@ def main():
         raise RuntimeError("BOT_TOKEN تنظیم نشده! فایل .env رو بساز و توکن رو بذار توش.")
     if not ALLOWED_USER_IDS:
         logger.warning("ALLOWED_USER_IDS تنظیم نشده — بات فعلاً برای همه باز است!")
+
+    load_state()
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
