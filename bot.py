@@ -350,8 +350,26 @@ def now_str() -> str:
 
 def mood_emoji(plan: TradePlan) -> str:
     if plan.direction == "LONG":
-        return "🚀" if plan.confidence >= 80 else "📈"
-    return "🔻" if plan.confidence >= 80 else "📉"
+        if plan.confidence >= 85:
+            return "🚀"
+        elif plan.confidence >= 75:
+            return "🔥"
+        return "📈"
+    if plan.confidence >= 85:
+        return "🔻"
+    elif plan.confidence >= 75:
+        return "⚠️"
+    return "📉"
+
+
+def confidence_badge(confidence: float) -> str:
+    if confidence >= 85:
+        return "🔥 فوق‌العاده قوی"
+    elif confidence >= 75:
+        return "⚡ قوی"
+    elif confidence >= 65:
+        return "✨ متوسط"
+    return "💫 ضعیف"
 
 
 # ---------- قالب‌بندی پیام‌ها ----------
@@ -371,8 +389,9 @@ def format_prices_pretty(prices: dict[str, float], chat_id: int) -> str:
 
 
 def format_plan_pretty(plan: TradePlan, code: str, chat_id: int) -> str:
-    dir_txt = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
+    dir_txt = "🟢 لانگ (خرید) 💹" if plan.direction == "LONG" else "🔴 شورت (فروش) 🔻"
     emoji = mood_emoji(plan)
+    badge = confidence_badge(plan.confidence)
     nums = ["1️⃣", "2️⃣", "3️⃣"]
 
     entries_txt = "\n".join(f"   {nums[i]} {fmt_amount(p, chat_id)}" for i, p in enumerate(plan.entries))
@@ -381,7 +400,8 @@ def format_plan_pretty(plan: TradePlan, code: str, chat_id: int) -> str:
 
     return (
         f"{emoji} *{code}/USDT* — {dir_txt}\n"
-        f"روند: {plan.trend}  |  RSI: {plan.rsi:.1f}  |  🎯 اطمینان: *{plan.confidence:.0f}٪*\n"
+        f"📊 روند: {plan.trend}  |  RSI: {plan.rsi:.1f}\n"
+        f"🎯 اطمینان: *{plan.confidence:.0f}٪*  ({badge})\n"
         f"{DIVIDER}\n"
         f"💰 *قیمت لحظه‌ای*\n   {fmt_amount(plan.current_price, chat_id)}\n\n"
         f"📥 *نقاط ورود (۳ پله)*\n{entries_txt}\n\n"
@@ -475,19 +495,23 @@ def kb_currency() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💵 دلار (USDT)", callback_data="cur_USDT")],
         [InlineKeyboardButton("💴 تومان (IRT)", callback_data="cur_IRT")],
-        [InlineKeyboardButton("💱 هر دو", callback_data="cur_BOTH")],
+        [InlineKeyboardButton("💱 هر دو ✨", callback_data="cur_BOTH")],
     ])
 
 
 def kb_main(user_id: int) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("💰 قیمت لحظه‌ای ارزها", callback_data="menu_prices")],
-        [InlineKeyboardButton("🪙 انتخاب ارز مورد نظر", callback_data="menu_coins")],
-        [InlineKeyboardButton("📋 نمایش همه پیشنهادات", callback_data="menu_all")],
-        [InlineKeyboardButton("🔁 شروع مجدد", callback_data="restart_currency")],
+        [
+            InlineKeyboardButton("💰 قیمت‌ لحظه‌ای", callback_data="menu_prices"),
+            InlineKeyboardButton("🪙 انتخاب ارز", callback_data="menu_coins"),
+        ],
+        [
+            InlineKeyboardButton("📊 همه پیشنهادات", callback_data="menu_all"),
+            InlineKeyboardButton("🔄 شروع مجدد", callback_data="restart_currency"),
+        ],
     ]
     if is_admin(user_id):
-        rows.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
+        rows.append([InlineKeyboardButton("⚙️ پنل مدیریت ویژه", callback_data="admin_panel")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -511,7 +535,7 @@ def kb_coins() -> InlineKeyboardMarkup:
 def kb_coin_detail(code: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎯 پیشنهاد لحظه‌ای", callback_data=f"suggest_{code}")],
-        [InlineKeyboardButton("📊 تحلیل ۷ روز اخیر", callback_data=f"weekly_{code}")],
+        [InlineKeyboardButton("📆 تحلیل ۷ روز اخیر", callback_data=f"weekly_{code}")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")],
     ])
 
@@ -565,16 +589,18 @@ def kb_auto_report(top_plans: list[TradePlan]) -> InlineKeyboardMarkup:
 
 def welcome_text() -> str:
     return (
-        "✅ *خوش اومدی!*\n\n"
-        f"در حال رصد {len(COIN_CODES)} ارز هستم.\n"
-        "هر ۱۵ دقیقه بهترین سیگنال‌های فعال رو با امتیاز اطمینان برات می‌فرستم.\n"
-        "برای بررسی دستی، از منوی زیر استفاده کن 👇\n\n"
+        "🌟 *به سیگنالستان خوش اومدی!* 🌟\n"
+        f"{DIVIDER}\n"
+        f"🛰️ در حال رصد {len(COIN_CODES)} ارز هستم\n"
+        "⏱️ هر ۱۵ دقیقه بهترین سیگنال‌های فعال رو با ⚡️ امتیاز اطمینان برات می‌فرستم\n"
+        "👇 برای بررسی دستی، از منوی زیر استفاده کن\n\n"
         "برای توقف اشتراک: /stop\n\n"
         "⚠️ ابزار تحلیل تکنیکاله، نه توصیه مالی. تصمیم و ریسک نهایی با خودته."
     )
 
 
-MENU_PROMPT = "یکی از گزینه‌ها رو انتخاب کن:"
+MENU_PROMPT = "👇 یکی از گزینه‌ها رو انتخاب کن:"
+MAIN_MENU_HEADER = "✨ *پنل سیگنال‌یار* ✨\n" + DIVIDER + "\n" + MENU_PROMPT
 
 
 async def finish_start(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
@@ -658,7 +684,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if plan:
             dir_txt = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
-            short_caption = f"{mood_emoji(plan)} *{code}/USDT* — {dir_txt}\n🎯 اطمینان: *{plan.confidence:.0f}٪*"
+            short_caption = f"{mood_emoji(plan)} *{code}/USDT* — {dir_txt}"
             await send_coin_photo(context, chat_id, code, caption=short_caption)
             detail_text = format_plan_pretty(plan, code, chat_id)
             for chunk in split_long_message(detail_text):
@@ -677,10 +703,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "menu_main":
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         try:
-            await query.edit_message_text(MENU_PROMPT, reply_markup=kb_main(user_id))
+            await query.edit_message_text(MAIN_MENU_HEADER, reply_markup=kb_main(user_id), parse_mode="Markdown")
         except Exception:
             await query.message.delete()
-            msg = await context.bot.send_message(chat_id=chat_id, text=MENU_PROMPT, reply_markup=kb_main(user_id))
+            msg = await context.bot.send_message(chat_id=chat_id, text=MAIN_MENU_HEADER, reply_markup=kb_main(user_id), parse_mode="Markdown")
             set_interactive_screen(chat_id, [msg.message_id])
             return
         set_interactive_screen(chat_id, [query.message.message_id])
@@ -702,16 +728,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "menu_coins":
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
+        coins_header = f"🪙 *انتخاب ارز مورد نظر*\n{DIVIDER}\n{MENU_PROMPT}"
         try:
-            await query.edit_message_text(
-                f"🪙 *انتخاب ارز مورد نظر*\n{MENU_PROMPT}", reply_markup=kb_coins(), parse_mode="Markdown",
-            )
+            await query.edit_message_text(coins_header, reply_markup=kb_coins(), parse_mode="Markdown")
             set_interactive_screen(chat_id, [query.message.message_id])
         except Exception:
             await query.message.delete()
             msg = await context.bot.send_message(
-                chat_id=chat_id, text=f"🪙 *انتخاب ارز مورد نظر*\n{MENU_PROMPT}",
-                reply_markup=kb_coins(), parse_mode="Markdown",
+                chat_id=chat_id, text=coins_header, reply_markup=kb_coins(), parse_mode="Markdown",
             )
             set_interactive_screen(chat_id, [msg.message_id])
 
@@ -723,7 +747,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         mid = await send_coin_photo(
-            context, chat_id, code, caption=f"🔸 *{code}/USDT*\n{MENU_PROMPT}",
+            context, chat_id, code, caption=f"🔸✨ *{code}/USDT* ✨🔸\n{DIVIDER}\n{MENU_PROMPT}",
             reply_markup=kb_coin_detail(code),
         )
         set_interactive_screen(chat_id, [mid])
@@ -746,7 +770,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_ids = []
         if plan:
             dir_txt = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
-            short_caption = f"{mood_emoji(plan)} *{code}/USDT* — {dir_txt}\n🎯 اطمینان: *{plan.confidence:.0f}٪*"
+            short_caption = f"{mood_emoji(plan)} *{code}/USDT* — {dir_txt}"
             mid1 = await send_coin_photo(context, chat_id, code, caption=short_caption)
             new_ids.append(mid1)
             detail_text = format_plan_pretty(plan, code, chat_id)
@@ -826,11 +850,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         text = (
-            "⚙️ *پنل مدیریت*\n" + DIVIDER + "\n"
-            f"تعداد اعضای فعال: {len(subscribed_chat_ids)}\n"
-            f"سیگنال‌های فعال الان: {len(last_plans)}\n"
-            f"تعداد ارز تحت رصد: {len(COIN_CODES)}\n"
-            f"فاصله گزارش خودکار: {CHECK_INTERVAL_SECONDS // 60} دقیقه"
+            "🛠️ *پنل مدیریت ویژه* 🛠️\n" + DIVIDER + "\n"
+            f"👥 اعضای فعال: {len(subscribed_chat_ids)}\n"
+            f"⚡️ سیگنال‌های فعال الان: {len(last_plans)}\n"
+            f"🪙 تعداد ارز تحت رصد: {len(COIN_CODES)}\n"
+            f"⏱️ فاصله گزارش خودکار: {CHECK_INTERVAL_SECONDS // 60} دقیقه"
         )
         await query.edit_message_text(text, reply_markup=kb_admin_panel(), parse_mode="Markdown")
         set_interactive_screen(chat_id, [query.message.message_id])
@@ -845,15 +869,15 @@ async def auto_report_loop(app: Application):
             top_plans = sorted(plans.values(), key=lambda p: p.confidence, reverse=True)[:TOP_SIGNALS_COUNT] if plans else []
 
             for chat_id in list(subscribed_chat_ids):
-                header = f"📢 *پیشنهادات لحظه‌ای*  —  🕒 {now_str()}\n{BIG_DIVIDER}\n\n"
+                header = f"📢✨ *پیشنهادات لحظه‌ای* ✨📢\n🕒 {now_str()}\n{BIG_DIVIDER}\n\n"
                 if top_plans:
                     body = f"\n\n{DIVIDER}\n\n".join(
                         format_plan_pretty(p, p.symbol.split("/")[0], chat_id) for p in top_plans
                     )
-                    footer = "\n\n⚠️ امتیاز اطمینان تخمینیه، نه تضمینی. برای هر ارز، از دکمه‌ی زیر لمس کن."
+                    footer = "\n\n⚠️ امتیاز اطمینان تخمینیه، نه تضمینی.\n👇 برای جزئیات هر ارز، دکمه‌ش رو لمس کن."
                     keyboard = kb_auto_report(top_plans)
                 else:
-                    body = "فعلاً سیگنال واضحی روی هیچ‌کدوم از ارزها نیست."
+                    body = "😴 فعلاً سیگنال واضحی روی هیچ‌کدوم از ارزها نیست."
                     footer = ""
                     keyboard = kb_back_main()
 
@@ -901,7 +925,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     subscribed_chat_ids.add(chat_id)
     await clear_interactive_screen(context, chat_id)
-    msg = await update.message.reply_text(MENU_PROMPT, reply_markup=kb_main(user_id))
+    msg = await update.message.reply_text(MAIN_MENU_HEADER, reply_markup=kb_main(user_id), parse_mode="Markdown")
     set_interactive_screen(chat_id, [msg.message_id])
 
 
