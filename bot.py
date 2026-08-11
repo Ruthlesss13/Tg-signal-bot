@@ -31,10 +31,11 @@ except Exception:
     TEHRAN_TZ = None
 
 import ccxt
+import jdatetime
 import pandas as pd
 import requests
 from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
+from ta.trend import EMAIndicator, MACD, ADXIndicator
 from ta.volatility import AverageTrueRange
 from telegram import BotCommand, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -62,17 +63,18 @@ COIN_CODES = [
 SYMBOL_MAP = {code: f"{code}/USDT" for code in COIN_CODES}
 SYMBOLS = list(SYMBOL_MAP.values())
 
-TIMEFRAME = "15m"
+TIMEFRAME = "1h"          # تایم‌فریم بزرگ‌تر = سیگنال قابل‌اعتمادتر و کمتر دچار نویز/سیگنال کاذب
 CHECK_INTERVAL_SECONDS = 60 * 15
 TOP_SIGNALS_COUNT = 5
 RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
+ADX_TREND_THRESHOLD = 20   # زیر این مقدار یعنی بازار رنج/بی‌روند، سیگنال صادر نمی‌شه
 AUTO_KEEP_LAST_N = 3     # فقط ۳ پیام آخرِ «پیشنهادات خودکار» نگه داشته بشه
 
-ENTRY_LADDER_ATR = [0.0, 0.35, 0.75]
-SL_LADDER_ATR = [1.0, 1.25, 1.5]
-SL_BASE = SL_LADDER_ATR[0]
-TP_LADDER_ATR = [SL_BASE * 1.2, SL_BASE * 2.0, SL_BASE * 3.0]
+# پله‌بندی ورود/سود/ضرر بر پایه ATR ساعتی (فاصله‌ها به‌اندازه‌ی کافی بزرگ برای معامله‌ی واقعی)
+ENTRY_LADDER_ATR = [0.0, 0.6, 1.2]
+SL_LADDER_ATR = [1.8, 2.2, 2.6]
+TP_LADDER_ATR = [2.5, 4.0, 6.0]
 
 TELEGRAM_MSG_LIMIT = 3500
 IRT_RATE_TTL_SECONDS = 300
@@ -175,12 +177,20 @@ def fetch_current_prices() -> dict[str, float]:
 
 
 def fetch_irt_rate_nobitex() -> float | None:
-    resp = requests.get(
-        "https://api.nobitex.ir/market/stats",
-        params={"srcCurrency": "usdt", "dstCurrency": "rls"}, timeout=8,
-    )
-    rial = float(resp.json()["stats"]["usdt-rls"]["latest"])
-    return rial / 10
+    """چند بار تلاش می‌کنه چون نوبیتکس منبع اصلی و دقیق‌تره؛ فقط در صورت شکست کامل به Wallex می‌ره."""
+    last_error = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(
+                "https://api.nobitex.ir/market/stats",
+                params={"srcCurrency": "usdt", "dstCurrency": "rls"}, timeout=8,
+            )
+            rial = float(resp.json()["stats"]["usdt-rls"]["latest"])
+            return rial / 10
+        except Exception as e:
+            last_error = e
+            time.sleep(1.5)
+    raise last_error
 
 
 def fetch_irt_rate_wallex() -> float | None:
@@ -206,45 +216,90 @@ def get_irt_rate() -> float | None:
     return _irt_rate_cache["value"]  # آخرین مقدار معتبر قبلی (یا None)
 
 
-def compute_confidence(direction: str, last_fast: float, last_slow: float, last_atr: float,
-                        price: float, last_trend_ema: float, last_rsi: float) -> float:
+def compute_confidence(direction: str, adx: float, macd_hist: float, last_atr: float,
+                        plus_di: float, minus_di: float, price: float, last_trend_ema: float,
+                        last_rsi: float) -> float:
+    """
+    امتیاز اطمینان (۵۰ تا ۹۵) بر پایه‌ی ترکیب چند اندیکاتور:
+      - قدرت روند (ADX)
+      - قدرت مومنتوم (هیستوگرام MACD نسبت به نوسان بازار)
+      - فاصله‌ی جهت‌دار (+DI / -DI)
+      - همسویی RSI
+      - فاصله‌ی قیمت از EMA200
+    این یک احتمال آماری واقعی/بک‌تست‌شده نیست، بلکه شدت هم‌جهتی اندیکاتورهاست.
+    """
     if last_atr <= 0:
-        return 55.0
-    score = 50.0
-    score += min(20.0, (abs(last_fast - last_slow) / last_atr) * 20.0)
-    score += min(15.0, (abs(price - last_trend_ema) / last_atr) * 10.0)
+        return 50.0
+
+    score = 20.0
+    score += min(25.0, (adx / 45.0) * 25.0)                              # قدرت روند
+    score += min(20.0, (abs(macd_hist) / last_atr) * 40.0)               # قدرت مومنتوم
+    score += min(20.0, (abs(plus_di - minus_di) / 35.0) * 20.0)          # فاصله جهت‌دار
+    score += min(20.0, (abs(price - last_trend_ema) / last_atr) * 12.0)  # فاصله از روند اصلی
+
     if direction == "LONG":
         score += min(15.0, max(0.0, last_rsi - 50.0) / 20.0 * 15.0)
     else:
         score += min(15.0, max(0.0, 50.0 - last_rsi) / 20.0 * 15.0)
-    return round(min(92.0, max(55.0, score)), 1)
+
+    return round(min(95.0, max(50.0, score)), 1)
 
 
 def generate_trade_plan(symbol: str) -> TradePlan | None:
     df = fetch_ohlcv(symbol)
-    ema_fast = EMAIndicator(df["close"], window=12).ema_indicator()
-    ema_slow = EMAIndicator(df["close"], window=26).ema_indicator()
+    if len(df) < 60:
+        return None
+
     ema_trend = EMAIndicator(df["close"], window=200).ema_indicator()
     rsi_series = RSIIndicator(df["close"], window=14).rsi()
     atr_series = AverageTrueRange(df["high"], df["low"], df["close"], window=14).average_true_range()
 
+    macd_ind = MACD(df["close"], window_slow=26, window_fast=12, window_sign=9)
+    macd_hist_series = macd_ind.macd_diff()
+
+    adx_ind = ADXIndicator(df["high"], df["low"], df["close"], window=14)
+    adx_series = adx_ind.adx()
+    plus_di_series = adx_ind.adx_pos()
+    minus_di_series = adx_ind.adx_neg()
+
     price = df["close"].iloc[-1]
-    last_fast, last_slow = ema_fast.iloc[-1], ema_slow.iloc[-1]
     last_rsi = rsi_series.iloc[-1]
     last_atr = atr_series.iloc[-1]
     last_trend_ema = ema_trend.iloc[-1]
+    last_macd_hist = macd_hist_series.iloc[-1]
+    last_adx = adx_series.iloc[-1]
+    last_plus_di = plus_di_series.iloc[-1]
+    last_minus_di = minus_di_series.iloc[-1]
+
+    if pd.isna(last_trend_ema) or pd.isna(last_adx) or pd.isna(last_macd_hist):
+        return None
 
     price_above_trend = price > last_trend_ema
     trend_label = "صعودی 📈" if price_above_trend else "نزولی 📉"
+    is_trending = last_adx >= ADX_TREND_THRESHOLD
 
-    if last_fast > last_slow and price_above_trend and last_rsi < RSI_OVERBOUGHT:
+    long_ok = (
+        price_above_trend and is_trending
+        and last_macd_hist > 0 and last_plus_di > last_minus_di
+        and 40 < last_rsi < RSI_OVERBOUGHT
+    )
+    short_ok = (
+        not price_above_trend and is_trending
+        and last_macd_hist < 0 and last_minus_di > last_plus_di
+        and RSI_OVERSOLD < last_rsi < 60
+    )
+
+    if long_ok:
         direction = "LONG"
-    elif last_fast < last_slow and not price_above_trend and last_rsi > RSI_OVERSOLD:
+    elif short_ok:
         direction = "SHORT"
     else:
         return None
 
-    confidence = compute_confidence(direction, last_fast, last_slow, last_atr, price, last_trend_ema, last_rsi)
+    confidence = compute_confidence(
+        direction, last_adx, last_macd_hist, last_atr, last_plus_di, last_minus_di,
+        price, last_trend_ema, last_rsi,
+    )
 
     entries, stop_losses, take_profits = [], [], []
     for atr_mult in ENTRY_LADDER_ATR:
@@ -279,7 +334,12 @@ def generate_weekly_summary(symbol: str, code: str, chat_id: int) -> str:
     daily_pct = df["close"].pct_change() * 100
     idx_max = daily_pct.abs().idxmax()
     best_day_pct = daily_pct.loc[idx_max] if pd.notna(daily_pct.loc[idx_max]) else 0.0
-    best_day_date = df.loc[idx_max, "timestamp"].strftime("%Y-%m-%d")
+    best_day_dt = df.loc[idx_max, "timestamp"]
+    best_day_date = best_day_dt.strftime("%Y-%m-%d")
+    try:
+        best_day_shamsi = jdatetime.date.fromgregorian(date=best_day_dt.date()).strftime("%Y/%m/%d")
+    except Exception:
+        best_day_shamsi = "-"
 
     if pct_change > 10:
         trend_desc = "صعودی قوی 🚀"
@@ -298,7 +358,8 @@ def generate_weekly_summary(symbol: str, code: str, chat_id: int) -> str:
         f"بیشترین قیمت هفته: {fmt_amount(highest, chat_id)}\n"
         f"کمترین قیمت هفته: {fmt_amount(lowest, chat_id)}\n"
         f"{DIVIDER}\n"
-        f"بیشترین نوسان یک‌روزه: *{best_day_pct:+.2f}٪* در تاریخ {best_day_date}\n\n"
+        f"بیشترین نوسان یک‌روزه: *{best_day_pct:+.2f}٪*\n"
+        f"📅 تاریخ: {best_day_date} میلادی  |  {best_day_shamsi} شمسی\n\n"
         f"ℹ️ این خلاصه فقط بر پایه‌ی داده‌ی قیمته؛ دلیل خبری/بنیادی افت یا رشد در این ابزار در دسترس نیست."
     )
 
@@ -352,24 +413,32 @@ def mood_emoji(plan: TradePlan) -> str:
     if plan.direction == "LONG":
         if plan.confidence >= 85:
             return "🚀"
-        elif plan.confidence >= 75:
+        elif plan.confidence >= 70:
             return "🔥"
         return "📈"
     if plan.confidence >= 85:
         return "🔻"
-    elif plan.confidence >= 75:
+    elif plan.confidence >= 70:
         return "⚠️"
     return "📉"
 
 
 def confidence_badge(confidence: float) -> str:
-    if confidence >= 85:
-        return "🔥 فوق‌العاده قوی"
-    elif confidence >= 75:
+    if confidence >= 90:
+        return "🔥🔥 فوق‌العاده قوی"
+    elif confidence >= 85:
+        return "🔥 خیلی قوی"
+    elif confidence >= 80:
         return "⚡ قوی"
+    elif confidence >= 75:
+        return "✨ نسبتاً قوی"
+    elif confidence >= 70:
+        return "💫 متوسط رو به بالا"
     elif confidence >= 65:
-        return "✨ متوسط"
-    return "💫 ضعیف"
+        return "🌤 متوسط"
+    elif confidence >= 60:
+        return "🌥 ضعیف رو به متوسط"
+    return "💤 ضعیف"
 
 
 # ---------- قالب‌بندی پیام‌ها ----------
@@ -683,8 +752,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
         if plan:
-            dir_txt = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
-            short_caption = f"{mood_emoji(plan)} *{code}/USDT* — {dir_txt}"
+            short_caption = f"{mood_emoji(plan)} *{code}/USDT*"
             await send_coin_photo(context, chat_id, code, caption=short_caption)
             detail_text = format_plan_pretty(plan, code, chat_id)
             for chunk in split_long_message(detail_text):
@@ -769,8 +837,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         new_ids = []
         if plan:
-            dir_txt = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
-            short_caption = f"{mood_emoji(plan)} *{code}/USDT* — {dir_txt}"
+            short_caption = f"{mood_emoji(plan)} *{code}/USDT*"
             mid1 = await send_coin_photo(context, chat_id, code, caption=short_caption)
             new_ids.append(mid1)
             detail_text = format_plan_pretty(plan, code, chat_id)
