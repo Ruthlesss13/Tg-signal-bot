@@ -170,7 +170,17 @@ def fetch_current_prices() -> dict[str, float]:
     for symbol in SYMBOLS:
         try:
             ticker = exchange.fetch_ticker(symbol)
-            prices[symbol] = ticker["last"]
+            price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
+            if not price:
+                # بعضی ارزها (مثل توکن‌های خیلی جدید) فیلد last/close خالی برمی‌گردونن؛
+                # آخرین قیمت بسته‌شدن از کندل‌ها رو به‌عنوان جایگزین می‌گیریم
+                df = fetch_ohlcv(symbol, timeframe="15m", limit=2)
+                if len(df):
+                    price = df["close"].iloc[-1]
+            if price:
+                prices[symbol] = price
+            else:
+                logger.warning(f"قیمتی برای {symbol} پیدا نشد.")
         except Exception as e:
             logger.error(f"خطا در گرفتن قیمت {symbol}: {e}")
     return prices
@@ -321,25 +331,47 @@ def generate_trade_plan(symbol: str) -> TradePlan | None:
 
 
 def generate_weekly_summary(symbol: str, code: str, chat_id: int) -> str:
-    df = fetch_ohlcv(symbol, timeframe="1d", limit=8)
+    df = fetch_ohlcv(symbol, timeframe="1d", limit=15)
     if len(df) < 2:
         return f"🔸 *{code}*\n\nداده‌ی کافی برای تحلیل هفتگی در دسترس نیست."
 
-    week_ago_price = df["close"].iloc[0]
-    current_price = df["close"].iloc[-1]
+    week_df = df.tail(8)  # ۷ روز کامل + امروز
+    week_ago_price = week_df["close"].iloc[0]
+    current_price = week_df["close"].iloc[-1]
     pct_change = (current_price - week_ago_price) / week_ago_price * 100
-    highest = df["high"].max()
-    lowest = df["low"].min()
+    highest = week_df["high"].max()
+    lowest = week_df["low"].min()
+    highest_date = week_df.loc[week_df["high"].idxmax(), "timestamp"].strftime("%Y-%m-%d")
+    lowest_date = week_df.loc[week_df["low"].idxmin(), "timestamp"].strftime("%Y-%m-%d")
 
-    daily_pct = df["close"].pct_change() * 100
+    daily_pct = week_df["close"].pct_change() * 100
     idx_max = daily_pct.abs().idxmax()
     best_day_pct = daily_pct.loc[idx_max] if pd.notna(daily_pct.loc[idx_max]) else 0.0
-    best_day_dt = df.loc[idx_max, "timestamp"]
+    best_day_dt = week_df.loc[idx_max, "timestamp"]
     best_day_date = best_day_dt.strftime("%Y-%m-%d")
     try:
         best_day_shamsi = jdatetime.date.fromgregorian(date=best_day_dt.date()).strftime("%Y/%m/%d")
     except Exception:
         best_day_shamsi = "-"
+
+    # نوسان (انحراف معیار تغییرات روزانه) و تعداد روزهای مثبت/منفی
+    volatility = daily_pct.std()
+    up_days = int((daily_pct > 0).sum())
+    down_days = int((daily_pct < 0).sum())
+    avg_volume = week_df["volume"].mean()
+
+    # RSI روزانه برای زمینه‌ی مومنتوم فعلی
+    try:
+        daily_rsi = RSIIndicator(df["close"], window=14).rsi().iloc[-1]
+        rsi_txt = f"{daily_rsi:.1f}"
+        if daily_rsi > 70:
+            rsi_note = "(اشباع خرید ⚠️)"
+        elif daily_rsi < 30:
+            rsi_note = "(اشباع فروش ⚠️)"
+        else:
+            rsi_note = ""
+    except Exception:
+        rsi_txt, rsi_note = "-", ""
 
     if pct_change > 10:
         trend_desc = "صعودی قوی 🚀"
@@ -355,11 +387,18 @@ def generate_weekly_summary(symbol: str, code: str, chat_id: int) -> str:
         f"قیمت ۷ روز پیش: {fmt_amount(week_ago_price, chat_id)}\n"
         f"قیمت الان: {fmt_amount(current_price, chat_id)}\n"
         f"تغییر هفتگی: *{pct_change:+.2f}٪* — {trend_desc}\n\n"
-        f"بیشترین قیمت هفته: {fmt_amount(highest, chat_id)}\n"
-        f"کمترین قیمت هفته: {fmt_amount(lowest, chat_id)}\n"
+        f"📈 بیشترین قیمت هفته: {fmt_amount(highest, chat_id)}\n"
+        f"   📅 {highest_date}\n"
+        f"📉 کمترین قیمت هفته: {fmt_amount(lowest, chat_id)}\n"
+        f"   📅 {lowest_date}\n"
         f"{DIVIDER}\n"
-        f"بیشترین نوسان یک‌روزه: *{best_day_pct:+.2f}٪*\n"
-        f"📅 تاریخ: {best_day_date} میلادی  |  {best_day_shamsi} شمسی\n\n"
+        f"⚡ بیشترین نوسان یک‌روزه: *{best_day_pct:+.2f}٪*\n"
+        f"   📅 {best_day_date} میلادی  |  {best_day_shamsi} شمسی\n\n"
+        f"📐 نوسان‌پذیری هفته (انحراف معیار روزانه): *{volatility:.2f}٪*\n"
+        f"🟢 روزهای مثبت: {up_days}  |  🔴 روزهای منفی: {down_days}\n"
+        f"📊 میانگین حجم معاملات روزانه: `{avg_volume:,.0f}`\n"
+        f"🎯 RSI روزانه فعلی: *{rsi_txt}* {rsi_note}\n"
+        f"{DIVIDER}\n"
         f"ℹ️ این خلاصه فقط بر پایه‌ی داده‌ی قیمته؛ دلیل خبری/بنیادی افت یا رشد در این ابزار در دسترس نیست."
     )
 
@@ -383,6 +422,16 @@ def get_pref(chat_id: int) -> str:
     return user_currency.get(chat_id, "USDT")
 
 
+def fmt_irt(value: float) -> str:
+    """قیمت تومان رو متناسب با اندازه‌ش قالب‌بندی می‌کنه؛ برای مقادیر زیر ۱ تومان (ارزهای خیلی ارزون)
+    اعشار واقعی نشون می‌ده، نه اینکه گرد بشه به صفر یا یک."""
+    if value >= 1:
+        return f"{value:,.0f}"
+    if value == 0:
+        return "0"
+    return f"{value:.8f}".rstrip("0").rstrip(".")
+
+
 def fmt_amount(usdt_value: float, chat_id: int) -> str:
     pref = get_pref(chat_id)
     usdt_txt = f"`{usdt_value:,.8f}` USDT"
@@ -396,7 +445,7 @@ def fmt_amount(usdt_value: float, chat_id: int) -> str:
             return usdt_txt + "  _(نرخ تومان موقتاً در دسترس نیست)_"
         return usdt_txt
 
-    irt_txt = f"`{usdt_value * rate:,.0f}` تومان"
+    irt_txt = f"`{fmt_irt(usdt_value * rate)}` تومان"
     if pref == "IRT":
         return irt_txt
     if pref == "BOTH":
@@ -612,7 +661,8 @@ def kb_coin_detail(code: str) -> InlineKeyboardMarkup:
 def kb_suggestion(code: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"suggest_{code}")],
-        [InlineKeyboardButton("🔙 بازگشت به لیست ارزها", callback_data="menu_coins")],
+        [InlineKeyboardButton("🔙 بازگشت به مرحله قبل", callback_data=f"coin_{code}")],
+        [InlineKeyboardButton("📋 لیست ارزها", callback_data="menu_coins")],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")],
     ])
 
@@ -676,7 +726,7 @@ async def finish_start(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id
     if is_admin(user_id):
         await context.bot.set_my_commands(
             [
-                BotCommand("start", "🚀 شروع / انتخاب واحد پولی"),
+                BotCommand("start", "شروع ربات"),
                 BotCommand("menu", "🤖 نمایش منوی اصلی"),
                 BotCommand("status", "📊 وضعیت ربات"),
                 BotCommand("stop", "❌ توقف اشتراک"),
@@ -900,14 +950,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_ids = []
         await query.edit_message_text(chunks[0], parse_mode="Markdown")
         new_ids.append(query.message.message_id)
+        quick_links_kb = kb_auto_report(sorted_plans)
         for chunk in chunks[1:-1]:
             m = await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
             new_ids.append(m.message_id)
         if len(chunks) > 1:
-            m_last = await context.bot.send_message(chat_id=chat_id, text=chunks[-1], reply_markup=kb_back_main(), parse_mode="Markdown")
+            m_last = await context.bot.send_message(chat_id=chat_id, text=chunks[-1], reply_markup=quick_links_kb, parse_mode="Markdown")
             new_ids.append(m_last.message_id)
         else:
-            m_last = await context.bot.send_message(chat_id=chat_id, text="👆 نتیجه‌ی کامل بالا", reply_markup=kb_back_main())
+            m_last = await context.bot.send_message(chat_id=chat_id, text="👆 نتیجه‌ی کامل بالا — برای هر ارز، دکمه‌ش رو بزن", reply_markup=quick_links_kb)
             new_ids.append(m_last.message_id)
         set_interactive_screen(chat_id, new_ids)
 
@@ -1011,7 +1062,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app: Application):
     await app.bot.set_my_commands([
-        BotCommand("start", "🚀 شروع / انتخاب واحد پولی"),
+        BotCommand("start", "شروع ربات"),
         BotCommand("menu", "🤖 نمایش منوی اصلی"),
     ])
     asyncio.create_task(auto_report_loop(app))
