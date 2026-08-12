@@ -1,4 +1,3 @@
-```python
 """
 Telegram Signal Bot V8
 Additions:
@@ -2188,4 +2187,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
