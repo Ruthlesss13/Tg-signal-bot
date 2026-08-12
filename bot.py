@@ -1,8 +1,7 @@
 """
 ربات تلگرام سیگنال‌دهی (نوسان‌گیری) - نسخه نهایی
 --------------------------------------------------------------------------
-ارزها (۲۰ عدد): DOGE, SOL, SHIB, BTC, ETH, BNB, ZEC, ADA, DOGS, NOT,
-                LINK, LTC, UNI, GRAM, TRX, SUI, PEPE, HMSTR, BABYDOGE, PUMP
+ارزها: لیست بزرگ (۸۴ عدد) شامل ارزهای اصلی، دیفای، میم‌کوین و ...
 صرافی قیمت/تحلیل: KuCoin (اسپات)
 نرخ تتر به تومان: نوبیتکس (اول، با تلاش مجدد) و در صورت خطا Wallex (دوم)
 تاریخ: همه‌جا فقط شمسیه (jdatetime)
@@ -57,12 +56,27 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALLOWED_USER_IDS = {int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()}
 ADMIN_USER_IDS = {int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()}
 
+# این آیدی همیشه به‌عنوان کاربر عادی مجاز حساب می‌شه، حتی اگه توی ALLOWED_USER_IDS
+# (متغیر محیطی) نباشه یا اون متغیر خالی/محدود باشه.
+ALWAYS_ALLOWED_USER_IDS = {765513475}
+
 # --- تنظیمات قابل تغییر ---
 COIN_ICONS = {
+    # ۲۰ ارز قبلی
     "DOGE": "🐕", "SOL": "◎", "SHIB": "🦴", "BTC": "₿", "ETH": "Ξ",
     "BNB": "🔶", "ZEC": "🛡️", "ADA": "🔷", "DOGS": "🐾", "NOT": "💎",
     "LINK": "🔗", "LTC": "Ł", "UNI": "🦄", "GRAM": "✳️", "TRX": "⚡",
     "SUI": "💧", "PEPE": "🐸", "HMSTR": "🐹", "BABYDOGE": "🐶", "PUMP": "🚀",
+    # ارزهای جدید
+    "SPCX": "🛰️", "PENDLE": "📐", "CAKE": "🥞", "S": "💨", "DEXE": "🗳️",
+    "SKY": "☁️", "ASTER": "✴️", "HYPE": "🌊", "RENDER": "🖥️", "POL": "🟣",
+    "ONDO": "🏦", "XAUT": "🥇", "ENA": "🌐", "FLOKI": "🐕‍🦺", "TAO": "🧠",
+    "ARB": "🔵", "MAGIC": "🪄", "CFX": "🌲", "WLD": "👁️", "LDO": "🌊",
+    "DYDX": "📉", "APT": "🅰️", "ENS": "🏷️", "ONE": "🎐", "API3": "🔌",
+    "STORJ": "💾", "SLP": "🍯", "ZRX": "0️⃣", "ATOM": "⚛️", "AVAX": "🔺",
+    "AXS": "🐚", "NEAR": "Ⓝ", "GMT": "👟", "CHZ": "🌶️", "HBAR": "Ⓗ",
+    "CRO": "💠", "ETC": "⟠", "DOT": "⚪", "AAVE": "👻", "FIL": "📁",
+    "XRP": "✕", "BCH": "🟢", "A": "🏛️", "XLM": "✨",
 }
 COIN_CODES = list(COIN_ICONS.keys())
 SYMBOL_MAP = {code: f"{code}/USDT" for code in COIN_CODES}
@@ -82,6 +96,8 @@ TP_LADDER_ATR = [2.5, 4.0, 6.0]
 
 TELEGRAM_MSG_LIMIT = 3500
 IRT_RATE_TTL_SECONDS = 300
+
+COINS_GRID_COLUMNS = 4
 
 # نشانه‌ی جهت راست‌به‌چپ یونیکد (Right-to-Left Mark) — برای جلوگیری از بهم‌ریختگی
 # نمایش خط‌هایی که ترکیبی از فارسی و عدد/لاتین (مثل BTC/USDT) هستن
@@ -145,6 +161,8 @@ class TradePlan:
 # ---------- دسترسی ----------
 
 def is_allowed(user_id: int) -> bool:
+    if user_id in ALWAYS_ALLOWED_USER_IDS:
+        return True
     if not ALLOWED_USER_IDS:
         return True
     return user_id in ALLOWED_USER_IDS
@@ -498,7 +516,7 @@ BIG_DIVIDER = "═══════════════"
 def format_prices_pretty(prices: dict[str, float], chat_id: int) -> str:
     if not prices:
         return "⚠️ دریافت قیمت لحظه‌ای الان ممکن نشد. کمی بعد دوباره امتحان کن."
-    lines = ["💰 *قیمت لحظه‌ای ارزها*", DIVIDER]
+    lines = ["💰 *قیمت لحظه‌ای ارزها*", f"🕒 {shamsi_now()}", DIVIDER]
     for symbol, price in prices.items():
         code = symbol.split("/")[0]
         icon = COIN_ICONS.get(code, "🔸")
@@ -527,6 +545,7 @@ def format_plan_pretty(plan: TradePlan, code: str, chat_id: int) -> str:
 
     text = (
         f"{emoji} {icon} *{sym(code)}* — {dir_txt}\n"
+        f"🕒 {shamsi_now()}\n"
         f"📊 روند: {plan.trend}  |  RSI: {plan.rsi:.1f}\n"
         f"🎯 اطمینان: *{plan.confidence:.0f}٪*  ({badge})\n"
         f"{DIVIDER}\n"
@@ -638,7 +657,7 @@ def generate_status_text(symbol: str, code: str, chat_id: int) -> str:
             "بهتره صبر کنی تا شرایط هم‌جهت بشن."
         )
 
-    header = f"🧭 *وضعیت لحظه‌ای* {icon} *{sym(code)}*\n{DIVIDER}\n"
+    header = f"🧭 *وضعیت لحظه‌ای* {icon} *{sym(code)}*\n🕒 {shamsi_now()}\n{DIVIDER}\n"
     body = (
         f"💰 قیمت لحظه‌ای: {fmt_amount(ind['price'], chat_id)}\n"
         f"📊 روند کلی (EMA200): {ind['trend_label']}\n"
@@ -723,7 +742,8 @@ def generate_weekly_summary(symbol: str, code: str, chat_id: int) -> str:
         trend_desc = "نزولی قوی 🔻"
 
     text = (
-        f"📊 *تحلیل ۷ روز اخیر* {icon} *{code}*\n{DIVIDER}\n"
+        f"📊 *تحلیل ۷ روز اخیر* {icon} *{code}*\n"
+        f"🕒 لحظه‌ی تحلیل: {shamsi_now()}\n{DIVIDER}\n"
         f"قیمت ۷ روز پیش: {fmt_amount(week_ago_price, chat_id)}\n"
         f"قیمت الان: {fmt_amount(current_price, chat_id)}\n"
         f"تغییر هفتگی: *{pct_change:+.2f}٪* — {trend_desc}\n\n"
@@ -799,6 +819,17 @@ async def track_auto_message(app_or_ctx, chat_id: int, message_id: int):
 
 # ---------- منوهای شیشه‌ای ----------
 
+def build_grid_keyboard(buttons: list[InlineKeyboardButton], columns: int) -> list[list[InlineKeyboardButton]]:
+    """دکمه‌ها رو توی گرید با تعداد ستون ثابت می‌چینه و اگه ردیف آخر ناقص بمونه، با دکمه‌ی
+    نامرئی (بی‌اثر) پرش می‌کنه؛ همینه که باعث می‌شه عرض همه‌ی دکمه‌ها همیشه یکسان بمونه و
+    بعد از برگشتن به این منو هم اندازه‌شون کوچیک/بزرگ نشه."""
+    rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
+    if rows and len(rows[-1]) < columns:
+        missing = columns - len(rows[-1])
+        rows[-1] = rows[-1] + [InlineKeyboardButton("\u2063", callback_data="noop") for _ in range(missing)]
+    return rows
+
+
 def kb_currency() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💵 دلار (USDT)", callback_data="cur_USDT")],
@@ -819,7 +850,10 @@ def kb_main(user_id: int) -> InlineKeyboardMarkup:
         ],
     ]
     if is_admin(user_id):
-        rows.append([InlineKeyboardButton("⚙️ پنل مدیریت ویژه", callback_data="admin_panel")])
+        rows.append([
+            InlineKeyboardButton("⚙️ پنل مدیریت ویژه", callback_data="admin_panel"),
+            InlineKeyboardButton("\u2063", callback_data="noop"),
+        ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -828,14 +862,8 @@ def kb_back_main() -> InlineKeyboardMarkup:
 
 
 def kb_coins() -> InlineKeyboardMarkup:
-    rows, row = [], []
-    for c in COIN_CODES:
-        row.append(InlineKeyboardButton(f"{COIN_ICONS[c]} {c}", callback_data=f"coin_{c}"))
-        if len(row) == 3:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
+    buttons = [InlineKeyboardButton(f"{COIN_ICONS[c]} {c}", callback_data=f"coin_{c}") for c in COIN_CODES]
+    rows = build_grid_keyboard(buttons, COINS_GRID_COLUMNS)
     rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
@@ -880,15 +908,11 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
 
 
 def kb_auto_report(top_plans: list[TradePlan]) -> InlineKeyboardMarkup:
-    rows, row = [], []
+    buttons = []
     for p in top_plans:
         code = p.symbol.split("/")[0]
-        row.append(InlineKeyboardButton(f"{COIN_ICONS.get(code, '🔸')} {code}", callback_data=f"suggest_{code}_auto"))
-        if len(row) == 3:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
+        buttons.append(InlineKeyboardButton(f"{COIN_ICONS.get(code, '🔸')} {code}", callback_data=f"suggest_{code}_auto"))
+    rows = build_grid_keyboard(buttons, 3)
     rows.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
@@ -917,15 +941,15 @@ async def finish_start(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id
         await context.bot.set_my_commands(
             [
                 BotCommand("start", "شروع ربات"),
-                BotCommand("menu", "🤖 نمایش منوی اصلی"),
-                BotCommand("status", "📊 وضعیت ربات"),
-                BotCommand("stop", "❌ توقف اشتراک"),
+                BotCommand("menu", "نمایش منوی اصلی"),
+                BotCommand("status", "وضعیت ربات"),
+                BotCommand("stop", "توقف اشتراک"),
             ],
             scope=BotCommandScopeChat(chat_id=chat_id),
         )
     else:
         await context.bot.set_my_commands(
-            [BotCommand("menu", "🤖 نمایش منوی اصلی")],
+            [BotCommand("menu", "نمایش منوی اصلی")],
             scope=BotCommandScopeChat(chat_id=chat_id),
         )
     await clear_interactive_screen(context, chat_id)
@@ -945,6 +969,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     subscribed_chat_ids.add(chat_id)
+
+    if data == "noop":
+        return
 
     if data.startswith("cur_"):
         user_currency[chat_id] = data.split("_", 1)[1]
@@ -1053,13 +1080,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         plans = refresh_all_plans()
         if not plans:
-            text = "📋 *نمایش همه پیشنهادات*\n\nفعلاً هیچ سیگنال واضحی روی هیچ‌کدوم از ارزها نیست."
+            text = f"📋 *نمایش همه پیشنهادات*\n🕒 {shamsi_now()}\n\nفعلاً هیچ سیگنال واضحی روی هیچ‌کدوم از ارزها نیست."
             await query.edit_message_text(text, reply_markup=kb_back_main(), parse_mode="Markdown")
             set_interactive_screen(chat_id, [query.message.message_id])
             return
 
         sorted_plans = sorted(plans.values(), key=lambda p: p.confidence, reverse=True)
-        full_text = "📋 *نمایش همه پیشنهادات*\n\n" + f"\n\n{BIG_DIVIDER}\n\n".join(
+        full_text = f"📋 *نمایش همه پیشنهادات*\n🕒 {shamsi_now()}\n\n" + f"\n\n{BIG_DIVIDER}\n\n".join(
             format_plan_pretty(p, p.symbol.split("/")[0], chat_id) for p in sorted_plans
         )
         chunks = split_long_message(full_text)
@@ -1085,6 +1112,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         text = (
             "🛠️ *پنل مدیریت ویژه* 🛠️\n" + DIVIDER + "\n"
+            f"🕒 {shamsi_now()}\n"
             f"👥 اعضای فعال: {len(subscribed_chat_ids)}\n"
             f"⚡️ سیگنال‌های فعال الان: {len(last_plans)}\n"
             f"🪙 تعداد ارز تحت رصد: {len(COIN_CODES)}\n"
@@ -1164,6 +1192,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await guard(update):
         return
     await update.message.reply_text(
+        f"🕒 {shamsi_now()}\n"
         f"در حال رصد: {', '.join(COIN_CODES)}\n"
         f"تایم‌فریم: {TIMEFRAME}\n"
         f"فاصله گزارش خودکار: هر {CHECK_INTERVAL_SECONDS // 60} دقیقه\n"
@@ -1176,7 +1205,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("start", "شروع ربات"),
-        BotCommand("menu", "🤖 نمایش منوی اصلی"),
+        BotCommand("menu", "نمایش منوی اصلی"),
     ])
     asyncio.create_task(auto_report_loop(app))
 
