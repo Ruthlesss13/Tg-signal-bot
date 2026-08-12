@@ -2,7 +2,7 @@
 ربات تلگرام سیگنال‌دهی (نوسان‌گیری) - نسخه نهایی
 --------------------------------------------------------------------------
 ارزها: لیست بزرگ (۸۴ عدد) شامل ارزهای اصلی، دیفای، میم‌کوین و ...
-صرافی قیمت/تحلیل: KuCoin (اسپات)
+صرافی قیمت/تحلیل: MEXC (اسپات)
 نرخ تتر به تومان: نوبیتکس (اول، با تلاش مجدد) و در صورت خطا Wallex (دوم)
 تاریخ: همه‌جا فقط شمسیه (jdatetime)
 
@@ -87,7 +87,7 @@ CHECK_INTERVAL_SECONDS = 60 * 15
 TOP_SIGNALS_COUNT = 5
 RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
-ADX_TREND_THRESHOLD = 20
+ADX_TREND_THRESHOLD = 16
 AUTO_KEEP_LAST_N = 3
 
 ENTRY_LADDER_ATR = [0.0, 0.6, 1.2]
@@ -103,7 +103,7 @@ COINS_GRID_COLUMNS = 4
 # نمایش خط‌هایی که ترکیبی از فارسی و عدد/لاتین (مثل BTC/USDT) هستن
 RLM = "\u200f"
 
-exchange = ccxt.kucoin()
+exchange = ccxt.mexc()
 
 # ---------- حالت‌های در حافظه ----------
 last_plans: dict[str, "TradePlan"] = {}
@@ -346,24 +346,24 @@ def compute_indicators(symbol: str) -> dict | None:
 
 
 def decide_direction(ind: dict) -> str | None:
-    higher_tf = ind["higher_tf_trend_up"]
+    # نکته: قبلاً هم‌جهتی با تایم‌فریم ۴ ساعته «شرط اجباری» بود که همراه با بقیه‌ی فیلترها
+    # عملاً سیگنال رو به صفر می‌رسوند. الان فقط توی امتیاز اطمینان (compute_confidence) اثر
+    # می‌ذاره، نه اینجا — یعنی فیلتر سخت‌گیرانه‌تر نیست ولی کیفیت‌سنجی همچنان انجام می‌شه.
     long_ok = (
         ind["price_above_trend"] and ind["is_trending"]
         and ind["macd_hist"] > 0 and ind["plus_di"] > ind["minus_di"]
-        and 40 < ind["rsi"] < RSI_OVERBOUGHT
-        and ind["volume_ratio"] >= 0.8                      # حجم معاملات باید نزدیک یا بالای میانگین باشه
-        and 15 < ind["stoch_k"] < 95                         # نه کاملاً راکد، نه کاملاً اشباع
-        and ind["bb_percent"] < 1.05                         # قیمت خیلی افراطی خارج از باند بالا نباشه
-        and (higher_tf is None or higher_tf is True)         # هم‌جهت با روند تایم‌فریم بزرگ‌تر
+        and 35 < ind["rsi"] < 78                             # بازه‌ی کمی بازتر از قبل
+        and ind["volume_ratio"] >= 0.6                        # سخت‌گیری حجم کمتر شد
+        and 10 < ind["stoch_k"] < 97
+        and ind["bb_percent"] < 1.15
     )
     short_ok = (
         not ind["price_above_trend"] and ind["is_trending"]
         and ind["macd_hist"] < 0 and ind["minus_di"] > ind["plus_di"]
-        and RSI_OVERSOLD < ind["rsi"] < 60
-        and ind["volume_ratio"] >= 0.8
-        and 5 < ind["stoch_k"] < 85
-        and ind["bb_percent"] > -0.05
-        and (higher_tf is None or higher_tf is False)
+        and 22 < ind["rsi"] < 65
+        and ind["volume_ratio"] >= 0.6
+        and 3 < ind["stoch_k"] < 90
+        and ind["bb_percent"] > -0.15
     )
     if long_ok:
         return "LONG"
@@ -940,16 +940,16 @@ async def finish_start(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id
     if is_admin(user_id):
         await context.bot.set_my_commands(
             [
-                BotCommand("start", "شروع ربات"),
-                BotCommand("menu", "نمایش منوی اصلی"),
-                BotCommand("status", "وضعیت ربات"),
-                BotCommand("stop", "توقف اشتراک"),
+                BotCommand("start", " "),
+                BotCommand("menu", " "),
+                BotCommand("status", " "),
+                BotCommand("stop", " "),
             ],
             scope=BotCommandScopeChat(chat_id=chat_id),
         )
     else:
         await context.bot.set_my_commands(
-            [BotCommand("menu", "نمایش منوی اصلی")],
+            [BotCommand("menu", " ")],
             scope=BotCommandScopeChat(chat_id=chat_id),
         )
     await clear_interactive_screen(context, chat_id)
@@ -1204,8 +1204,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app: Application):
     await app.bot.set_my_commands([
-        BotCommand("start", "شروع ربات"),
-        BotCommand("menu", "نمایش منوی اصلی"),
+        BotCommand("start", " "),
+        BotCommand("menu", " "),
     ])
     asyncio.create_task(auto_report_loop(app))
 
