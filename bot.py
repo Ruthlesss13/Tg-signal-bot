@@ -1,13 +1,11 @@
 """
-Telegram Signal Bot V8
-Additions:
-- New indicators: EMA20, EMA50, EMA cross, ATR%, +DI/-DI, VWAP, ROC, CCI, Williams %R,
-  Bollinger Width, Volume Spike, distance from EMA200/50%, 4h ADX confirmation.
-- Signal reasons with checks/warnings.
-- Category scores: Trend, Momentum, Volume, Volatility, HTF.
-- Enhanced weekly analysis with many statistics.
-- Coin grid shows all COIN_CODES with swap status (OK/NO SWAP).
-- Removed double-counting by using category weights.
+Telegram Signal Bot V8 - Binance Edition (Complete)
+- Exchange: Binance (USDT perpetual linear swaps)
+- 64 coins with replacements for missing ones
+- Market status for all coins (SWAP OK / NO SWAP / TICKER ERROR)
+- 5-category scoring without double counting
+- Signal reasons with ✅/⚠️
+- Full weekly report with all statistics
 """
 
 import asyncio
@@ -27,6 +25,7 @@ from dotenv import load_dotenv
 from ta.momentum import RSIIndicator, StochRSIIndicator, ROCIndicator, WilliamsRIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator, CCIIndicator
 from ta.volatility import AverageTrueRange, BollingerBands
+from ta.volume import VolumeWeightedAveragePrice
 from telegram import BotCommand, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
@@ -55,21 +54,26 @@ ALWAYS_ALLOWED_USER_IDS = {
     int(x) for x in os.getenv("ALWAYS_ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()
 }
 
+# ---------- 64 coins with replacements ----------
 COIN_ICONS = {
     "DOGE": "🐕", "SOL": "◎", "SHIB": "🦴", "BTC": "₿", "ETH": "Ξ",
     "BNB": "🔶", "ZEC": "🛡️", "ADA": "🔷", "DOGS": "🐾", "NOT": "💎",
-    "LINK": "🔗", "LTC": "Ł", "UNI": "🦄", "GRAM": "✳️", "TRX": "⚡",
+    "LINK": "🔗", "LTC": "Ł", "UNI": "🦄", "TRX": "⚡", "VET": "🌿",      # replaced GRAM
     "SUI": "💧", "PEPE": "🐸", "HMSTR": "🐹", "BABYDOGE": "🐶", "PUMP": "🚀",
-    "SPCX": "🛰️", "PENDLE": "📐", "CAKE": "🥞", "S": "💨", "DEXE": "🗳️",
-    "SKY": "☁️", "ASTER": "✴️", "HYPE": "🌊", "RENDER": "🖥️", "POL": "🟣",
+    "THETA": "🌀",  # replaced SPCX
+    "PENDLE": "📐", "CAKE": "🥞", "S": "💨", "DEXE": "🗳️",
+    "SKY": "☁️", "FTM": "🔥",  # replaced ASTER
+    "HYPE": "🌊", "RENDER": "🖥️", "POL": "🟣",
     "ONDO": "🏦", "XAUT": "🥇", "ENA": "🌐", "FLOKI": "🐕‍🦺", "TAO": "🧠",
     "ARB": "🔵", "MAGIC": "🪄", "CFX": "🌲", "WLD": "👁️", "LDO": "🌊",
     "DYDX": "📉", "APT": "🅰️", "ENS": "🏷️", "ONE": "🎐", "API3": "🔌",
     "STORJ": "💾", "SLP": "🍯", "ZRX": "0️⃣", "ATOM": "⚛️", "AVAX": "🔺",
     "AXS": "🐚", "NEAR": "Ⓝ", "GMT": "👟", "CHZ": "🌶️", "HBAR": "Ⓗ",
     "CRO": "💠", "ETC": "⟠", "DOT": "⚪", "AAVE": "👻", "FIL": "📁",
-    "XRP": "✕", "BCH": "🟢", "A": "🏛️", "XLM": "✨",
+    "XRP": "✕", "BCH": "🟢", "IMX": "🛡️",  # replaced A
+    "XLM": "✨", "RNDR": "🎨",  # added to reach 64
 }
+# Ensure we have exactly 64 coins
 COIN_CODES = list(COIN_ICONS.keys())
 
 TIMEFRAME = "1h"
@@ -88,12 +92,12 @@ IRT_RATE_TTL_SECONDS = 300
 COINS_GRID_COLUMNS = 4
 AUTO_KEEP_LAST_N = 3
 
-# Category weights for final confidence
-WEIGHT_TREND = 0.30
-WEIGHT_MOMENTUM = 0.25
-WEIGHT_VOLUME = 0.15
-WEIGHT_VOLATILITY = 0.10
-WEIGHT_HTF = 0.20
+# Category weights (sum = 100)
+WEIGHT_TREND = 25
+WEIGHT_MOMENTUM = 25
+WEIGHT_VOLUME = 15
+WEIGHT_VOLATILITY = 15
+WEIGHT_HTF = 20
 
 OHLCV_TTL_SECONDS = 90
 FULL_REFRESH_TTL_SECONDS = 240
@@ -108,7 +112,8 @@ STATE_FILE = os.path.join(DATA_DIR, "state.json")
 DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 
-exchange = ccxt.mexc({
+# ---------- Binance Exchange ----------
+exchange = ccxt.binance({
     "enableRateLimit": True,
     "options": {
         "defaultType": "swap",
@@ -127,7 +132,7 @@ _irt_rate_cache = {"value": None, "ts": 0.0, "source": None}
 @dataclass
 class TradePlan:
     symbol: str
-    direction: str
+    direction: str          # "LONG" or "SHORT"
     trend: str
     rsi: float
     current_price: float = 0.0
@@ -151,12 +156,16 @@ class MarketDataCache:
         if self._initialized:
             return
         self._initialized = True
-        self.prices = {}  # code -> live ticker price
-        self.ohlcv = {tf: {} for tf in TIMEFRAMES}  # tf -> code -> DataFrame
+        self.prices = {}
+        self.ohlcv = {tf: {} for tf in TIMEFRAMES}
         self.ohlcv_updated_at = {tf: {} for tf in TIMEFRAMES}
         self.valid_codes = []
-        self.exchange_symbols = {}  # code -> real CCXT unified contract symbol
-        self.market_meta = {}  # code -> market dict
+        self.exchange_symbols = {}
+        self.market_meta = {}
+        self.market_status = {
+            code: {"status": "NO SWAP", "symbol": None, "error": None}
+            for code in COIN_CODES
+        }
         self.last_price_update = 0.0
         self.last_full_ohlcv_update = 0.0
         self.last_full_refresh_started = 0.0
@@ -178,6 +187,11 @@ class MarketDataCache:
             markets = exchange.load_markets(reload=True)
             selected = {}
             for code in COIN_CODES:
+                self.market_status[code] = {
+                    "status": "NO SWAP",
+                    "symbol": None,
+                    "error": None,
+                }
                 candidates = []
                 for symbol, market in markets.items():
                     if market.get("base") != code:
@@ -196,33 +210,33 @@ class MarketDataCache:
                         continue
                     candidates.append((symbol, market))
                 if not candidates:
+                    logger.debug("No active USDT linear swap for %s on Binance", code)
                     continue
-                # Prefer the canonical USDT-settled unified symbol.
-                candidates.sort(
-                    key=lambda item: (
-                        0 if item[0] == f"{code}/USDT:USDT" else 1,
-                        item[0],
-                    )
-                )
+                candidates.sort(key=lambda x: x[0])
                 symbol, market = candidates[0]
                 selected[code] = symbol
                 self.market_meta[code] = market
+                self.market_status[code] = {
+                    "status": "SWAP OK",
+                    "symbol": symbol,
+                    "error": None,
+                }
             self.exchange_symbols = selected
             self.valid_codes = list(selected.keys())
             logger.info(
-                "MEXC swap markets: %s/%s selected (USDT linear perpetual only)",
+                "Binance swap markets: %s/%s selected (USDT linear perpetual)",
                 len(self.valid_codes), len(COIN_CODES),
             )
-            for code in COIN_CODES:
-                if code not in selected:
-                    logger.debug("No active USDT linear swap for %s", code)
             if not self.valid_codes:
-                logger.error("No MEXC USDT linear swap market was found.")
+                logger.error("No Binance USDT linear swap market was found.")
         except Exception as e:
-            logger.exception(
-                "load_markets failed: %s [%s]",
-                e, type(e).__name__,
-            )
+            logger.exception("load_markets failed: %s", e)
+            for code in COIN_CODES:
+                self.market_status[code] = {
+                    "status": "NO SWAP",
+                    "symbol": None,
+                    "error": f"{type(e).__name__}: {e}",
+                }
 
     def symbol_for_code(self, code) -> Optional[str]:
         return self.exchange_symbols.get(code)
@@ -269,27 +283,21 @@ class MarketDataCache:
 
     @staticmethod
     def _drop_forming_candle(df):
-        """Remove the latest candle because it may still be forming."""
         if df is None or len(df) < 2:
             return df
         now = pd.Timestamp.now(tz="UTC")
         latest = df["timestamp"].iloc[-1]
-        # A candle is considered potentially open if its timestamp is newer
-        # than the last completed interval.
         timeframe_delta = None
         if len(df) >= 2:
             timeframe_delta = df["timestamp"].iloc[-1] - df["timestamp"].iloc[-2]
         if timeframe_delta is not None and timeframe_delta > pd.Timedelta(0):
             if latest + timeframe_delta > now:
                 return df.iloc[:-1].copy().reset_index(drop=True)
-        # Conservative fallback: latest daily/hourly candle can be open.
         return df.iloc[:-1].copy().reset_index(drop=True)
 
     async def update_prices(self, force=False):
-        if not self.valid_codes:
+        if not self.exchange_symbols:
             self._load_markets()
-        if not self.valid_codes:
-            return self.prices
         if (
             not force
             and self.last_price_update
@@ -299,6 +307,8 @@ class MarketDataCache:
 
         async def fetch_one(code):
             symbol = self.symbol_for_code(code)
+            if not symbol:
+                return code, None
             async with self._price_sem:
                 try:
                     ticker = await asyncio.to_thread(exchange.fetch_ticker, symbol)
@@ -306,29 +316,38 @@ class MarketDataCache:
                         ticker.get("last") or ticker.get("close")
                         or ticker.get("bid") or ticker.get("ask")
                     )
-                    return code, float(price) if price is not None else None
+                    if price is None:
+                        raise ValueError("ticker has no usable price")
+                    self.market_status[code] = {
+                        **self.market_status.get(code, {}),
+                        "status": "SWAP OK",
+                        "symbol": symbol,
+                        "error": None,
+                    }
+                    return code, float(price)
                 except Exception as e:
+                    self.market_status[code] = {
+                        **self.market_status.get(code, {}),
+                        "status": "TICKER ERROR",
+                        "symbol": symbol,
+                        "error": f"{type(e).__name__}: {e}",
+                    }
                     logger.warning(
                         "ticker failed | code=%s | type=%s | symbol=%s | error=%s",
                         code, type(e).__name__, symbol, e,
                     )
                     return code, None
 
-        results = await asyncio.gather(
-            *(fetch_one(code) for code in self.valid_codes)
-        )
+        results = await asyncio.gather(*(fetch_one(c) for c in COIN_CODES))
         self.prices = {code: price for code, price in results if price is not None}
         self.last_price_update = time.time()
-        logger.info("Live prices loaded: %s symbols", len(self.prices))
+        logger.info("Live prices loaded: %s/%s", len(self.prices), len(COIN_CODES))
         return self.prices
 
     async def _fetch_ohlcv_symbol(self, code, timeframe, limit=250):
         symbol = self.symbol_for_code(code)
         if not symbol:
-            logger.warning(
-                "OHLCV skipped | code=%s | reason=no_swap_symbol",
-                code,
-            )
+            logger.warning("OHLCV skipped | code=%s | reason=no_swap_symbol", code)
             return None
         async with self._sem:
             try:
@@ -338,29 +357,22 @@ class MarketDataCache:
                 df = self._to_dataframe(raw)
                 if df is None or len(df) < 10:
                     logger.warning(
-                        "OHLCV insufficient | code=%s | type=%s | symbol=%s | tf=%s | rows=%s",
-                        code,
-                        self.market_meta.get(code, {}).get("type"),
-                        symbol, timeframe,
-                        0 if df is None else len(df),
+                        "OHLCV insufficient | code=%s | symbol=%s | tf=%s | rows=%s",
+                        code, symbol, timeframe, 0 if df is None else len(df),
                     )
                     return None
-                # Never use an open candle for analysis.
                 closed = self._drop_forming_candle(df)
                 if closed is None or len(closed) < 5:
                     logger.warning(
                         "OHLCV closed data insufficient | code=%s | symbol=%s | tf=%s | rows=%s",
-                        code, symbol, timeframe,
-                        0 if closed is None else len(closed),
+                        code, symbol, timeframe, 0 if closed is None else len(closed),
                     )
                     return None
                 return closed
             except Exception as e:
-                market = self.market_meta.get(code, {})
                 logger.warning(
-                    "OHLCV failed | code=%s | type=%s | symbol=%s | market_type=%s | tf=%s | error=%s",
-                    code, type(e).__name__, symbol,
-                    market.get("type"), timeframe, e,
+                    "OHLCV failed | code=%s | symbol=%s | tf=%s | error=%s",
+                    code, symbol, timeframe, e,
                 )
                 return None
 
@@ -404,11 +416,7 @@ class MarketDataCache:
             self.last_full_refresh_started = now
 
             async def one(code):
-                # force=False here because this function already owns the
-                # heavy refresh decision and per-symbol lock.
-                await self.ensure_symbol_data(
-                    code, TIMEFRAMES, force=force,
-                )
+                await self.ensure_symbol_data(code, TIMEFRAMES, force=force)
             await asyncio.gather(*(one(code) for code in target_codes))
             self.last_full_ohlcv_update = time.time()
             logger.info(
@@ -423,11 +431,7 @@ class MarketDataCache:
         df = self.ohlcv["1h"].get(code)
         df4 = self.ohlcv["4h"].get(code)
         if df is None or len(df) < 210:
-            logger.warning(
-                "Indicators insufficient | code=%s | rows=%s",
-                code, 0 if df is None else len(df),
-            )
-            # One targeted retry only.
+            logger.warning("Indicators insufficient | code=%s | rows=%s", code, 0 if df is None else len(df))
             await self.ensure_symbol_data(code, ("1h", "4h"), force=True)
             df = self.ohlcv["1h"].get(code)
             df4 = self.ohlcv["4h"].get(code)
@@ -435,111 +439,121 @@ class MarketDataCache:
                 return None
 
         try:
-            # Basic indicators
             close = df["close"]
-            ema200 = EMAIndicator(close, window=200).ema_indicator()
-            ema50 = EMAIndicator(close, window=50).ema_indicator()
+
+            # ===================== Trend =====================
             ema20 = EMAIndicator(close, window=20).ema_indicator()
+            ema50 = EMAIndicator(close, window=50).ema_indicator()
+            ema200 = EMAIndicator(close, window=200).ema_indicator()
 
+            # ===================== Momentum =====================
             rsi = RSIIndicator(close, window=14).rsi()
-
-            atr = AverageTrueRange(
-                df["high"], df["low"], close, window=14
-            ).average_true_range()
-
+            stoch = StochRSIIndicator(close, window=14, smooth1=3, smooth2=3)
+            stoch_k = stoch.stochrsi_k() * 100
             macd = MACD(close, window_slow=26, window_fast=12, window_sign=9)
+            macd_line = macd.macd()
+            macd_signal = macd.macd_signal()
             macd_hist = macd.macd_diff()
+            roc = ROCIndicator(close, window=12).roc()
+            cci = CCIIndicator(df["high"], df["low"], close, window=20).cci()
+            williams = WilliamsRIndicator(df["high"], df["low"], close, lbp=14).williams_r()
 
+            # ===================== Trend Strength =====================
             adx_ind = ADXIndicator(df["high"], df["low"], close, window=14)
             adx = adx_ind.adx()
             plus_di = adx_ind.adx_pos()
             minus_di = adx_ind.adx_neg()
 
-            stoch = StochRSIIndicator(close, window=14, smooth1=3, smooth2=3)
-            stoch_k = stoch.stochrsi_k() * 100
-
+            # ===================== Volatility =====================
+            atr = AverageTrueRange(df["high"], df["low"], close, window=14).average_true_range()
             bb = BollingerBands(close, window=20, window_dev=2)
             bb_percent = bb.bollinger_pband()
-            bb_width = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg() * 100
+            bb_width = bb.bollinger_wband()
 
+            # ===================== Volume =====================
             volume_sma = df["volume"].rolling(20).mean()
             volume_ratio = df["volume"] / volume_sma
+            volume_ma20 = df["volume"].rolling(20).mean()
+            volume_ma50 = df["volume"].rolling(50).mean()
 
-            # Additional indicators
-            roc = ROCIndicator(close, window=10).roc()
-            cci = CCIIndicator(df["high"], df["low"], close, window=20).cci()
-            williams_r = WilliamsRIndicator(df["high"], df["low"], close, lbp=14).williams_r()
+            # ===================== VWAP =====================
+            vwap = VolumeWeightedAveragePrice(
+                high=df["high"], low=df["low"], close=close, volume=df["volume"], window=20
+            ).volume_weighted_average_price()
 
-            # VWAP approximation using cumulative typical price * volume
-            typical = (df["high"] + df["low"] + close) / 3
-            cum_typical_vol = (typical * df["volume"]).cumsum()
-            cum_vol = df["volume"].cumsum()
-            vwap = cum_typical_vol / cum_vol
+            # ===================== Current Values =====================
+            price = float(close.iloc[-1])
+            atr_value = float(atr.iloc[-1])
+            atr_pct = (atr_value / price * 100) if price > 0 else 0
+            ema20_value = float(ema20.iloc[-1])
+            ema50_value = float(ema50.iloc[-1])
+            ema200_value = float(ema200.iloc[-1])
+            price_ema200_pct = ((price - ema200_value) / ema200_value * 100)
+            price_ema50_pct = ((price - ema50_value) / ema50_value * 100)
 
-            # 4h indicators
-            htf_trend_up = None
-            adx_4h = None
+            # ===================== EMA Cross =====================
+            ema20_prev = float(ema20.iloc[-2]) if len(ema20) >= 2 else ema20_value
+            ema50_prev = float(ema50.iloc[-2]) if len(ema50) >= 2 else ema50_value
+            bullish_cross = (ema20_prev <= ema50_prev and ema20_value > ema50_value)
+            bearish_cross = (ema20_prev >= ema50_prev and ema20_value < ema50_value)
+
+            # ===================== Volume Spike =====================
+            vr = float(volume_ratio.iloc[-1])
+            volume_spike = vr >= 1.5
+            volume_trend_up = (float(volume_ma20.iloc[-1]) > float(volume_ma50.iloc[-1]))
+
+            # ===================== Higher Timeframe =====================
+            higher_tf_up = None
+            ema4_value = None
             if df4 is not None and len(df4) >= 205:
-                close4 = df4["close"]
-                ema4 = EMAIndicator(close4, window=200).ema_indicator().iloc[-1]
-                if pd.notna(ema4):
-                    htf_trend_up = bool(close4.iloc[-1] > ema4)
-                # 4h ADX
-                adx4_ind = ADXIndicator(df4["high"], df4["low"], close4, window=14)
-                adx_4h = adx4_ind.adx().iloc[-1]
-
-            # Prices
-            current_price = float(close.iloc[-1])
-            ema200_val = float(ema200.iloc[-1])
-            ema50_val = float(ema50.iloc[-1])
-            ema20_val = float(ema20.iloc[-1])
-
-            # Distances
-            dist_ema200 = (current_price - ema200_val) / ema200_val * 100
-            dist_ema50 = (current_price - ema50_val) / ema50_val * 100
-
-            # Cross
-            ema20_gt_ema50 = ema20_val > ema50_val
+                ema4 = EMAIndicator(df4["close"], window=200).ema_indicator()
+                ema4_value = ema4.iloc[-1]
+                if pd.notna(ema4_value):
+                    higher_tf_up = bool(df4["close"].iloc[-1] > ema4_value)
 
             values = {
-                "price": current_price,
-                "rsi": rsi.iloc[-1],
-                "atr": atr.iloc[-1],
-                "atr_percent": (atr.iloc[-1] / current_price) * 100,
-                "ema200": ema200_val,
-                "ema50": ema50_val,
-                "ema20": ema20_val,
-                "ema20_gt_ema50": ema20_gt_ema50,
-                "macd_hist": macd_hist.iloc[-1],
-                "adx": adx.iloc[-1],
-                "plus_di": plus_di.iloc[-1],
-                "minus_di": minus_di.iloc[-1],
-                "stoch_k": stoch_k.iloc[-1],
-                "bb_percent": bb_percent.iloc[-1],
-                "bb_width": bb_width.iloc[-1],
-                "volume_ratio": volume_ratio.iloc[-1],
-                "roc": roc.iloc[-1],
-                "cci": cci.iloc[-1],
-                "williams_r": williams_r.iloc[-1],
-                "vwap": vwap.iloc[-1],
-                "dist_ema200": dist_ema200,
-                "dist_ema50": dist_ema50,
-                "higher_tf_trend_up": htf_trend_up,
-                "adx_4h": adx_4h,
-                "price_above_trend": bool(current_price > ema200_val),
-                "trend_label": "صعودی 📈" if current_price > ema200_val else "نزولی 📉",
+                "price": price,
+                "ema20": ema20_value,
+                "ema50": ema50_value,
+                "ema200": ema200_value,
+                "price_above_ema20": price > ema20_value,
+                "price_above_ema50": price > ema50_value,
+                "price_above_trend": price > ema200_value,
+                "price_ema50_pct": price_ema50_pct,
+                "price_ema200_pct": price_ema200_pct,
+                "ema20_above_ema50": ema20_value > ema50_value,
+                "ema20_bullish_cross": bullish_cross,
+                "ema20_bearish_cross": bearish_cross,
+                "rsi": float(rsi.iloc[-1]),
+                "stoch_k": float(stoch_k.iloc[-1]),
+                "macd": float(macd_line.iloc[-1]),
+                "macd_signal": float(macd_signal.iloc[-1]),
+                "macd_hist": float(macd_hist.iloc[-1]),
+                "roc": float(roc.iloc[-1]),
+                "cci": float(cci.iloc[-1]),
+                "williams_r": float(williams.iloc[-1]),
+                "adx": float(adx.iloc[-1]),
+                "plus_di": float(plus_di.iloc[-1]),
+                "minus_di": float(minus_di.iloc[-1]),
+                "atr": atr_value,
+                "atr_pct": atr_pct,
+                "bb_percent": float(bb_percent.iloc[-1]),
+                "bb_width": float(bb_width.iloc[-1]),
+                "volume_ratio": vr,
+                "volume_spike": volume_spike,
+                "volume_trend_up": volume_trend_up,
+                "vwap": float(vwap.iloc[-1]),
+                "price_above_vwap": price > float(vwap.iloc[-1]),
+                "higher_tf_trend_up": higher_tf_up,
+                "higher_tf_ema200": ema4_value,
+                "trend_label": "صعودی 📈" if price > ema200_value else "نزولی 📉",
                 "is_trending": bool(adx.iloc[-1] >= ADX_TREND_THRESHOLD),
             }
-
-            if any(pd.isna(v) for v in values.values() if not isinstance(v, bool)):
-                logger.warning("Incomplete indicators | code=%s", code)
+            if any(pd.isna(v) for v in values.values() if isinstance(v, (int, float))):
                 return None
             return values
         except Exception as e:
-            logger.exception(
-                "Indicator error | code=%s | type=%s | error=%s",
-                code, type(e).__name__, e,
-            )
+            logger.exception("Indicator error | code=%s | error=%s", code, e)
             return None
 
     async def get_weekly_data(self, code):
@@ -574,15 +588,12 @@ class MarketDataCache:
                 self._funding_cache[code] = {"value": value, "ts": time.time()}
                 return value
             except Exception as e:
-                logger.debug(
-                    "Funding failed | code=%s | type=%s | symbol=%s | error=%s",
-                    code, type(e).__name__, symbol, e,
-                )
+                logger.debug("Funding failed | code=%s | error=%s", code, e)
                 return 0.0
 
 cache = MarketDataCache()
 
-
+# ---------- Helper functions ----------
 def is_allowed(user_id):
     if user_id in ALWAYS_ALLOWED_USER_IDS or user_id in ADMIN_USER_IDS:
         return True
@@ -590,10 +601,8 @@ def is_allowed(user_id):
         return True
     return user_id in ALLOWED_USER_IDS
 
-
 def is_admin(user_id):
     return user_id in ADMIN_USER_IDS
-
 
 async def guard(update):
     user = update.effective_user
@@ -605,24 +614,16 @@ async def guard(update):
         return False
     return True
 
-
 def fetch_irt_rate_nobitex():
-    last_error = None
     for _ in range(3):
         try:
-            r = requests.get(
-                "https://api.nobitex.ir/market/stats",
-                params={"srcCurrency": "usdt", "dstCurrency": "rls"},
-                timeout=8,
-            )
+            r = requests.get("https://api.nobitex.ir/market/stats", params={"srcCurrency": "usdt", "dstCurrency": "rls"}, timeout=8)
             r.raise_for_status()
             rial = float(r.json()["stats"]["usdt-rls"]["latest"])
             return rial / 10
-        except Exception as e:
-            last_error = e
+        except Exception:
             time.sleep(1)
-    raise last_error
-
+    raise RuntimeError("Nobitex failed")
 
 def fetch_irt_rate_wallex():
     r = requests.get("https://api.wallex.ir/v1/markets", timeout=8)
@@ -630,15 +631,10 @@ def fetch_irt_rate_wallex():
     data = r.json()
     return float(data["result"]["symbols"]["USDTTMN"]["stats"]["lastPrice"])
 
-
 def get_irt_rate():
     now = time.time()
-    if (
-        _irt_rate_cache["value"] is not None
-        and now - _irt_rate_cache["ts"] < IRT_RATE_TTL_SECONDS
-    ):
+    if _irt_rate_cache["value"] is not None and now - _irt_rate_cache["ts"] < IRT_RATE_TTL_SECONDS:
         return _irt_rate_cache["value"]
-
     for name, fn in (("nobitex", fetch_irt_rate_nobitex), ("wallex", fetch_irt_rate_wallex)):
         try:
             rate = fn()
@@ -649,10 +645,8 @@ def get_irt_rate():
             logger.warning("IRT rate %s failed: %s", name, e)
     return _irt_rate_cache["value"]
 
-
 def get_pref(chat_id):
     return user_currency.get(chat_id, "USDT")
-
 
 def fmt_irt(value):
     if value >= 1:
@@ -661,13 +655,11 @@ def fmt_irt(value):
         return "0"
     return f"{value:.10f}".rstrip("0").rstrip(".")
 
-
 def fmt_amount(usdt_value, chat_id):
     usdt_txt = f"{RLM}{usdt_value:,.10f} USDT"
     pref = get_pref(chat_id)
     if pref == "USDT":
         return usdt_txt
-
     rate = get_irt_rate()
     if not rate:
         return usdt_txt + " _(نرخ تومان موقتاً در دسترس نیست)_"
@@ -676,15 +668,12 @@ def fmt_amount(usdt_value, chat_id):
         return irt_txt
     return f"{usdt_txt}\n {irt_txt}"
 
-
 def sym(code):
     return f"{RLM}{code}/USDT{RLM}"
-
 
 def shamsi_now():
     dt = datetime.now(TEHRAN_TZ) if TEHRAN_TZ else datetime.now()
     return jdatetime.datetime.fromgregorian(datetime=dt).strftime("%Y/%m/%d - %H:%M")
-
 
 def shamsi_date(dt):
     try:
@@ -696,10 +685,8 @@ def shamsi_date(dt):
     except Exception:
         return "-"
 
-
 def rtl_lines(text):
     return "\n".join((RLM + line) if line.strip() else line for line in text.split("\n"))
-
 
 def confidence_badge(confidence):
     if confidence >= 90:
@@ -718,398 +705,215 @@ def confidence_badge(confidence):
         return "🌥 قابل بررسی"
     return "💤 ضعیف"
 
-
 def mood_emoji(plan):
     if plan.direction == "LONG":
         return "🚀" if plan.confidence >= 85 else "🔥" if plan.confidence >= 70 else "📈"
     return "🔻" if plan.confidence >= 85 else "⚠️" if plan.confidence >= 70 else "📉"
 
+# ---------- New Scoring System ----------
+def category_scores(direction, ind):
+    long_side = direction == "LONG"
 
-def compute_signal_scores(ind, direction):
-    """
-    Returns (total_score, category_scores_dict, reasons_list)
-    category_scores: trend, momentum, volume, volatility, htf
-    reasons: list of (emoji, text) where emoji is '✅' or '⚠️'
-    """
-    # Initialize scores
-    trend_score = 0
-    mom_score = 0
-    vol_score = 0
-    vola_score = 0
-    htf_score = 0
-    reasons = []
-
-    # --- Trend category ---
-    price_above_ema200 = ind["price_above_trend"]
-    price_above_ema50 = ind["price"] > ind["ema50"]
-    ema20_gt_ema50 = ind["ema20_gt_ema50"]
-    adx = ind["adx"]
-    plus_di = ind["plus_di"]
-    minus_di = ind["minus_di"]
-    di_aligned = plus_di > minus_di if direction == "LONG" else minus_di > plus_di
-    dist_ema200 = ind["dist_ema200"]
-    dist_ema50 = ind["dist_ema50"]
-
-    if direction == "LONG":
-        if price_above_ema200:
-            trend_score += 20
-            reasons.append(("✅", "قیمت بالای EMA200"))
-        else:
-            reasons.append(("⚠️", f"قیمت پایین‌تر از EMA200 ({dist_ema200:+.1f}%)"))
-
-        if price_above_ema50:
-            trend_score += 10
-            reasons.append(("✅", "قیمت بالای EMA50"))
-        else:
-            reasons.append(("⚠️", f"قیمت پایین‌تر از EMA50 ({dist_ema50:+.1f}%)"))
-
-        if ema20_gt_ema50:
-            trend_score += 10
-            reasons.append(("✅", "EMA20 بالای EMA50"))
-        else:
-            reasons.append(("⚠️", "EMA20 پایین‌تر از EMA50"))
-
-        if adx >= 25:
-            trend_score += 15
-            reasons.append(("✅", f"ADX = {adx:.1f} (روند قوی)"))
-        elif adx >= ADX_TREND_THRESHOLD:
-            trend_score += 10
-            reasons.append(("✅", f"ADX = {adx:.1f} (روند متوسط)"))
-        else:
-            reasons.append(("⚠️", f"ADX = {adx:.1f} (روند ضعیف)"))
-
-        if di_aligned:
-            trend_score += 10
-            reasons.append(("✅", "+DI > -DI" if direction == "LONG" else "-DI > +DI"))
-        else:
-            reasons.append(("⚠️", "جهت DI مخالف است"))
-
-    else:  # SHORT
-        if not price_above_ema200:
-            trend_score += 20
-            reasons.append(("✅", "قیمت پایین‌تر از EMA200"))
-        else:
-            reasons.append(("⚠️", f"قیمت بالای EMA200 ({dist_ema200:+.1f}%)"))
-
-        if not price_above_ema50:
-            trend_score += 10
-            reasons.append(("✅", "قیمت پایین‌تر از EMA50"))
-        else:
-            reasons.append(("⚠️", f"قیمت بالای EMA50 ({dist_ema50:+.1f}%)"))
-
-        if not ema20_gt_ema50:
-            trend_score += 10
-            reasons.append(("✅", "EMA20 پایین‌تر از EMA50"))
-        else:
-            reasons.append(("⚠️", "EMA20 بالای EMA50"))
-
-        if adx >= 25:
-            trend_score += 15
-            reasons.append(("✅", f"ADX = {adx:.1f} (روند قوی)"))
-        elif adx >= ADX_TREND_THRESHOLD:
-            trend_score += 10
-            reasons.append(("✅", f"ADX = {adx:.1f} (روند متوسط)"))
-        else:
-            reasons.append(("⚠️", f"ADX = {adx:.1f} (روند ضعیف)"))
-
-        if di_aligned:
-            trend_score += 10
-            reasons.append(("✅", "-DI > +DI" if direction == "SHORT" else "+DI > -DI"))
-        else:
-            reasons.append(("⚠️", "جهت DI مخالف است"))
-
-    # Cap trend
-    trend_score = min(100, trend_score)
-
-    # --- Momentum category ---
-    rsi = ind["rsi"]
-    macd_hist = ind["macd_hist"]
-    roc = ind["roc"]
-    cci = ind["cci"]
-    williams_r = ind["williams_r"]
-    stoch_k = ind["stoch_k"]
-
-    if direction == "LONG":
-        # RSI: prefer 45-65
-        if 45 <= rsi <= 65:
-            mom_score += 15
-            reasons.append(("✅", f"RSI = {rsi:.1f} (منطقه مطلوب)"))
-        elif 35 <= rsi < 45 or 65 < rsi <= 72:
-            mom_score += 10
-            reasons.append(("⚠️", f"RSI = {rsi:.1f} (نزدیک مرز)"))
-        else:
-            reasons.append(("⚠️", f"RSI = {rsi:.1f} (خارج از محدوده)"))
-
-        # MACD positive
-        if macd_hist > 0:
-            mom_score += 10
-            reasons.append(("✅", "MACD مثبت"))
-        else:
-            reasons.append(("⚠️", "MACD منفی"))
-
-        # ROC positive
-        if roc > 0:
-            mom_score += 5
-            reasons.append(("✅", f"ROC = {roc:.1f}% (مثبت)"))
-        else:
-            reasons.append(("⚠️", f"ROC = {roc:.1f}% (منفی)"))
-
-        # CCI > 0 (but not overbought)
-        if cci > 0 and cci < 100:
-            mom_score += 5
-            reasons.append(("✅", f"CCI = {cci:.1f} (صعودی)"))
-        elif cci >= 100:
-            mom_score += 2
-            reasons.append(("⚠️", f"CCI = {cci:.1f} (اشباع خرید)"))
-        else:
-            reasons.append(("⚠️", f"CCI = {cci:.1f} (نزولی)"))
-
-        # Williams %R: > -20 overbought, < -80 oversold. Prefer -20 to -80
-        if -80 <= williams_r <= -20:
-            mom_score += 5
-            reasons.append(("✅", f"Williams %R = {williams_r:.1f} (نرمال)"))
-        elif williams_r < -80:
-            mom_score += 7
-            reasons.append(("✅", f"Williams %R = {williams_r:.1f} (اشباع فروش)"))
-        else:
-            reasons.append(("⚠️", f"Williams %R = {williams_r:.1f} (اشباع خرید)"))
-
-        # Stoch RSI: prefer 20-70
-        if 20 <= stoch_k <= 70:
-            mom_score += 5
-            reasons.append(("✅", f"Stoch RSI = {stoch_k:.1f} (نرمال)"))
-        elif stoch_k < 20:
-            mom_score += 7
-            reasons.append(("✅", f"Stoch RSI = {stoch_k:.1f} (اشباع فروش)"))
-        else:
-            reasons.append(("⚠️", f"Stoch RSI = {stoch_k:.1f} (نزدیک اشباع خرید)"))
-
-    else:  # SHORT
-        # RSI: prefer 35-55
-        if 35 <= rsi <= 55:
-            mom_score += 15
-            reasons.append(("✅", f"RSI = {rsi:.1f} (منطقه مطلوب)"))
-        elif 28 <= rsi < 35 or 55 < rsi <= 65:
-            mom_score += 10
-            reasons.append(("⚠️", f"RSI = {rsi:.1f} (نزدیک مرز)"))
-        else:
-            reasons.append(("⚠️", f"RSI = {rsi:.1f} (خارج از محدوده)"))
-
-        # MACD negative
-        if macd_hist < 0:
-            mom_score += 10
-            reasons.append(("✅", "MACD منفی"))
-        else:
-            reasons.append(("⚠️", "MACD مثبت"))
-
-        # ROC negative
-        if roc < 0:
-            mom_score += 5
-            reasons.append(("✅", f"ROC = {roc:.1f}% (منفی)"))
-        else:
-            reasons.append(("⚠️", f"ROC = {roc:.1f}% (مثبت)"))
-
-        # CCI < 0 (but not oversold)
-        if cci < 0 and cci > -100:
-            mom_score += 5
-            reasons.append(("✅", f"CCI = {cci:.1f} (نزولی)"))
-        elif cci <= -100:
-            mom_score += 2
-            reasons.append(("⚠️", f"CCI = {cci:.1f} (اشباع فروش)"))
-        else:
-            reasons.append(("⚠️", f"CCI = {cci:.1f} (صعودی)"))
-
-        # Williams %R: > -20 overbought, < -80 oversold. Prefer -20 to -80
-        if -80 <= williams_r <= -20:
-            mom_score += 5
-            reasons.append(("✅", f"Williams %R = {williams_r:.1f} (نرمال)"))
-        elif williams_r > -20:
-            mom_score += 7
-            reasons.append(("✅", f"Williams %R = {williams_r:.1f} (اشباع خرید)"))
-        else:
-            reasons.append(("⚠️", f"Williams %R = {williams_r:.1f} (اشباع فروش)"))
-
-        # Stoch RSI: prefer 30-80
-        if 30 <= stoch_k <= 80:
-            mom_score += 5
-            reasons.append(("✅", f"Stoch RSI = {stoch_k:.1f} (نرمال)"))
-        elif stoch_k > 80:
-            mom_score += 7
-            reasons.append(("✅", f"Stoch RSI = {stoch_k:.1f} (اشباع خرید)"))
-        else:
-            reasons.append(("⚠️", f"Stoch RSI = {stoch_k:.1f} (نزدیک اشباع فروش)"))
-
-    mom_score = min(100, mom_score)
-
-    # --- Volume category ---
-    vol_ratio = ind["volume_ratio"]
-    if vol_ratio >= 1.5:
-        vol_score += 30
-        reasons.append(("✅", f"حجم = {vol_ratio:.2f}× میانگین (اسپایک)"))
-    elif vol_ratio >= 1.2:
-        vol_score += 20
-        reasons.append(("✅", f"حجم = {vol_ratio:.2f}× میانگین (بالا)"))
-    elif vol_ratio >= 0.8:
-        vol_score += 10
-        reasons.append(("⚠️", f"حجم = {vol_ratio:.2f}× میانگین (متوسط)"))
+    # ============ TREND / 25 ============
+    trend = 0
+    if long_side:
+        if ind["price_above_ema200"]:
+            trend += 8
+        if ind["ema20_above_ema50"]:
+            trend += 7
+        if ind["price_above_ema50"]:
+            trend += 4
+        if ind["ema20_bullish_cross"]:
+            trend += 3
+        if ind["adx"] >= 25:
+            trend += 3
     else:
-        reasons.append(("⚠️", f"حجم = {vol_ratio:.2f}× میانگین (کم)"))
+        if not ind["price_above_ema200"]:
+            trend += 8
+        if not ind["ema20_above_ema50"]:
+            trend += 7
+        if not ind["price_above_ema50"]:
+            trend += 4
+        if ind["ema20_bearish_cross"]:
+            trend += 3
+        if ind["adx"] >= 25:
+            trend += 3
+    trend = min(trend, 25)
 
-    # Also check if price is above VWAP (for long) or below (for short)
-    vwap = ind["vwap"]
-    if direction == "LONG":
-        if ind["price"] > vwap:
-            vol_score += 10
-            reasons.append(("✅", "قیمت بالای VWAP"))
-        else:
-            reasons.append(("⚠️", "قیمت پایین‌تر از VWAP"))
+    # ============ MOMENTUM / 25 ============
+    momentum = 0
+    macd_ok = ind["macd_hist"] > 0 if long_side else ind["macd_hist"] < 0
+    di_ok = ind["plus_di"] > ind["minus_di"] if long_side else ind["minus_di"] > ind["plus_di"]
+    roc_ok = ind["roc"] > 0 if long_side else ind["roc"] < 0
+    cci_ok = ind["cci"] > 0 if long_side else ind["cci"] < 0
+    williams_ok = ind["williams_r"] > -80 if long_side else ind["williams_r"] < -20
+
+    if macd_ok:
+        momentum += 7
+    if di_ok:
+        momentum += 5
+    if roc_ok:
+        momentum += 5
+    if cci_ok:
+        momentum += 4
+    if williams_ok:
+        momentum += 4
+    momentum = min(momentum, 25)
+
+    # ============ VOLUME / 15 ============
+    volume = 0
+    if ind["volume_ratio"] >= 1.5:
+        volume += 8
+    elif ind["volume_ratio"] >= 1.0:
+        volume += 5
+    elif ind["volume_ratio"] >= 0.7:
+        volume += 2
+    if ind["volume_trend_up"]:
+        volume += 4
+    if ind["volume_spike"]:
+        volume += 3
+    volume = min(volume, 15)
+
+    # ============ VOLATILITY / 15 ============
+    volatility = 0
+    if 0.5 <= ind["atr_pct"] <= 5:
+        volatility += 6
+    elif ind["atr_pct"] <= 8:
+        volatility += 4
     else:
-        if ind["price"] < vwap:
-            vol_score += 10
-            reasons.append(("✅", "قیمت پایین‌تر از VWAP"))
-        else:
-            reasons.append(("⚠️", "قیمت بالای VWAP"))
+        volatility += 1
 
-    vol_score = min(100, vol_score)
+    distance = abs(ind["price_ema200_pct"])
+    if distance <= 5:
+        volatility += 4
+    elif distance <= 10:
+        volatility += 2
 
-    # --- Volatility category ---
-    atr_pct = ind["atr_percent"]
-    bb_width = ind["bb_width"]
-    bb_percent = ind["bb_percent"]
+    if 1 <= ind["bb_width"] <= 12:
+        volatility += 5
+    elif ind["bb_width"] <= 20:
+        volatility += 3
+    volatility = min(volatility, 15)
 
-    # For long: prefer low volatility (tight range) and BB not too high
-    if direction == "LONG":
-        if atr_pct < 2:
-            vola_score += 20
-            reasons.append(("✅", f"ATR% = {atr_pct:.2f}% (کم)"))
-        elif atr_pct < 4:
-            vola_score += 10
-            reasons.append(("⚠️", f"ATR% = {atr_pct:.2f}% (متوسط)"))
-        else:
-            reasons.append(("⚠️", f"ATR% = {atr_pct:.2f}% (بالا)"))
+    # ============ HIGHER TIMEFRAME / 20 ============
+    htf = 0
+    if ind["higher_tf_trend_up"] is not None:
+        if long_side and ind["higher_tf_trend_up"]:
+            htf += 15
+        elif not long_side and not ind["higher_tf_trend_up"]:
+            htf += 15
+    vwap_ok = ind["price_above_vwap"] if long_side else not ind["price_above_vwap"]
+    if vwap_ok:
+        htf += 5
+    htf = min(htf, 20)
 
-        if bb_percent < 0.3:
-            vola_score += 15
-            reasons.append(("✅", f"Bollinger %B = {bb_percent:.2f} (نزدیک پایین)"))
-        elif bb_percent < 0.6:
-            vola_score += 10
-            reasons.append(("✅", f"Bollinger %B = {bb_percent:.2f} (وسط)"))
-        else:
-            vola_score += 5
-            reasons.append(("⚠️", f"Bollinger %B = {bb_percent:.2f} (نزدیک بالا)"))
-
-        # BB width: narrow means potential breakout
-        if bb_width < 10:
-            vola_score += 10
-            reasons.append(("✅", f"Bollinger Width = {bb_width:.2f}% (فشرده)"))
-        else:
-            reasons.append(("⚠️", f"Bollinger Width = {bb_width:.2f}% (گشاد)"))
-
-    else:  # SHORT
-        if atr_pct < 2:
-            vola_score += 20
-            reasons.append(("✅", f"ATR% = {atr_pct:.2f}% (کم)"))
-        elif atr_pct < 4:
-            vola_score += 10
-            reasons.append(("⚠️", f"ATR% = {atr_pct:.2f}% (متوسط)"))
-        else:
-            reasons.append(("⚠️", f"ATR% = {atr_pct:.2f}% (بالا)"))
-
-        if bb_percent > 0.7:
-            vola_score += 15
-            reasons.append(("✅", f"Bollinger %B = {bb_percent:.2f} (نزدیک بالا)"))
-        elif bb_percent > 0.4:
-            vola_score += 10
-            reasons.append(("✅", f"Bollinger %B = {bb_percent:.2f} (وسط)"))
-        else:
-            vola_score += 5
-            reasons.append(("⚠️", f"Bollinger %B = {bb_percent:.2f} (نزدیک پایین)"))
-
-        if bb_width < 10:
-            vola_score += 10
-            reasons.append(("✅", f"Bollinger Width = {bb_width:.2f}% (فشرده)"))
-        else:
-            reasons.append(("⚠️", f"Bollinger Width = {bb_width:.2f}% (گشاد)"))
-
-    vola_score = min(100, vola_score)
-
-    # --- Higher Timeframe (HTF) category ---
-    htf_trend = ind["higher_tf_trend_up"]
-    adx_4h = ind.get("adx_4h")
-
-    if htf_trend is not None:
-        if direction == "LONG":
-            if htf_trend:
-                htf_score += 40
-                reasons.append(("✅", "4H EMA200 تأیید صعودی"))
-            else:
-                reasons.append(("⚠️", "4H EMA200 تأیید نزولی"))
-        else:
-            if not htf_trend:
-                htf_score += 40
-                reasons.append(("✅", "4H EMA200 تأیید نزولی"))
-            else:
-                reasons.append(("⚠️", "4H EMA200 تأیید صعودی"))
-    else:
-        reasons.append(("⚠️", "4H EMA200 نامشخص"))
-
-    if adx_4h is not None:
-        if adx_4h >= 25:
-            htf_score += 30
-            reasons.append(("✅", f"4H ADX = {adx_4h:.1f} (روند قوی)"))
-        elif adx_4h >= ADX_TREND_THRESHOLD:
-            htf_score += 15
-            reasons.append(("✅", f"4H ADX = {adx_4h:.1f} (روند متوسط)"))
-        else:
-            reasons.append(("⚠️", f"4H ADX = {adx_4h:.1f} (روند ضعیف)"))
-    else:
-        reasons.append(("⚠️", "4H ADX در دسترس نیست"))
-
-    htf_score = min(100, htf_score)
-
-    # --- Total confidence ---
-    total = (
-        trend_score * WEIGHT_TREND
-        + mom_score * WEIGHT_MOMENTUM
-        + vol_score * WEIGHT_VOLUME
-        + vola_score * WEIGHT_VOLATILITY
-        + htf_score * WEIGHT_HTF
-    )
-    total = round(total, 1)
-
-    category_scores = {
-        "trend": round(trend_score, 1),
-        "momentum": round(mom_score, 1),
-        "volume": round(vol_score, 1),
-        "volatility": round(vola_score, 1),
-        "htf": round(htf_score, 1),
+    return {
+        "trend": trend,
+        "momentum": momentum,
+        "volume": volume,
+        "volatility": volatility,
+        "htf": htf,
     }
 
-    return total, category_scores, reasons
-
+def score_direction(direction, ind):
+    scores = category_scores(direction, ind)
+    total = sum(scores.values())
+    return round(max(0, min(100, total)), 1)
 
 def decide_direction(ind):
-    long_score, long_cat, long_reasons = compute_signal_scores(ind, "LONG")
-    short_score, short_cat, short_reasons = compute_signal_scores(ind, "SHORT")
+    long_scores = category_scores("LONG", ind)
+    short_scores = category_scores("SHORT", ind)
+    long_score = sum(long_scores.values())
+    short_score = sum(short_scores.values())
 
-    # Basic base conditions to avoid weak signals
     long_base = ind["macd_hist"] > 0 and ind["plus_di"] >= ind["minus_di"]
     short_base = ind["macd_hist"] < 0 and ind["minus_di"] >= ind["plus_di"]
 
-    if (
-        long_base
-        and long_score >= MIN_SIGNAL_CONFIDENCE
-        and long_score >= short_score + MIN_DIRECTION_GAP
-    ):
-        return "LONG", long_score, long_cat, long_reasons
-    if (
-        short_base
-        and short_score >= MIN_SIGNAL_CONFIDENCE
-        and short_score >= long_score + MIN_DIRECTION_GAP
-    ):
-        return "SHORT", short_score, short_cat, short_reasons
-    return None, max(long_score, short_score), None, None
+    if long_base and long_score >= MIN_SIGNAL_CONFIDENCE and long_score >= short_score + MIN_DIRECTION_GAP:
+        return "LONG", long_score
+    if short_base and short_score >= MIN_SIGNAL_CONFIDENCE and short_score >= long_score + MIN_DIRECTION_GAP:
+        return "SHORT", short_score
+    return None, max(long_score, short_score)
 
+def signal_reasons(direction, ind):
+    reasons = []
+    warnings = []
+
+    if direction == "LONG":
+        if ind["price_above_ema200"]:
+            reasons.append("قیمت بالای EMA200")
+        if ind["ema20_above_ema50"]:
+            reasons.append("EMA20 بالای EMA50")
+        if ind["ema20_bullish_cross"]:
+            reasons.append("کراس صعودی EMA20/EMA50")
+        if ind["macd_hist"] > 0:
+            reasons.append("MACD مثبت")
+        if ind["plus_di"] > ind["minus_di"]:
+            reasons.append("+DI > -DI")
+        if ind["adx"] >= 25:
+            reasons.append(f"ADX = {ind['adx']:.1f}")
+        if ind["volume_ratio"] >= 1.5:
+            reasons.append(f"حجم غیرعادی = {ind['volume_ratio']:.1f}×")
+        elif ind["volume_ratio"] >= 1:
+            reasons.append(f"حجم = {ind['volume_ratio']:.1f}× میانگین")
+        if ind["higher_tf_trend_up"] is True:
+            reasons.append("4H تأیید صعودی")
+        if ind["price_above_vwap"]:
+            reasons.append("قیمت بالای VWAP")
+        if ind["roc"] > 0:
+            reasons.append("ROC مثبت")
+        if ind["cci"] > 0:
+            reasons.append("CCI مثبت")
+        if ind["rsi"] >= 68:
+            warnings.append(f"RSI = {ind['rsi']:.1f} — نزدیک اشباع خرید")
+        if ind["williams_r"] > -20:
+            warnings.append(f"Williams %R = {ind['williams_r']:.1f} — اشباع خرید")
+    else:
+        if not ind["price_above_ema200"]:
+            reasons.append("قیمت زیر EMA200")
+        if not ind["ema20_above_ema50"]:
+            reasons.append("EMA20 زیر EMA50")
+        if ind["ema20_bearish_cross"]:
+            reasons.append("کراس نزولی EMA20/EMA50")
+        if ind["macd_hist"] < 0:
+            reasons.append("MACD منفی")
+        if ind["minus_di"] > ind["plus_di"]:
+            reasons.append("-DI > +DI")
+        if ind["adx"] >= 25:
+            reasons.append(f"ADX = {ind['adx']:.1f}")
+        if ind["volume_ratio"] >= 1.5:
+            reasons.append(f"حجم غیرعادی = {ind['volume_ratio']:.1f}×")
+        elif ind["volume_ratio"] >= 1:
+            reasons.append(f"حجم = {ind['volume_ratio']:.1f}× میانگین")
+        if ind["higher_tf_trend_up"] is False:
+            reasons.append("4H تأیید نزولی")
+        if not ind["price_above_vwap"]:
+            reasons.append("قیمت زیر VWAP")
+        if ind["roc"] < 0:
+            reasons.append("ROC منفی")
+        if ind["cci"] < 0:
+            reasons.append("CCI منفی")
+        if ind["rsi"] <= 32:
+            warnings.append(f"RSI = {ind['rsi']:.1f} — نزدیک اشباع فروش")
+        if ind["williams_r"] < -80:
+            warnings.append(f"Williams %R = {ind['williams_r']:.1f} — اشباع فروش")
+
+    return reasons, warnings
+
+def format_quality(scores):
+    def bar(value, maximum=100):
+        ratio = max(0, min(1, value / maximum))
+        filled = round(ratio * 10)
+        return "█" * filled + "░" * (10 - filled)
+
+    return (
+        f"📊 *کیفیت سیگنال*\n"
+        f"Trend {bar(scores['trend'], 25)} {scores['trend'] / 25 * 100:.0f}%\n"
+        f"Momentum {bar(scores['momentum'], 25)} {scores['momentum'] / 25 * 100:.0f}%\n"
+        f"Volume {bar(scores['volume'], 15)} {scores['volume'] / 15 * 100:.0f}%\n"
+        f"Volatility {bar(scores['volatility'], 15)} {scores['volatility'] / 15 * 100:.0f}%\n"
+        f"HTF Confirm {bar(scores['htf'], 20)} {scores['htf'] / 20 * 100:.0f}%"
+    )
 
 def build_ladder_weighted(ind, direction):
     price = float(ind["price"])
@@ -1122,30 +926,64 @@ def build_ladder_weighted(ind, direction):
         for m in ENTRY_LADDER_ATR
     ]
     avg_entry = sum(e * w for e, w in zip(entries, ENTRY_WEIGHTS))
+
     if direction == "LONG":
         stop = avg_entry - SL_ATR_MULT * atr
         tp = avg_entry + TP_ATR_MULT * atr
     else:
         stop = avg_entry + SL_ATR_MULT * atr
         tp = avg_entry - TP_ATR_MULT * atr
-    return entries, [stop], [tp]
 
+    risk = abs(avg_entry - stop)
+    reward = abs(tp - avg_entry)
+    rr = reward / risk if risk > 0 else 0
+    entry_to_sl_pct = (risk / avg_entry * 100) if avg_entry > 0 else 0
+    entry_to_tp_pct = (reward / avg_entry * 100) if avg_entry > 0 else 0
+    sl_atr = risk / atr if atr > 0 else 0
+    tp_atr = reward / atr if atr > 0 else 0
+
+    return {
+        "entries": entries,
+        "stop_losses": [stop],
+        "take_profits": [tp],
+        "avg_entry": avg_entry,
+        "risk": risk,
+        "reward": reward,
+        "rr": rr,
+        "entry_to_sl_pct": entry_to_sl_pct,
+        "entry_to_tp_pct": entry_to_tp_pct,
+        "sl_atr": sl_atr,
+        "tp_atr": tp_atr,
+    }
+
+def format_ladder_block(entries, take_profits, stop_losses, chat_id):
+    nums = ["1️⃣", "2️⃣", "3️⃣"]
+    entries_txt = "\n".join(f" {nums[i]} {fmt_amount(p, chat_id)}" for i, p in enumerate(entries))
+    tp_txt = "\n".join(f" {nums[i]} {fmt_amount(p, chat_id)}" for i, p in enumerate(take_profits))
+    sl_txt = "\n".join(f" {nums[i]} {fmt_amount(p, chat_id)}" for i, p in enumerate(stop_losses))
+    return (
+        f"📥 ورود پله‌ای\n{entries_txt}\n\n"
+        f"🎯 حد سود\n{tp_txt}\n\n"
+        f"🛑 حد ضرر\n{sl_txt}"
+    )
 
 async def generate_trade_plan(code):
     ind = await cache.get_indicators(code)
     if not ind:
         return None
 
-    direction, confidence, cat_scores, reasons = decide_direction(ind)
+    direction, confidence = decide_direction(ind)
     if not direction:
         return None
-    entries, sl, tp = build_ladder_weighted(ind, direction)
+
+    levels = build_ladder_weighted(ind, direction)
     funding = await cache.get_funding_rate(code)
     leverage = 1
     if confidence >= 80:
         leverage = 3
     elif confidence >= 70:
         leverage = 2
+
     return TradePlan(
         symbol=code,
         direction=direction,
@@ -1153,20 +991,15 @@ async def generate_trade_plan(code):
         rsi=float(ind["rsi"]),
         current_price=float(ind["price"]),
         confidence=float(confidence),
-        entries=entries,
-        stop_losses=sl,
-        take_profits=tp,
+        entries=levels["entries"],
+        stop_losses=levels["stop_losses"],
+        take_profits=levels["take_profits"],
         funding_rate=funding,
         leverage=leverage,
     )
 
-
 async def refresh_all_plans(force_data=False):
-    if (
-        force_data
-        or not cache.last_full_ohlcv_update
-        or time.time() - cache.last_full_ohlcv_update > FULL_REFRESH_TTL_SECONDS
-    ):
+    if force_data or not cache.last_full_ohlcv_update or time.time() - cache.last_full_ohlcv_update > FULL_REFRESH_TTL_SECONDS:
         await cache.update_ohlcv(force=force_data)
 
     sem = asyncio.Semaphore(MAX_SIGNAL_CONCURRENCY)
@@ -1176,10 +1009,7 @@ async def refresh_all_plans(force_data=False):
             try:
                 return await generate_trade_plan(code)
             except Exception as e:
-                logger.exception(
-                    "Signal error | code=%s | type=%s | error=%s",
-                    code, type(e).__name__, e,
-                )
+                logger.exception("Signal error | code=%s | error=%s", code, e)
                 return None
 
     results = await asyncio.gather(*(one(c) for c in cache.valid_codes))
@@ -1189,324 +1019,239 @@ async def refresh_all_plans(force_data=False):
     logger.info("Active signals: %s", len(plans))
     return last_plans
 
-
 async def generate_status_text_async(code, chat_id):
     ind = await cache.get_indicators(code)
     if not ind:
         return rtl_lines(
-            f"{COIN_ICONS.get(code, '🔸')} {code}\n\n"
+            f"{COIN_ICONS.get(code, '🔸')} *{code}*\n\n"
             "⚠️ داده‌ی کافی برای تحلیل این ارز دریافت نشد."
         )
 
-    direction, confidence, cat_scores, reasons = decide_direction(ind)
+    direction, confidence = decide_direction(ind)
 
-    # Build header
+    # Header
     header = (
         f"🧭 *وضعیت لحظه‌ای* {COIN_ICONS.get(code, '🔸')} *{sym(code)}*\n"
         f"🕒 {shamsi_now()}\n{DIVIDER}\n"
     )
 
-    # Build base stats (only a few)
-    adx = ind["adx"]
-    adx_desc = "روند قوی 💪" if adx >= 25 else "روند متوسط 🙂" if adx >= ADX_TREND_THRESHOLD else "بازار رنج 😐"
-    macd_desc = "مثبت 📈" if ind["macd_hist"] > 0 else "منفی 📉" if ind["macd_hist"] < 0 else "خنثی ⚖️"
-    rsi = ind["rsi"]
-    rsi_desc = "اشباع خرید ⚠️" if rsi > 70 else "اشباع فروش ⚠️" if rsi < 30 else "نرمال"
-    st = ind["stoch_k"]
-    st_desc = "نزدیک اشباع خرید" if st > 80 else "نزدیک اشباع فروش" if st < 20 else "نرمال"
-    bb = ind["bb_percent"]
-    bb_desc = "نزدیک باند بالا" if bb >= 0.8 else "نزدیک باند پایین" if bb <= 0.2 else "داخل محدوده"
-    htf = ind["higher_tf_trend_up"]
-    htf_desc = "صعودی 📈" if htf is True else "نزولی 📉" if htf is False else "نامشخص"
-
+    # Body with all indicators
     body = (
         f"💰 قیمت: {fmt_amount(ind['price'], chat_id)}\n"
         f"📊 روند EMA200: {ind['trend_label']}\n"
-        f"⚡ ADX: {adx:.1f} — {adx_desc}\n"
-        f"📈 MACD: {macd_desc}\n"
-        f"🎯 RSI: {rsi:.1f} — {rsi_desc}\n"
-        f"🌀 Stoch RSI: {st:.1f} — {st_desc}\n"
-        f"📏 Bollinger: {bb:.2f} — {bb_desc}\n"
+        f"📐 EMA20: {fmt_amount(ind['ema20'], chat_id)}\n"
+        f"📐 EMA50: {fmt_amount(ind['ema50'], chat_id)}\n"
+        f"📐 فاصله EMA50: {ind['price_ema50_pct']:+.2f}%\n"
+        f"📐 فاصله EMA200: {ind['price_ema200_pct']:+.2f}%\n"
+        f"🔄 EMA20/50: {'صعودی' if ind['ema20_above_ema50'] else 'نزولی'}\n"
+        f"⚡ ADX: {ind['adx']:.1f} — {'روند قوی 💪' if ind['adx'] >= 25 else 'روند متوسط 🙂' if ind['adx'] >= ADX_TREND_THRESHOLD else 'بازار رنج 😐'}\n"
+        f"📈 MACD: {'مثبت 📈' if ind['macd_hist'] > 0 else 'منفی 📉' if ind['macd_hist'] < 0 else 'خنثی ⚖️'}\n"
+        f"🎯 RSI: {ind['rsi']:.1f} — {'اشباع خرید ⚠️' if ind['rsi'] > 70 else 'اشباع فروش ⚠️' if ind['rsi'] < 30 else 'نرمال'}\n"
+        f"🌀 استوکاستیک RSI: {ind['stoch_k']:.1f} — {'نزدیک اشباع خرید' if ind['stoch_k'] > 80 else 'نزدیک اشباع فروش' if ind['stoch_k'] < 20 else 'نرمال'}\n"
+        f"🚀 ROC: {ind['roc']:+.2f}%\n"
+        f"📏 CCI: {ind['cci']:.1f}\n"
+        f"〽️ Williams %R: {ind['williams_r']:.1f}\n"
+        f"📏 Bollinger: {ind['bb_percent']:.2f} — {'نزدیک باند بالا' if ind['bb_percent'] >= 0.8 else 'نزدیک باند پایین' if ind['bb_percent'] <= 0.2 else 'داخل محدوده'}\n"
+        f"📐 BB Width: {ind['bb_width']:.2f}\n"
         f"🔊 حجم: {ind['volume_ratio']:.2f}× میانگین\n"
-        f"🗺️ روند ۴ساعته: {htf_desc}\n{DIVIDER}\n"
+        f"📡 VWAP: {fmt_amount(ind['vwap'], chat_id)}\n"
+        f"🗺️ روند ۴ساعته: {'صعودی 📈' if ind['higher_tf_trend_up'] is True else 'نزولی 📉' if ind['higher_tf_trend_up'] is False else 'نامشخص'}\n"
+        f"⚡ ATR: {fmt_amount(ind['atr'], chat_id)} ({ind['atr_pct']:.2f}%)\n"
+        f"{DIVIDER}\n"
     )
 
-    # If direction exists, build reasons and category bars
     if direction and confidence >= MIN_SIGNAL_CONFIDENCE:
+        scores = category_scores(direction, ind)
+        levels = build_ladder_weighted(ind, direction)
         direction_text = "🟢 لانگ (خرید)" if direction == "LONG" else "🔴 شورت (فروش)"
+        reasons, warnings = signal_reasons(direction, ind)
 
-        # Build reasons block
-        reasons_block = f"*دلایل {direction_text}*\n"
-        for emoji, txt in reasons:
-            reasons_block += f"{emoji} {txt}\n"
-
-        # Build category bars
-        bar_length = 10
-        categories = [
-            ("Trend", cat_scores.get("trend", 0)),
-            ("Momentum", cat_scores.get("momentum", 0)),
-            ("Volume", cat_scores.get("volume", 0)),
-            ("Volatility", cat_scores.get("volatility", 0)),
-            ("HTF Confirm", cat_scores.get("htf", 0)),
-        ]
-        bars = "📊 *کیفیت سیگنال*\n"
-        for name, score in categories:
-            filled = int(round(score / 10))
-            filled = min(bar_length, max(0, filled))
-            bar = "█" * filled + "░" * (bar_length - filled)
-            bars += f"{name} {bar} {score:.0f}%\n"
-
-        # Entry ladder
-        entries, sl, tp = build_ladder_weighted(ind, direction)
-        ladder = format_ladder_block(entries, tp, sl, chat_id)
-
-        # Risk/Reward
-        avg_entry = sum(e * w for e, w in zip(entries, ENTRY_WEIGHTS))
-        if direction == "LONG":
-            risk = (avg_entry - sl[0]) / avg_entry * 100
-            reward = (tp[0] - avg_entry) / avg_entry * 100
-        else:
-            risk = (sl[0] - avg_entry) / avg_entry * 100
-            reward = (avg_entry - tp[0]) / avg_entry * 100
-        rr = reward / risk if risk > 0 else 0
-        risk_reward = f"📐 ریسک/بازده: 1:{rr:.2f} (ریسک {risk:.2f}%, بازده {reward:.2f}%)"
-
-        # Entry to SL/TP distances in ATR
-        atr = ind["atr"]
-        sl_dist_atr = abs(avg_entry - sl[0]) / atr if atr > 0 else 0
-        tp_dist_atr = abs(tp[0] - avg_entry) / atr if atr > 0 else 0
-        atr_info = f"📏 فاصله تا SL: {sl_dist_atr:.1f} ATR | تا TP: {tp_dist_atr:.1f} ATR"
+        reason_text = "\n".join(f" ✅ {x}" for x in reasons[:12])
+        warning_text = "\n" + "\n".join(f" ⚠️ {x}" for x in warnings) if warnings else ""
+        quality_text = format_quality(scores)
 
         footer = (
             f"📐 *سیگنال فعلی:* {direction_text}\n"
-            f"🎯 اطمینان: *{confidence:.0f}٪* ({confidence_badge(confidence)})\n\n"
-            f"{reasons_block}\n"
-            f"{bars}\n"
-            f"{ladder}\n"
-            f"{risk_reward}\n"
-            f"{atr_info}\n"
+            f"🎯 امتیاز نهایی: *{confidence:.0f}٪* ({confidence_badge(confidence)})\n\n"
+            f"🟢 *دلایل سیگنال*\n{reason_text}{warning_text}\n\n"
+            f"{quality_text}\n\n"
+            f"💰 *ریسک / بازده*\n"
+            f"📊 R/R: *1:{levels['rr']:.2f}*\n"
+            f"🛑 فاصله Entry → SL: *{levels['entry_to_sl_pct']:.2f}%* ({levels['sl_atr']:.2f} ATR)\n"
+            f"🎯 فاصله Entry → TP: *{levels['entry_to_tp_pct']:.2f}%* ({levels['tp_atr']:.2f} ATR)\n\n"
+            f"{format_ladder_block(levels['entries'], levels['take_profits'], levels['stop_losses'], chat_id)}\n"
         )
     else:
         footer = (
-            "💤 فعلاً سیگنال نهایی وجود ندارد.\n"
+            f"💤 فعلاً سیگنال نهایی وجود ندارد.\n"
             f"امتیاز بهترین جهت: {confidence:.0f}٪\n"
-            "برای جلوگیری از سیگنال ضعیف، جهت‌های متضاد باید اختلاف امتیاز کافی داشته باشند.\n"
+            "برای جلوگیری از سیگنال ضعیف، جهت‌های متضاد باید اختلاف امتیاز کافی داشته باشند."
         )
 
-    return rtl_lines(header + body + footer + DIVIDER + "\n⚠️ این تحلیل تکنیکال است و تضمین سود یا توصیه مالی نیست.")
-
+    return rtl_lines(header + body + footer + f"\n{DIVIDER}\n⚠️ این تحلیل تکنیکال است و تضمین سود یا توصیه مالی نیست.")
 
 async def generate_weekly_summary_async(code, chat_id):
     week_df = await cache.get_weekly_data(code)
     if week_df is None or len(week_df) < 2:
         return rtl_lines(
-            f"{COIN_ICONS.get(code, '🔸')} {code}\n\n"
+            f"{COIN_ICONS.get(code, '🔸')} *{code}*\n\n"
             "⚠️ حداقل داده‌ی لازم برای تحلیل ۷ روزه دریافت نشد."
         )
 
     week_df = week_df.sort_values("timestamp").reset_index(drop=True)
-    first_price = float(week_df["close"].iloc[0])
-    current_price = float(week_df["close"].iloc[-1])
+    close = week_df["close"]
+    first_price = float(close.iloc[0])
+    current_price = float(close.iloc[-1])
     if first_price <= 0:
         return "⚠️ قیمت تاریخی نامعتبر است."
 
-    # Basic stats
-    pct_change_7d = (current_price - first_price) / first_price * 100
+    # ======== Returns ========
+    cumulative_return = ((current_price / first_price) - 1) * 100
+    returns = close.pct_change() * 100
+    positive_days = int((returns > 0).sum())
+    negative_days = int((returns < 0).sum())
+    best_day = float(returns.max())
+    worst_day = float(returns.min())
+    best_idx = returns.idxmax()
+    worst_idx = returns.idxmin()
 
-    # 24h, 3d, 7d changes
-    if len(week_df) >= 2:
-        price_1d_ago = float(week_df["close"].iloc[-2]) if len(week_df) >= 2 else current_price
-        pct_change_24h = (current_price - price_1d_ago) / price_1d_ago * 100
-    else:
-        pct_change_24h = 0.0
-
-    if len(week_df) >= 4:
-        price_3d_ago = float(week_df["close"].iloc[-4]) if len(week_df) >= 4 else first_price
-        pct_change_3d = (current_price - price_3d_ago) / price_3d_ago * 100
-    else:
-        pct_change_3d = pct_change_7d
-
-    # High/Low
+    # ======== High / Low ========
     highest = float(week_df["high"].max())
     lowest = float(week_df["low"].min())
+    range_pct = ((highest - lowest) / first_price * 100)
     high_row = week_df.loc[week_df["high"].idxmax()]
     low_row = week_df.loc[week_df["low"].idxmin()]
-    range_pct = (highest - lowest) / lowest * 100
 
-    # Daily returns
-    daily_pct = week_df["close"].pct_change() * 100
-    daily_returns = daily_pct.dropna()
-    if not daily_returns.empty:
-        volatility = float(daily_returns.std())
-        best_day_pct = float(daily_returns.max())
-        worst_day_pct = float(daily_returns.min())
-        best_day_date = shamsi_date(week_df.loc[daily_returns.idxmax(), "timestamp"]) if not daily_returns.isnull().all() else "-"
-        worst_day_date = shamsi_date(week_df.loc[daily_returns.idxmin(), "timestamp"]) if not daily_returns.isnull().all() else "-"
-        up_days = int((daily_returns > 0).sum())
-        down_days = int((daily_returns < 0).sum())
-    else:
-        volatility = 0.0
-        best_day_pct = worst_day_pct = 0.0
-        best_day_date = worst_day_date = "-"
-        up_days = down_days = 0
+    # ======== Max Drawdown & Run-up ========
+    running_max = close.cummax()
+    drawdown = (close / running_max - 1) * 100
+    max_drawdown = float(drawdown.min())
 
-    # Average volume
+    running_min = close.cummin()
+    runup = (close / running_min - 1) * 100
+    max_runup = float(runup.max())
+
+    # ======== Volatility ========
+    volatility = float(returns.dropna().std() or 0)
+
+    # ======== ATR Daily ========
+    atr_series = AverageTrueRange(
+        week_df["high"], week_df["low"], close,
+        window=min(14, max(2, len(week_df) - 1))
+    ).average_true_range()
+    atr_daily = float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else 0
+    atr_pct = (atr_daily / current_price * 100) if current_price > 0 else 0
+
+    # ======== Volume ========
     avg_volume = float(week_df["volume"].mean())
+    first_volume = float(week_df["volume"].iloc[0])
+    last_volume = float(week_df["volume"].iloc[-1])
+    volume_trend_pct = ((last_volume / first_volume) - 1) * 100 if first_volume > 0 else 0
+    volume_trend = "افزایشی 🔊" if volume_trend_pct > 10 else "کاهشی 🔇" if volume_trend_pct < -10 else "خنثی"
 
-    # Volume trend: compare last 2 days average vs overall average
-    if len(week_df) >= 3:
-        last_2_vol = week_df["volume"].tail(2).mean()
-        volume_trend = "افزایشی 🔊" if last_2_vol > avg_volume * 1.1 else "کاهشی 🔇" if last_2_vol < avg_volume * 0.9 else "ثابت"
-    else:
-        volume_trend = "ناشناخته"
-
-    # Daily indicators (full daily data)
+    # ======== Daily Indicators (using full daily data for accuracy) ========
     daily_all = cache.ohlcv["1d"].get(code)
-    rsi_daily = None
-    ema20_daily = None
-    ema50_daily = None
-    macd_hist_daily = None
-    adx_daily = None
-    bb_position = None
-    bb_width_daily = None
-    if daily_all is not None and len(daily_all) >= 15:
-        try:
-            close_d = daily_all["close"]
-            rsi_daily = float(RSIIndicator(close_d, window=14).rsi().iloc[-1])
-            ema20_d = EMAIndicator(close_d, window=20).ema_indicator().iloc[-1]
-            ema50_d = EMAIndicator(close_d, window=50).ema_indicator().iloc[-1]
-            ema20_daily = float(ema20_d)
-            ema50_daily = float(ema50_d)
-            macd_d = MACD(close_d, window_slow=26, window_fast=12, window_sign=9)
-            macd_hist_daily = float(macd_d.macd_diff().iloc[-1])
-            adx_d = ADXIndicator(daily_all["high"], daily_all["low"], close_d, window=14)
-            adx_daily = float(adx_d.adx().iloc[-1])
-            bb_d = BollingerBands(close_d, window=20, window_dev=2)
-            bb_position = float(bb_d.bollinger_pband().iloc[-1]) * 100
-            bb_width_daily = (bb_d.bollinger_hband().iloc[-1] - bb_d.bollinger_lband().iloc[-1]) / bb_d.bollinger_mavg().iloc[-1] * 100
-        except Exception:
-            pass
+    if daily_all is not None and len(daily_all) >= 50:
+        d_close = daily_all["close"]
+        rsi = RSIIndicator(d_close, window=14).rsi()
+        ema20 = EMAIndicator(d_close, window=20).ema_indicator()
+        ema50 = EMAIndicator(d_close, window=50).ema_indicator()
+        macd = MACD(d_close, window_slow=26, window_fast=12, window_sign=9)
+        adx_ind = ADXIndicator(daily_all["high"], daily_all["low"], d_close, window=14)
+        bb = BollingerBands(d_close, window=20, window_dev=2)
 
-    # Max Drawdown and Max Run-up over the period
-    cumulative = (week_df["close"] / first_price) * 100
-    peak = cumulative.cummax()
-    drawdown = (peak - cumulative) / peak * 100
-    max_drawdown = float(drawdown.max()) if not drawdown.empty else 0.0
-
-    # Max Run-up: maximum percentage increase from the start
-    max_runup = float(((cumulative / 100) - 1).max() * 100)
-
-    # Consecutive up/down days
-    if not daily_returns.empty:
-        # Count consecutive positive/negative at the end
-        returns_sign = (daily_returns > 0).astype(int)
-        # Find last run
-        last_sign = returns_sign.iloc[-1] if not returns_sign.empty else 0
-        consecutive = 0
-        for val in reversed(returns_sign):
-            if val == last_sign:
-                consecutive += 1
-            else:
-                break
-        consecutive_days = consecutive
-        consecutive_type = "صعودی" if last_sign == 1 else "نزولی"
+        daily_rsi = float(rsi.iloc[-1]) if pd.notna(rsi.iloc[-1]) else None
+        daily_ema20 = float(ema20.iloc[-1]) if pd.notna(ema20.iloc[-1]) else None
+        daily_ema50 = float(ema50.iloc[-1]) if pd.notna(ema50.iloc[-1]) else None
+        daily_macd = float(macd.macd_diff().iloc[-1]) if pd.notna(macd.macd_diff().iloc[-1]) else None
+        daily_adx = float(adx_ind.adx().iloc[-1]) if pd.notna(adx_ind.adx().iloc[-1]) else None
+        bb_position = float(bb.bollinger_pband().iloc[-1]) if pd.notna(bb.bollinger_pband().iloc[-1]) else None
+        bb_width = float(bb.bollinger_wband().iloc[-1]) if pd.notna(bb.bollinger_wband().iloc[-1]) else None
     else:
-        consecutive_days = 0
-        consecutive_type = "نامشخص"
+        daily_rsi = daily_ema20 = daily_ema50 = daily_macd = daily_adx = bb_position = bb_width = None
 
-    # Trend strength (weekly)
-    if adx_daily is not None:
-        if adx_daily >= 25:
-            trend_strength = "قوی 💪"
-        elif adx_daily >= ADX_TREND_THRESHOLD:
-            trend_strength = "متوسط 🙂"
+    # ======== Trend ========
+    if daily_ema20 is not None and daily_ema50 is not None:
+        if current_price > daily_ema20 and daily_ema20 > daily_ema50:
+            trend = "صعودی قوی 📈"
+        elif current_price > daily_ema50:
+            trend = "صعودی ملایم 📈"
+        elif current_price < daily_ema20 and daily_ema20 < daily_ema50:
+            trend = "نزولی قوی 📉"
         else:
-            trend_strength = "ضعیف 😐"
+            trend = "نزولی ملایم 📉"
     else:
-        trend_strength = "نامشخص"
+        trend = "نامشخص"
 
-    # Price vs EMAs
-    if ema20_daily is not None and ema50_daily is not None:
-        price_vs_ema = "EMA20 > EMA50" if ema20_daily > ema50_daily else "EMA20 < EMA50"
+    # ======== Consecutive days ========
+    returns_vals = returns.dropna().tolist()
+    consecutive_up = 0
+    for v in reversed(returns_vals):
+        if v > 0:
+            consecutive_up += 1
+        else:
+            break
+    consecutive_down = 0
+    for v in reversed(returns_vals):
+        if v < 0:
+            consecutive_down += 1
+        else:
+            break
+
+    # ======== Momentum + Volume ========
+    if daily_macd is not None and daily_macd > 0 and volume_trend_pct > 0:
+        momentum_volume = "مومنتوم با حجم تأیید می‌شود 🟢"
+    elif daily_macd is not None and daily_macd < 0 and volume_trend_pct < 0:
+        momentum_volume = "ضعف مومنتوم با کاهش حجم 🔴"
     else:
-        price_vs_ema = "نامشخص"
+        momentum_volume = "تأیید کامل وجود ندارد ⚠️"
 
-    # Trend direction
-    trend_desc = (
-        "صعودی قوی 🚀" if pct_change_7d > 10 else
-        "صعودی ملایم 📈" if pct_change_7d > 0 else
-        "نزولی ملایم 📉" if pct_change_7d > -10 else
-        "نزولی قوی 🔻"
+    # ======== 3d & 24h returns ========
+    ret_3d = ((current_price / float(close.iloc[max(0, len(close)-4)])) - 1) * 100 if len(close) >= 4 else 0
+    ret_24h = float(returns.iloc[-1]) if not returns.empty else 0
+
+    best_date = shamsi_date(week_df.loc[best_idx, "timestamp"]) if best_idx in week_df.index else "-"
+    worst_date = shamsi_date(week_df.loc[worst_idx, "timestamp"]) if worst_idx in week_df.index else "-"
+
+    # ======== Build Output ========
+    text = (
+        f"📊 *تحلیل ۷ روز اخیر* {COIN_ICONS.get(code, '🔸')} *{code}*\n"
+        f"🕒 {shamsi_now()}\n{DIVIDER}\n"
+        f"💰 قیمت فعلی: {fmt_amount(current_price, chat_id)}\n"
+        f"📈 بازده ۷ روزه: *{cumulative_return:+.2f}%*\n"
+        f"📈 بازده ۳ روزه: *{ret_3d:+.2f}%*\n"
+        f"📈 بازده ۲۴h: *{ret_24h:+.2f}%*\n"
+        f"{DIVIDER}\n"
+        f"📈 بالاترین: {fmt_amount(highest, chat_id)} 📅 {shamsi_date(high_row['timestamp'])}\n"
+        f"📉 پایین‌ترین: {fmt_amount(lowest, chat_id)} 📅 {shamsi_date(low_row['timestamp'])}\n"
+        f"📏 محدوده ۷ روزه: *{range_pct:.2f}%*\n"
+        f"🚀 بیشینه رشد (Max Run-up): *{max_runup:+.2f}%*\n"
+        f"🛑 بیشینه کاهش (Max Drawdown): *{max_drawdown:.2f}%*\n"
+        f"⚡ ATR روزانه: *{atr_pct:.2f}%*\n"
+        f"📐 نوسان‌پذیری: *{volatility:.2f}%*\n"
+        f"{DIVIDER}\n"
+        f"🟢 روز مثبت: {positive_days} | 🔴 روز منفی: {negative_days}\n"
+        f"🔥 بهترین روز: *{best_day:+.2f}%* ({best_date})\n"
+        f"💥 بدترین روز: *{worst_day:+.2f}%* ({worst_date})\n"
+        f"📈 پشت‌سرهم صعودی: {consecutive_up} روز\n"
+        f"📉 پشت‌سرهم نزولی: {consecutive_down} روز\n"
+        f"{DIVIDER}\n"
+        f"📊 میانگین حجم: `{avg_volume:,.0f}`\n"
+        f"🔊 روند حجم: {volume_trend} ({volume_trend_pct:+.1f}%)\n"
+        f"🧠 {momentum_volume}\n"
+        f"{DIVIDER}\n"
+        f"📈 *روند روزانه:* {trend}\n"
+        f"📐 قیمت نسبت به EMA20: {'بالای 📈' if daily_ema20 is not None and current_price > daily_ema20 else 'زیر 📉' if daily_ema20 is not None else 'نامشخص'}\n"
+        f"📐 قیمت نسبت به EMA50: {'بالای 📈' if daily_ema50 is not None and current_price > daily_ema50 else 'زیر 📉' if daily_ema50 is not None else 'نامشخص'}\n"
+        f"📈 MACD روزانه: {'مثبت 📈' if daily_macd is not None and daily_macd > 0 else 'منفی 📉' if daily_macd is not None else '-'}\n"
+        f"💪 ADX روزانه: {daily_adx:.1f}" if daily_adx is not None else "💪 ADX روزانه: -"
     )
+    text += f"\n🎯 RSI روزانه: {daily_rsi:.1f}" if daily_rsi is not None else "\n🎯 RSI روزانه: -"
+    text += f"\n📏 موقعیت بولینگر: {bb_position*100:.1f}%" if bb_position is not None else "\n📏 موقعیت بولینگر: -"
+    text += f"\n📐 پهنای بولینگر: {bb_width:.2f}" if bb_width is not None else "\n📐 پهنای بولینگر: -"
+    text += f"\n{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Linear Perpetual در بایننس محاسبه شده‌اند."
 
-    # Build text
-    lines = []
-    lines.append(f"📊 *تحلیل ۷ روز اخیر* {COIN_ICONS.get(code, '🔸')} *{code}*")
-    lines.append(f"🕒 {shamsi_now()}")
-    lines.append(DIVIDER)
-    lines.append(f"💰 قیمت ابتدای بازه: {fmt_amount(first_price, chat_id)}")
-    lines.append(f"💰 قیمت فعلی: {fmt_amount(current_price, chat_id)}")
-    lines.append(f"📈 تغییر ۷ روزه: *{pct_change_7d:+.2f}٪* — {trend_desc}")
-    lines.append(f"📈 تغییر ۲۴ ساعت: {pct_change_24h:+.2f}٪")
-    lines.append(f"📈 تغییر ۳ روز: {pct_change_3d:+.2f}٪")
-    lines.append("")
-    lines.append(f"📈 بیشترین قیمت: {fmt_amount(highest, chat_id)}")
-    lines.append(f" 📅 {shamsi_date(high_row['timestamp'])}")
-    lines.append(f"📉 کمترین قیمت: {fmt_amount(lowest, chat_id)}")
-    lines.append(f" 📅 {shamsi_date(low_row['timestamp'])}")
-    lines.append(f"📐 محدوده نوسان: {range_pct:.2f}%")
-    lines.append(DIVIDER)
-    lines.append(f"⚡ بیشترین رشد روزانه: *{best_day_pct:+.2f}%* ({best_day_date})")
-    lines.append(f"⚡ بیشترین افت روزانه: *{worst_day_pct:+.2f}%* ({worst_day_date})")
-    lines.append(f"📐 نوسان‌پذیری روزانه: *{volatility:.2f}%*")
-    lines.append(f"🟢 روز مثبت: {up_days} | 🔴 روز منفی: {down_days}")
-    lines.append(f"🔁 پشت‌سرهم {consecutive_type}: {consecutive_days} روز")
-    lines.append(f"📉 بیشینه کاهش (Max DD): *{max_drawdown:.2f}%*")
-    lines.append(f"📈 بیشینه رشد (Max Run-up): *{max_runup:.2f}%*")
-    lines.append(f"📊 بازده تجمعی: *{pct_change_7d:+.2f}%*")
-    lines.append("")
-    lines.append(f"📊 میانگین حجم روزانه: `{avg_volume:,.0f}`")
-    lines.append(f"🔊 روند حجم: {volume_trend}")
-    lines.append("")
-    if rsi_daily is not None:
-        lines.append(f"🎯 RSI روزانه فعلی: *{rsi_daily:.1f}*")
-    else:
-        lines.append("🎯 RSI روزانه فعلی: -*")
-    if ema20_daily is not None and ema50_daily is not None:
-        lines.append(f"📈 EMA20 روزانه: {fmt_amount(ema20_daily, chat_id)}")
-        lines.append(f"📈 EMA50 روزانه: {fmt_amount(ema50_daily, chat_id)}")
-        lines.append(f"📊 وضعیت قیمت نسبت به EMA20/50: {price_vs_ema}")
-    if macd_hist_daily is not None:
-        lines.append(f"📈 MACD روزانه: {'مثبت 📈' if macd_hist_daily > 0 else 'منفی 📉'}")
-    if adx_daily is not None:
-        lines.append(f"💪 ADX روزانه: {adx_daily:.1f} — {trend_strength}")
-    if bb_position is not None:
-        lines.append(f"📏 Bollinger Position: {bb_position:.1f}%")
-    if bb_width_daily is not None:
-        lines.append(f"📏 Bollinger Width: {bb_width_daily:.2f}%")
-    lines.append(DIVIDER)
-    lines.append("ℹ️ گزارش فقط بر اساس داده قیمت/حجم قراردادهای Perpetual MEXC است.")
-
-    return rtl_lines("\n".join(lines))
-
-
-def format_ladder_block(entries, take_profits, stop_losses, chat_id):
-    nums = ["1️⃣", "2️⃣", "3️⃣"]
-    entries_txt = "\n".join(
-        f" {nums[i]} {fmt_amount(p, chat_id)}" for i, p in enumerate(entries)
-    )
-    tp_txt = "\n".join(
-        f" {nums[i]} {fmt_amount(p, chat_id)}" for i, p in enumerate(take_profits)
-    )
-    sl_txt = "\n".join(
-        f" {nums[i]} {fmt_amount(p, chat_id)}" for i, p in enumerate(stop_losses)
-    )
-    return (
-        f"📥 ورود پله‌ای\n{entries_txt}\n\n"
-        f"🎯 حد سود\n{tp_txt}\n\n"
-        f"🛑 حد ضرر\n{sl_txt}"
-    )
-
+    return rtl_lines(text)
 
 def format_plan_pretty(plan, code, chat_id):
     direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
@@ -1522,7 +1267,6 @@ def format_plan_pretty(plan, code, chat_id):
         f"{DIVIDER}\n⚠️ امتیاز اطمینان تخمینی است، نه تضمین."
     )
 
-
 def format_plan_compact(plan, code, chat_id):
     avg = sum(e * w for e, w in zip(plan.entries, ENTRY_WEIGHTS))
     direction = "🟢 لانگ" if plan.direction == "LONG" else "🔴 شورت"
@@ -1534,22 +1278,23 @@ def format_plan_compact(plan, code, chat_id):
         f" 🛑 ضرر: {fmt_amount(plan.stop_losses[0], chat_id)}"
     )
 
-
 def format_prices_pretty(prices, chat_id):
-    if not prices:
-        return "⚠️ قیمت لحظه‌ای دریافت نشد."
     lines = ["💰 قیمت لحظه‌ای قراردادها", f"🕒 {shamsi_now()}", DIVIDER]
-    for code, price in prices.items():
-        lines.append(
-            f"{COIN_ICONS.get(code, '🔸')} {code} {fmt_amount(price, chat_id)}"
-        )
+    for code in COIN_CODES:
+        status = cache.market_status.get(code, {}).get("status")
+        if status == "SWAP OK" and code in prices and prices[code] is not None:
+            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code} {fmt_amount(prices[code], chat_id)}")
+        elif status == "SWAP OK":
+            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code} ⚠️ در حال دریافت...")
+        elif status == "TICKER ERROR":
+            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code} 🟠 خطا در دریافت قیمت")
+        else:
+            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code} ⚪ در دسترس نیست")
     return rtl_lines("\n".join(lines))
-
 
 def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
     if len(text) <= limit:
         return [text]
-
     parts, current = [], ""
     for block in text.split("\n\n"):
         if len(block) > limit:
@@ -1569,7 +1314,6 @@ def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
         parts.append(current.strip())
     return parts
 
-
 async def clear_interactive_screen(context, chat_id, keep_id=None):
     ids = interactive_screen_messages.pop(chat_id, [])
     for mid in ids:
@@ -1580,10 +1324,8 @@ async def clear_interactive_screen(context, chat_id, keep_id=None):
         except Exception:
             pass
 
-
 def set_interactive_screen(chat_id, message_ids):
     interactive_screen_messages[chat_id] = message_ids
-
 
 async def clear_overlay(context, chat_id):
     ids = overlay_messages.pop(chat_id, [])
@@ -1592,7 +1334,6 @@ async def clear_overlay(context, chat_id):
             await context.bot.delete_message(chat_id=chat_id, message_id=mid)
         except Exception:
             pass
-
 
 async def track_auto_message(app, chat_id, message_id):
     history = auto_message_history.setdefault(chat_id, [])
@@ -1604,16 +1345,11 @@ async def track_auto_message(app, chat_id, message_id):
         except Exception:
             pass
 
-
 def build_grid_keyboard(buttons, columns):
     rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
     if rows and len(rows[-1]) < columns:
-        rows[-1].extend(
-            InlineKeyboardButton("\u2063", callback_data="noop")
-            for _ in range(columns - len(rows[-1]))
-        )
+        rows[-1].extend(InlineKeyboardButton("\u2063", callback_data="noop") for _ in range(columns - len(rows[-1])))
     return rows
-
 
 def kb_currency():
     return InlineKeyboardMarkup([
@@ -1622,45 +1358,32 @@ def kb_currency():
         [InlineKeyboardButton("💱 هر دو", callback_data="cur_BOTH")],
     ])
 
-
 def kb_main(user_id):
     rows = [
-        [
-            InlineKeyboardButton("💰 قیمت لحظه‌ای", callback_data="menu_prices"),
-            InlineKeyboardButton("🪙 انتخاب ارز", callback_data="menu_coins"),
-        ],
-        [
-            InlineKeyboardButton("📊 همه پیشنهادات", callback_data="menu_all"),
-            InlineKeyboardButton("🔄 شروع مجدد", callback_data="restart_currency"),
-        ],
+        [InlineKeyboardButton("💰 قیمت لحظه‌ای", callback_data="menu_prices"), InlineKeyboardButton("🪙 انتخاب ارز", callback_data="menu_coins")],
+        [InlineKeyboardButton("📊 همه پیشنهادات", callback_data="menu_all"), InlineKeyboardButton("🔄 شروع مجدد", callback_data="restart_currency")],
     ]
     if is_admin(user_id):
-        rows.append([
-            InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel"),
-            InlineKeyboardButton("\u2063", callback_data="noop"),
-        ])
+        rows.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel"), InlineKeyboardButton("\u2063", callback_data="noop")])
     return InlineKeyboardMarkup(rows)
 
-
 def kb_back_main():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")]
-    ])
-
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")]])
 
 def kb_coins():
-    # Show all COIN_CODES with status
     buttons = []
-    for c in COIN_CODES:
-        if c in cache.valid_codes:
-            label = f"{COIN_ICONS.get(c, '🔸')} {c} ✅"
+    for code in COIN_CODES:
+        status = cache.market_status.get(code, {}).get("status")
+        if status == "SWAP OK":
+            label = f"{COIN_ICONS.get(code, '🔸')} {code} 🟢"
+        elif status == "TICKER ERROR":
+            label = f"{COIN_ICONS.get(code, '🔸')} {code} 🟠"
         else:
-            label = f"{COIN_ICONS.get(c, '🔸')} {c} ❌"
-        buttons.append(InlineKeyboardButton(label, callback_data=f"coin_{c}"))
+            label = f"{COIN_ICONS.get(code, '🔸')} {code} ⚪"
+        buttons.append(InlineKeyboardButton(label, callback_data=f"coin_{code}"))
     rows = build_grid_keyboard(buttons, COINS_GRID_COLUMNS)
     rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
-
 
 def kb_coin_detail(code):
     return InlineKeyboardMarkup([
@@ -1668,7 +1391,6 @@ def kb_coin_detail(code):
         [InlineKeyboardButton("📆 تحلیل ۷ روز اخیر", callback_data=f"weekly_{code}")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")],
     ])
-
 
 def kb_suggestion(code):
     return InlineKeyboardMarkup([
@@ -1678,7 +1400,6 @@ def kb_suggestion(code):
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")],
     ])
 
-
 def kb_suggestion_from_auto(code):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"suggest_{code}_auto")],
@@ -1686,20 +1407,17 @@ def kb_suggestion_from_auto(code):
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")],
     ])
 
-
 def kb_weekly(code):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 بازگشت", callback_data=f"coin_{code}")],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")],
     ])
 
-
 def kb_admin_panel():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 بروزرسانی کامل", callback_data="menu_all")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")],
     ])
-
 
 def kb_auto_report(top_plans):
     buttons = [
@@ -1713,7 +1431,6 @@ def kb_auto_report(top_plans):
     rows.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
-
 def welcome_text():
     return rtl_lines(
         "🌟 به سیگنالستان خوش اومدی! 🌟\n"
@@ -1725,10 +1442,8 @@ def welcome_text():
         "⚠️ تحلیل تکنیکال است، نه توصیه مالی."
     )
 
-
 MENU_PROMPT = "👇 یکی از گزینه‌ها رو انتخاب کن:"
 MAIN_MENU_HEADER = "✨ پنل سیگنال‌یار ✨\n" + DIVIDER + "\n" + MENU_PROMPT
-
 
 async def finish_start(context, chat_id, user_id):
     commands = [
@@ -1738,10 +1453,7 @@ async def finish_start(context, chat_id, user_id):
         BotCommand("stop", "لغو اشتراک"),
     ] if is_admin(user_id) else [BotCommand("menu", "منوی اصلی")]
 
-    await context.bot.set_my_commands(
-        commands,
-        scope=BotCommandScopeChat(chat_id=chat_id),
-    )
+    await context.bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=chat_id))
     await clear_interactive_screen(context, chat_id)
     msg = await context.bot.send_message(
         chat_id=chat_id,
@@ -1750,7 +1462,6 @@ async def finish_start(context, chat_id, user_id):
         parse_mode="Markdown",
     )
     set_interactive_screen(chat_id, [msg.message_id])
-
 
 async def button_handler(update, context):
     if not await guard(update):
@@ -1788,11 +1499,7 @@ async def button_handler(update, context):
 
     if data == "menu_main":
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        await query.edit_message_text(
-            MAIN_MENU_HEADER,
-            reply_markup=kb_main(user_id),
-            parse_mode="Markdown",
-        )
+        await query.edit_message_text(MAIN_MENU_HEADER, reply_markup=kb_main(user_id), parse_mode="Markdown")
         set_interactive_screen(chat_id, [query.message.message_id])
         return
 
@@ -1828,15 +1535,34 @@ async def button_handler(update, context):
 
     if data.startswith("coin_"):
         code = data.split("_", 1)[1]
-        if not cache.symbol_for_code(code):
-            await query.edit_message_text(
-                f"⚠️ قرارداد Perpetual برای {code} در MEXC پیدا نشد.",
-                reply_markup=kb_back_main(),
-            )
+        if code not in COIN_CODES:
             return
+        status = cache.market_status.get(code, {}).get("status")
+        if status != "SWAP OK":
+            error = cache.market_status.get(code, {}).get("error")
+            if status == "TICKER ERROR":
+                text = (
+                    f"{COIN_ICONS.get(code, '🔸')} *{sym(code)}*\n"
+                    f"{DIVIDER}\n"
+                    f"🟠 وضعیت: *TICKER ERROR*\n"
+                    f"⚠️ دریافت قیمت لحظه‌ای ناموفق بود.\n"
+                    f"نوع خطا: `{error or '-'}`"
+                )
+            else:
+                text = (
+                    f"{COIN_ICONS.get(code, '🔸')} *{code}*\n"
+                    f"{DIVIDER}\n"
+                    "⚪ وضعیت: *NO SWAP*\n"
+                    "در حال حاضر قرارداد USDT Linear Perpetual فعال برای این ارز در بایننس پیدا نشد."
+                )
+            await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
+            await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
+            set_interactive_screen(chat_id, [query.message.message_id])
+            return
+
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         await query.edit_message_text(
-            rtl_lines(f"{COIN_ICONS.get(code, '🔸')} *{sym(code)}*\n{DIVIDER}\n{MENU_PROMPT}"),
+            rtl_lines(f"{COIN_ICONS.get(code, '🔸')} *{sym(code)}*\n{DIVIDER}\n🟢 وضعیت: *SWAP OK*\n{MENU_PROMPT}"),
             reply_markup=kb_coin_detail(code),
             parse_mode="Markdown",
         )
@@ -1846,9 +1572,12 @@ async def button_handler(update, context):
     if data.startswith("suggest_"):
         auto = data.endswith("_auto")
         code = data[len("suggest_"):-len("_auto")] if auto else data[len("suggest_"):]
-        if not cache.symbol_for_code(code):
+        if code not in COIN_CODES:
+            return
+        status = cache.market_status.get(code, {}).get("status")
+        if status != "SWAP OK":
             await query.edit_message_text(
-                f"⚠️ قرارداد {code} در MEXC پیدا نشد.",
+                f"⚠️ قرارداد {code} در بایننس در دسترس نیست.\nوضعیت: {status}",
                 reply_markup=kb_back_main(),
             )
             return
@@ -1868,17 +1597,10 @@ async def button_handler(update, context):
                 )
                 overlay_messages[chat_id] = [msg.message_id]
             else:
-                await query.edit_message_text(
-                    split_long_message(text)[0],
-                    reply_markup=markup,
-                    parse_mode="Markdown",
-                )
+                await query.edit_message_text(split_long_message(text)[0], reply_markup=markup, parse_mode="Markdown")
                 set_interactive_screen(chat_id, [query.message.message_id])
         except asyncio.TimeoutError:
-            await query.edit_message_text(
-                "⏰ دریافت اطلاعات بیش از حد طول کشید. لاگ سرور را بررسی کن.",
-                reply_markup=kb_back_main(),
-            )
+            await query.edit_message_text("⏰ دریافت اطلاعات بیش از حد طول کشید.", reply_markup=kb_back_main())
         except Exception as e:
             logger.exception("Status UI error | code=%s: %s", code, e)
             await query.edit_message_text(
@@ -1890,9 +1612,12 @@ async def button_handler(update, context):
 
     if data.startswith("weekly_"):
         code = data.split("_", 1)[1]
-        if not cache.symbol_for_code(code):
+        if code not in COIN_CODES:
+            return
+        status = cache.market_status.get(code, {}).get("status")
+        if status != "SWAP OK":
             await query.edit_message_text(
-                f"⚠️ قرارداد {code} در MEXC پیدا نشد.",
+                f"⚠️ قرارداد {code} در بایننس در دسترس نیست.\nوضعیت: {status}",
                 reply_markup=kb_back_main(),
             )
             return
@@ -1908,16 +1633,10 @@ async def button_handler(update, context):
             )
             set_interactive_screen(chat_id, [query.message.message_id])
         except asyncio.TimeoutError:
-            await query.edit_message_text(
-                "⏰ دریافت داده‌های هفتگی طول کشید. دوباره تلاش کن.",
-                reply_markup=kb_back_main(),
-            )
+            await query.edit_message_text("⏰ دریافت داده‌های هفتگی طول کشید.", reply_markup=kb_back_main())
         except Exception as e:
             logger.exception("Weekly UI error | code=%s: %s", code, e)
-            await query.edit_message_text(
-                f"❌ خطا در تحلیل هفتگی {code}.",
-                reply_markup=kb_back_main(),
-            )
+            await query.edit_message_text(f"❌ خطا در تحلیل هفتگی {code}.", reply_markup=kb_back_main())
         return
 
     if data == "menu_all":
@@ -1926,42 +1645,23 @@ async def button_handler(update, context):
         try:
             plans = await asyncio.wait_for(refresh_all_plans(force_data=False), timeout=120)
         except asyncio.TimeoutError:
-            await query.edit_message_text(
-                "⏰ تحلیل همه ارزها طول کشید. دوباره تلاش کن.",
-                reply_markup=kb_back_main(),
-            )
+            await query.edit_message_text("⏰ تحلیل همه ارزها طول کشید.", reply_markup=kb_back_main())
             return
         if not plans:
-            text = (
-                f"📋 *نمایش همه پیشنهادات*\n"
-                f"🕒 {shamsi_now()}\n\n"
-                "😴 فعلاً سیگنال نهایی نداریم.\n"
-                "شرایط اندیکاتورها برای حداقل امتیاز و اختلاف جهت کافی نیست."
-            )
-            await query.edit_message_text(
-                rtl_lines(text),
-                reply_markup=kb_back_main(),
-                parse_mode="Markdown",
-            )
+            text = f"📋 *نمایش همه پیشنهادات*\n🕒 {shamsi_now()}\n\n😴 فعلاً سیگنال نهایی نداریم."
+            await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
             set_interactive_screen(chat_id, [query.message.message_id])
             return
         sorted_plans = sorted(plans.values(), key=lambda p: p.confidence, reverse=True)
-        full_text = (
-            f"📋 *نمایش پیشنهادات*\n🕒 {shamsi_now()}\n\n"
-            + f"\n\n{BIG_DIVIDER}\n\n".join(
-                format_plan_pretty(p, p.symbol, chat_id) for p in sorted_plans
-            )
+        full_text = f"📋 *نمایش پیشنهادات*\n🕒 {shamsi_now()}\n\n" + f"\n\n{BIG_DIVIDER}\n\n".join(
+            format_plan_pretty(p, p.symbol, chat_id) for p in sorted_plans
         )
         chunks = split_long_message(full_text)
         new_ids = []
         await query.edit_message_text(chunks[0], parse_mode="Markdown")
         new_ids.append(query.message.message_id)
         for chunk in chunks[1:]:
-            m = await context.bot.send_message(
-                chat_id=chat_id,
-                text=chunk,
-                parse_mode="Markdown"
-            )
+            m = await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
             new_ids.append(m.message_id)
         last = await context.bot.send_message(
             chat_id=chat_id,
@@ -1976,6 +1676,9 @@ async def button_handler(update, context):
         if not is_admin(user_id):
             await query.answer("⛔️ فقط ادمین.", show_alert=True)
             return
+        ok = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "SWAP OK")
+        no_swap = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "NO SWAP")
+        ticker_error = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "TICKER ERROR")
         await query.edit_message_text(
             rtl_lines(
                 "🛠️ *پنل مدیریت*\n"
@@ -1983,7 +1686,10 @@ async def button_handler(update, context):
                 f"🕒 {shamsi_now()}\n"
                 f"👥 اعضای فعال: {len(subscribed_chat_ids)}\n"
                 f"⚡ سیگنال‌های فعال: {len(last_plans)}\n"
-                f"🪙 قراردادهای Perpetual: {len(cache.valid_codes)}\n"
+                f"🪙 کل ارزها: {len(COIN_CODES)}\n"
+                f"🟢 SWAP OK: {ok}\n"
+                f"⚪ NO SWAP: {no_swap}\n"
+                f"🟠 TICKER ERROR: {ticker_error}\n"
                 f"📊 داده 1h: {len(cache.ohlcv['1h'])}\n"
                 f"📊 داده 4h: {len(cache.ohlcv['4h'])}\n"
                 f"📊 داده 1d: {len(cache.ohlcv['1d'])}"
@@ -1992,16 +1698,10 @@ async def button_handler(update, context):
             parse_mode="Markdown",
         )
 
-
 async def send_report_to_user(app, chat_id, top_plans):
-    header = (
-        f"📢✨ پیشنهادات لحظه‌ای ✨📢\n"
-        f"🕒 {shamsi_now()}\n{BIG_DIVIDER}\n\n"
-    )
+    header = f"📢✨ پیشنهادات لحظه‌ای ✨📢\n🕒 {shamsi_now()}\n{BIG_DIVIDER}\n\n"
     if top_plans:
-        body = f"\n\n{DIVIDER}\n\n".join(
-            format_plan_compact(p, p.symbol, chat_id) for p in top_plans
-        )
+        body = f"\n\n{DIVIDER}\n\n".join(format_plan_compact(p, p.symbol, chat_id) for p in top_plans)
         footer = "\n\n⚠️ امتیاز اطمینان تخمینی است، نه تضمین."
         keyboard = kb_auto_report(top_plans)
     else:
@@ -2012,25 +1712,12 @@ async def send_report_to_user(app, chat_id, top_plans):
     try:
         chunks = split_long_message(rtl_lines(header + body + footer))
         for chunk in chunks[:-1]:
-            msg = await app.bot.send_message(
-                chat_id=chat_id,
-                text=chunk,
-                parse_mode="Markdown"
-            )
+            msg = await app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
             await track_auto_message(app, chat_id, msg.message_id)
-        msg = await app.bot.send_message(
-            chat_id=chat_id,
-            text=chunks[-1],
-            reply_markup=keyboard,
-            parse_mode="Markdown",
-        )
+        msg = await app.bot.send_message(chat_id=chat_id, text=chunks[-1], reply_markup=keyboard, parse_mode="Markdown")
         await track_auto_message(app, chat_id, msg.message_id)
     except Exception as e:
-        logger.exception(
-            "Auto report failed | chat_id=%s | type=%s | error=%s",
-            chat_id, type(e).__name__, e,
-        )
-
+        logger.exception("Auto report failed | chat_id=%s | error=%s", chat_id, e)
 
 async def auto_report_loop(app):
     await asyncio.sleep(10)
@@ -2038,52 +1725,32 @@ async def auto_report_loop(app):
         cycle_started = time.time()
         try:
             if subscribed_chat_ids:
-                # One heavy refresh per cycle. refresh_all_plans reuses it.
                 await cache.update_prices(force=True)
                 await cache.update_ohlcv(force=True)
                 plans = await refresh_all_plans(force_data=False)
-
-                top = sorted(
-                    plans.values(),
-                    key=lambda p: p.confidence,
-                    reverse=True,
-                )[:TOP_SIGNALS_COUNT]
-                await asyncio.gather(
-                    *(send_report_to_user(app, chat_id, top) for chat_id in list(subscribed_chat_ids)),
-                    return_exceptions=True,
-                )
+                top = sorted(plans.values(), key=lambda p: p.confidence, reverse=True)[:TOP_SIGNALS_COUNT]
+                await asyncio.gather(*(send_report_to_user(app, chat_id, top) for chat_id in list(subscribed_chat_ids)), return_exceptions=True)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.exception(
-                "Auto loop failed | type=%s | error=%s",
-                type(e).__name__, e,
-            )
+            logger.exception("Auto loop failed | error=%s", e)
         elapsed = time.time() - cycle_started
         await asyncio.sleep(max(5, CHECK_INTERVAL_SECONDS - elapsed))
-
 
 async def start(update, context):
     if not await guard(update):
         return
     chat_id = update.effective_chat.id
     await clear_interactive_screen(context, chat_id)
-    msg = await update.message.reply_text(
-        "👋 واحد پولی نمایش قیمت‌ها را انتخاب کن:",
-        reply_markup=kb_currency(),
-    )
+    msg = await update.message.reply_text("👋 واحد پولی نمایش قیمت‌ها را انتخاب کن:", reply_markup=kb_currency())
     set_interactive_screen(chat_id, [msg.message_id])
-
 
 async def stop(update, context):
     if not await guard(update):
         return
     subscribed_chat_ids.discard(update.effective_chat.id)
     save_state()
-    await update.message.reply_text(
-        "❌ اشتراک قطع شد.\nبرای فعال‌سازی دوباره /start را بزن."
-    )
-
+    await update.message.reply_text("❌ اشتراک قطع شد.\nبرای فعال‌سازی دوباره /start را بزن.")
 
 async def menu_command(update, context):
     if not await guard(update):
@@ -2093,47 +1760,37 @@ async def menu_command(update, context):
     subscribed_chat_ids.add(chat_id)
     save_state()
     await clear_interactive_screen(context, chat_id)
-    msg = await update.message.reply_text(
-        MAIN_MENU_HEADER,
-        reply_markup=kb_main(user_id),
-        parse_mode="Markdown",
-    )
+    msg = await update.message.reply_text(MAIN_MENU_HEADER, reply_markup=kb_main(user_id), parse_mode="Markdown")
     set_interactive_screen(chat_id, [msg.message_id])
-
 
 async def status(update, context):
     if not await guard(update):
         return
+    ok = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "SWAP OK")
+    no_swap = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "NO SWAP")
+    ticker_error = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "TICKER ERROR")
     await update.message.reply_text(
         f"🕒 {shamsi_now()}\n"
-        f"🪙 قراردادهای Perpetual: {len(cache.valid_codes)}\n"
+        f"🪙 کل ارزهای تعریف‌شده: {len(COIN_CODES)}\n"
+        f"🟢 SWAP OK: {ok}\n"
+        f"⚪ NO SWAP: {no_swap}\n"
+        f"🟠 TICKER ERROR: {ticker_error}\n"
         f"📊 داده 1h: {len(cache.ohlcv['1h'])}\n"
         f"📊 داده 4h: {len(cache.ohlcv['4h'])}\n"
         f"📊 داده 1d: {len(cache.ohlcv['1d'])}\n"
         f"⚡ سیگنال‌ها: {len(last_plans)}\n"
-        f"👥 اعضا: {len(subscribed_chat_ids)}\n"
-        f"🔄 آخرین بروزرسانی OHLCV: "
-        f"{shamsi_now() if cache.last_full_ohlcv_update else 'هنوز انجام نشده'}"
+        f"👥 اعضا: {len(subscribed_chat_ids)}"
     )
-
 
 def save_state():
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "subscribed_chat_ids": list(subscribed_chat_ids),
-                    "user_currency": user_currency,
-                },
-                f,
-                ensure_ascii=False,
-            )
+            json.dump({"subscribed_chat_ids": list(subscribed_chat_ids), "user_currency": user_currency}, f, ensure_ascii=False)
         os.replace(tmp, STATE_FILE)
     except Exception as e:
         logger.warning("State save failed: %s", e)
-
 
 def load_state():
     global subscribed_chat_ids, user_currency
@@ -2141,15 +1798,12 @@ def load_state():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         subscribed_chat_ids = {int(x) for x in data.get("subscribed_chat_ids", [])}
-        user_currency = {
-            int(k): v for k, v in data.get("user_currency", {}).items()
-        }
+        user_currency = {int(k): v for k, v in data.get("user_currency", {}).items()}
         logger.info("State restored: %s users", len(subscribed_chat_ids))
     except FileNotFoundError:
         logger.info("No state file; starting fresh.")
     except Exception as e:
         logger.warning("State load failed: %s", e)
-
 
 async def post_init(app):
     await app.bot.set_my_commands([
@@ -2158,24 +1812,15 @@ async def post_init(app):
         BotCommand("status", "وضعیت سیستم"),
     ])
     app.create_task(auto_report_loop(app))
-    logger.info("Signal Bot V8 started")
-
+    logger.info("Signal Bot V8 (Binance) started")
 
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("❌ BOT_TOKEN در .env تنظیم نشده است.")
-
     if not ALLOWED_USER_IDS:
-        logger.warning(
-            "⚠️ ALLOWED_USER_IDS تنظیم نشده؛ ربات برای همه باز است."
-        )
+        logger.warning("⚠️ ALLOWED_USER_IDS تنظیم نشده؛ ربات برای همه باز است.")
     load_state()
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("menu", menu_command))
@@ -2183,7 +1828,6 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     logger.info("Bot is running...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
