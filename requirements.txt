@@ -1,8 +1,10 @@
-ccxt>=4.5.0
-pandas>=2.2.0
-ta>=0.11.0
-python-telegram-bot>=22.0
-jdatetime>=5.0.0
-requests>=2.31.0
-python-dotenv>=1.0.0
+ccxt==4.4.67
+pandas==2.2.3
+ta==0.11.0
+python-telegram-bot[job-queue]==21.10
+requests==2.32.3
+python-dotenv==1.0.1
+jdatetime==5.0.0
+matplotlib==3.9.2
+numpy==1.26.4
 tzdata==2024.1
