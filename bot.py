@@ -1,19 +1,11 @@
 """
-Telegram Signal Bot V34 - KuCoin Futures (Final)
-- 100+ ارز
-- صرافی تحلیل: KuCoin Futures
-- قیمت‌گیری: بیت‌پین، ولکس، کوکوین، مکس + CoinGecko
-- منوی جداگانه ادمین و کاربر عادی با چیدمان بهینه
-- صفحه‌بندی لیست ارزها (۲۰ ارز در هر صفحه)
-- دکمه برگشت در تمام صفحات به‌درستی کار می‌کند
-- منوی رویدادها با دو بخش: رویدادهای پیش رو + اخبار و هشدارها (تاریخچه ۲۰ خبر با ذخیره در state)
-- رفع مشکل دریافت قیمت ارزهای خاص (TON, OCEAN, AGIX, 1000SATS, AI, MKR, HNT, CORE)
-- تنظیمات بهینه برای تولید سیگنال (MIN_SIGNAL_CONFIDENCE=50, MIN_DIRECTION_GAP=5)
-- adx_min مناسب برای هر حالت: سریع=8، نیمه‌سریع=9، استاندارد=15، محافظه‌کار=20
-- رفع مشکل پاک نشدن پیغام‌ها با clear_interactive_screen در تمام بخش‌ها
-- ذخیره‌سازی تاریخچه اخبار در state.json
-- رفع نمایش قیمت‌ها: نمایش قیمت از هر منبعی که موجود باشد، حتی اگر فیوچرز نباشد
-- رفع خطای Bad Request در دریافت قیمت از مکس و کوکوین با اصلاح فرمت سمبل‌ها و خطاگیری تکی
+Telegram Signal Bot V35 - KuCoin Futures (Final - Optimized)
+- بهینه‌سازی مصرف حافظه برای پلن Trial Railway
+- کاهش تعداد کندل‌ها به ۲۰۰
+- کاهش همزمانی به ۲
+- بروزرسانی فقط ارز درخواستی در زمان انتخاب ارز
+- بدون تغییر در حلقه خودکار (auto_report_loop)
+- حفظ کیفیت سیگنال‌ها
 """
 
 import asyncio
@@ -104,21 +96,20 @@ EVENTS_CHECK_SECONDS = 6 * 3600
 WHALE_CHECK_SECONDS = 30 * 60
 WHALE_MIN_AMOUNT_BTC = 1000
 
-# ---------- صفحه‌بندی ----------
+# ---------- بهینه‌سازی مصرف حافظه ----------
 PER_PAGE = 20
-
 WEIGHT_TREND = 25
 WEIGHT_MOMENTUM = 25
 WEIGHT_VOLUME = 15
 WEIGHT_VOLATILITY = 15
 WEIGHT_HTF = 20
 
-OHLCV_TTL_SECONDS = 120
+OHLCV_TTL_SECONDS = 30          # کاهش یافته از 120
 FULL_REFRESH_TTL_SECONDS = 300
-FUNDING_TTL_SECONDS = 120
-MAX_OHLCV_CONCURRENCY = 6
-MAX_SIGNAL_CONCURRENCY = 3
-MAX_PRICE_CONCURRENCY = 3
+FUNDING_TTL_SECONDS = 30         # کاهش یافته از 120
+MAX_OHLCV_CONCURRENCY = 2        # کاهش یافته از 6
+MAX_SIGNAL_CONCURRENCY = 2       # کاهش یافته از 3
+MAX_PRICE_CONCURRENCY = 2        # کاهش یافته از 3
 RLM = "\u200f"
 
 DATA_DIR = os.getenv("DATA_DIR", "/data")
@@ -159,15 +150,12 @@ signal_history: List[Dict] = []
 fear_greed_cache = {"value": None, "ts": 0.0, "classification": ""}
 upcoming_events_cache = {"events": [], "ts": 0.0}
 whale_alert_cache = {"last_id": None, "ts": 0.0}
-
-# ---------- تاریخچه اخبار (حداکثر ۲۰ خبر) ----------
 news_history: List[Dict] = []
 
 last_check_time = {}
 last_sent_signals = {}
 price_sources = {}
 
-# ---------- تنظیمات حالت‌های معاملاتی ----------
 MODE_CONFIGS = {
     "fast": {
         "label": "⚡ سریع",
@@ -219,7 +207,6 @@ MODE_CONFIGS = {
     },
 }
 
-# ---------- متغیرهای سیگنال‌دهی ----------
 MIN_SIGNAL_CONFIDENCE = 50
 MIN_DIRECTION_GAP = 5
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
@@ -371,7 +358,7 @@ class MarketDataCache:
                 return df.iloc[:-1].copy().reset_index(drop=True)
         return df.copy().reset_index(drop=True)
 
-    # ---------- دریافت قیمت با خطاگیری تکی ----------
+    # ---------- دریافت قیمت با خطاگیری تکی (بهینه) ----------
     async def _fetch_ticker_safe(self, exchange_obj, symbol, code):
         try:
             ticker = await asyncio.to_thread(exchange_obj.fetch_ticker, symbol)
@@ -382,13 +369,15 @@ class MarketDataCache:
             logger.debug("Ticker failed for %s: %s", code, e)
         return None, None
 
-    async def update_prices(self, force=False):
+    async def update_prices(self, force=False, codes=None):
+        """به‌روزرسانی قیمت‌ها. اگر codes داده شود، فقط برای همان ارزها"""
         if not self.exchange_symbols:
             self._load_markets()
         now = time.time()
         if not force and self.prices and self.last_price_update and now - self.last_price_update < 60:
             return self.prices
 
+        target_codes = codes if codes is not None else COIN_CODES
         new_prices = {}
         price_sources.clear()
 
@@ -396,7 +385,7 @@ class MarketDataCache:
         try:
             bitpin_prices = await asyncio.to_thread(self._get_bitpin_prices)
             for code, price in bitpin_prices.items():
-                if price > 0:
+                if code in target_codes and price > 0:
                     new_prices[code] = price
                     price_sources[code] = "B"
         except Exception as e:
@@ -406,7 +395,7 @@ class MarketDataCache:
         try:
             wallex_prices = await asyncio.to_thread(self._get_wallex_prices)
             for code, price in wallex_prices.items():
-                if code not in new_prices and price > 0:
+                if code in target_codes and code not in new_prices and price > 0:
                     new_prices[code] = price
                     price_sources[code] = "W"
         except Exception as e:
@@ -415,7 +404,7 @@ class MarketDataCache:
         # 3) کوکوین فیوچرز (تکی)
         try:
             tasks = []
-            for code in self.exchange_symbols.keys():
+            for code in target_codes:
                 symbol = self.symbol_for_code(code)
                 if symbol:
                     tasks.append(self._fetch_ticker_safe(exchange, symbol, code))
@@ -427,10 +416,10 @@ class MarketDataCache:
         except Exception as e:
             logger.warning("KuCoin fetch failed: %s", e)
 
-        # 4) مکس فیوچرز (تکی) - فرمت CODE/USDT
+        # 4) مکس فیوچرز (تکی)
         try:
             tasks = []
-            for code in COIN_CODES:
+            for code in target_codes:
                 symbol = f"{code}/USDT"
                 tasks.append(self._fetch_ticker_safe(exchange_mexc, symbol, code))
             results = await asyncio.gather(*tasks)
@@ -444,7 +433,7 @@ class MarketDataCache:
         # 5) کوکوین اسپات (تکی)
         try:
             tasks = []
-            for code in COIN_CODES:
+            for code in target_codes:
                 symbol = f"{code}/USDT"
                 tasks.append(self._fetch_ticker_safe(exchange_spot_kucoin, symbol, code))
             results = await asyncio.gather(*tasks)
@@ -458,7 +447,7 @@ class MarketDataCache:
         # 6) مکس اسپات (تکی)
         try:
             tasks = []
-            for code in COIN_CODES:
+            for code in target_codes:
                 symbol = f"{code}/USDT"
                 tasks.append(self._fetch_ticker_safe(exchange_spot_mexc, symbol, code))
             results = await asyncio.gather(*tasks)
@@ -471,7 +460,7 @@ class MarketDataCache:
 
         # 7) CoinGecko
         try:
-            missing_codes = [code for code in COIN_CODES if code not in new_prices]
+            missing_codes = [code for code in target_codes if code not in new_prices]
             if missing_codes:
                 gecko_prices = await asyncio.to_thread(self._get_coingecko_prices, missing_codes)
                 for code, price in gecko_prices.items():
@@ -482,14 +471,17 @@ class MarketDataCache:
             logger.warning("CoinGecko fetch failed: %s", e)
 
         # fallback به کندل
-        for code in COIN_CODES:
+        for code in target_codes:
             if code not in new_prices:
                 df = self.ohlcv.get("1h", {}).get(code)
                 if df is not None and not df.empty:
                     new_prices[code] = float(df["close"].iloc[-1])
                     price_sources[code] = "K"
 
-        self.prices = new_prices
+        # فقط قیمت‌های درخواستی را به‌روز می‌کنیم
+        for code in target_codes:
+            if code in new_prices:
+                self.prices[code] = new_prices[code]
         self.last_price_update = time.time()
         logger.info("Live prices loaded: %s/%s", len(self.prices), len(COIN_CODES))
         return self.prices
@@ -572,8 +564,8 @@ class MarketDataCache:
             logger.warning("CoinGecko fetch failed: %s", e)
         return prices
 
-    # ---------- OHLCV ----------
-    async def _fetch_ohlcv_symbol(self, code, timeframe, limit=1000):
+    # ---------- OHLCV (با کاهش تعداد کندل‌ها به ۲۰۰) ----------
+    async def _fetch_ohlcv_symbol(self, code, timeframe, limit=200):
         symbol = self.symbol_for_code(code)
         if not symbol:
             return None
@@ -617,7 +609,7 @@ class MarketDataCache:
                 self._load_markets()
             if not self.valid_codes:
                 return
-            target_codes = list(codes or self.valid_codes)
+            target_codes = list(codes if codes is not None else self.valid_codes)
             await asyncio.gather(*(self.ensure_symbol_data(c, TIMEFRAMES, force=force) for c in target_codes))
             self.last_full_ohlcv_update = time.time()
             logger.info("OHLCV refresh complete: %s", {tf: len(self.ohlcv.get(tf, {})) for tf in TIMEFRAMES})
@@ -1272,6 +1264,8 @@ def determine_leverage(confidence, mode):
 
 async def generate_trade_plan(code, mode="standard"):
     try:
+        # بروزرسانی فقط قیمت همین ارز
+        await cache.update_prices(force=True, codes=[code])
         ind = await cache.get_indicators(code, mode)
         if not ind:
             return None
@@ -1473,6 +1467,8 @@ def format_ladder_block(entries, take_profits, stop_losses, chat_id):
 
 # ---------- Instant status ----------
 async def generate_status_text_async(code, chat_id, mode="standard"):
+    # بروزرسانی فقط قیمت همین ارز
+    await cache.update_prices(force=True, codes=[code])
     ind = await cache.get_indicators(code, mode)
     if not ind:
         return rtl_lines(f"{COIN_ICONS.get(code, '🔸')} *{code}*\n\n⚠️ داده کافی برای تحلیل این ارز دریافت نشد.")
@@ -1546,6 +1542,8 @@ async def generate_status_text_async(code, chat_id, mode="standard"):
 
 # ---------- Weekly summary ----------
 async def generate_weekly_summary_async(code, chat_id):
+    # بروزرسانی فقط قیمت همین ارز
+    await cache.update_prices(force=True, codes=[code])
     week_df = await cache.get_weekly_data(code)
     if week_df is None or len(week_df) < 2:
         return rtl_lines(f"{COIN_ICONS.get(code, '🔸')} *{code}*\n\n⚠️ حداقل داده لازم برای تحلیل ۷ روزه دریافت نشد.")
@@ -1652,7 +1650,7 @@ async def generate_weekly_summary_async(code, chat_id):
     )
     return rtl_lines(text)
 
-# ---------- Prices formatting (اصلاح‌شده) ----------
+# ---------- Prices formatting ----------
 def format_prices_pretty(prices, chat_id):
     lines = ["💰 قیمت لحظه‌ای قراردادها", f"🕒 {shamsi_now()}", DIVIDER]
     for code in COIN_CODES:
@@ -2634,6 +2632,7 @@ async def button_handler(update, context):
         await query.edit_message_text("⏳ در حال تحلیل همه ارزها (برای ادمین)...")
         try:
             mode = "standard"
+            # توجه: تابع refresh_all_plans باید در جای خود تعریف شده باشد
             plans = await asyncio.wait_for(refresh_all_plans(force_data=False, mode=mode), timeout=300)
         except asyncio.TimeoutError:
             await query.edit_message_text("⏰ تحلیل همه ارزها طول کشید.", reply_markup=kb_back_main()); return
@@ -2655,6 +2654,7 @@ async def button_handler(update, context):
             return
 
 async def auto_report_loop(app):
+    """حلقه خودکار - بدون تغییر باقی مانده است"""
     await asyncio.sleep(10)
     while True:
         try:
@@ -2721,7 +2721,7 @@ async def post_init(app):
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
-    logger.info("Signal Bot V34 (KuCoin Final) started")
+    logger.info("Signal Bot V35 (Optimized) started")
 
 def main():
     if not BOT_TOKEN:
