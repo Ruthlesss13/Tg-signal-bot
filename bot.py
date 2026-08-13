@@ -1,5 +1,5 @@
 """
-Telegram Signal Bot V31 - KuCoin Futures (Final)
+Telegram Signal Bot V32 - KuCoin Futures (Final)
 - 100 ارز
 - صرافی تحلیل: KuCoin Futures
 - قیمت‌گیری: بیت‌پین، ولکس، کوکوین، مکس + CoinGecko در صورت نبود
@@ -10,7 +10,9 @@ Telegram Signal Bot V31 - KuCoin Futures (Final)
 - متن خوش‌آمدگویی زیباتر بدون دستور /stop
 - دکمه‌های بازگشت کامل در هر دو حالت
 - اضافه شدن صفحه‌بندی لیست ارزها (هر صفحه ۲۰ ارز + دکمه‌های قبلی/بعدی)
-- رفع دکمه برگشت در جزئیات فنی برای ادمین (تغییر به coin_)
+- رفع دکمه برگشت در جزئیات فنی و پیشنهاد لحظه‌ای (تغییر به coin_)
+- تنظیمات سیگنال‌دهی متعادل (MIN_SIGNAL_CONFIDENCE=60, MIN_DIRECTION_GAP=8)
+- کاهش adx_min در حالت‌های سریع برای تولید سیگنال‌های بیشتر بدون کاهش کیفیت
 """
 
 import asyncio
@@ -101,7 +103,7 @@ EVENTS_CHECK_SECONDS = 6 * 3600
 WHALE_CHECK_SECONDS = 30 * 60
 WHALE_MIN_AMOUNT_BTC = 1000
 
-# ---------- اضافه شده برای صفحه‌بندی ----------
+# ---------- صفحه‌بندی ----------
 PER_PAGE = 20  # تعداد ارز در هر صفحه
 
 WEIGHT_TREND = 25
@@ -161,6 +163,7 @@ last_check_time = {}
 last_sent_signals = {}
 price_sources = {}
 
+# ---------- تنظیمات حالت‌های معاملاتی (اصلاح adx_min) ----------
 MODE_CONFIGS = {
     "fast": {
         "label": "⚡ سریع",
@@ -171,7 +174,7 @@ MODE_CONFIGS = {
         "sl_atr_mult": 0.8,
         "max_leverage": 10,
         "min_rr": 1.0,
-        "adx_min": 12,
+        "adx_min": 10,   # کاهش یافته از 12
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -183,7 +186,7 @@ MODE_CONFIGS = {
         "sl_atr_mult": 1.0,
         "max_leverage": 7,
         "min_rr": 1.1,
-        "adx_min": 13,
+        "adx_min": 11,   # کاهش یافته از 13
         "check_interval": 10 * 60,
     },
     "standard": {
@@ -195,7 +198,7 @@ MODE_CONFIGS = {
         "sl_atr_mult": 1.2,
         "max_leverage": 5,
         "min_rr": 1.2,
-        "adx_min": 15,
+        "adx_min": 15,   # بدون تغییر
         "check_interval": 30 * 60,
     },
     "conservative": {
@@ -207,10 +210,14 @@ MODE_CONFIGS = {
         "sl_atr_mult": 2.0,
         "max_leverage": 3,
         "min_rr": 1.5,
-        "adx_min": 20,
+        "adx_min": 20,   # بدون تغییر
         "check_interval": 60 * 60,
     },
 }
+
+# ---------- متغیرهای سیگنال‌دهی (جدید) ----------
+MIN_SIGNAL_CONFIDENCE = 60   # حداقل امتیاز اطمینان برای تولید سیگنال
+MIN_DIRECTION_GAP = 8        # حداقل اختلاف امتیاز بین لانگ و شورت (کاهش یافته از 10)
 
 @dataclass
 class TradePlan:
@@ -420,7 +427,7 @@ class MarketDataCache:
         except Exception as e:
             logger.warning("MEXC spot fetch failed: %s", e)
 
-        # 7) CoinGecko (آخرین راه‌حل)
+        # 7) CoinGecko
         try:
             missing_codes = [code for code in COIN_CODES if code not in new_prices]
             if missing_codes:
@@ -428,11 +435,11 @@ class MarketDataCache:
                 for code, price in gecko_prices.items():
                     if code not in new_prices and price > 0:
                         new_prices[code] = price
-                        price_sources[code] = "C"   # CoinGecko
+                        price_sources[code] = "C"
         except Exception as e:
             logger.warning("CoinGecko fetch failed: %s", e)
 
-        # fallback به آخرین کندل کوکوین
+        # fallback
         for code in COIN_CODES:
             if code not in new_prices:
                 df = self.ohlcv.get("1h", {}).get(code)
@@ -446,7 +453,6 @@ class MarketDataCache:
         return self.prices
 
     def _get_bitpin_prices(self):
-        # بیت‌پین API عمومی – در صورت نیاز اینجا پیاده‌سازی شود
         return {}
 
     def _get_wallex_prices(self):
@@ -537,12 +543,8 @@ class MarketDataCache:
             return {}
 
     def _get_coingecko_prices(self, codes):
-        """
-        دریافت قیمت از CoinGecko برای ارزهایی که در صرافی‌ها موجود نیستند.
-        """
         prices = {}
         try:
-            # CoinGecko رایگان است اما نرخ محدود دارد؛ درخواست ساده
             ids_map = {
                 "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "BNB": "binancecoin",
                 "XRP": "ripple", "ADA": "cardano", "DOGE": "dogecoin", "AVAX": "avalanche-2",
@@ -578,12 +580,8 @@ class MarketDataCache:
             ids = [ids_map[code] for code in codes if code in ids_map]
             if not ids:
                 return prices
-            # CoinGecko سقف تعداد درخواست دارد؛ ساده‌سازی
             url = "https://api.coingecko.com/api/v3/simple/price"
-            params = {
-                "ids": ",".join(ids),
-                "vs_currencies": "usd",
-            }
+            params = {"ids": ",".join(ids), "vs_currencies": "usd"}
             r = requests.get(url, params=params, timeout=10)
             r.raise_for_status()
             data = r.json()
@@ -1192,6 +1190,7 @@ def decide_direction(ind, mode):
     if not adx_ok:
         return None, max(long_score, short_score), None
 
+    # استفاده از متغیرهای سراسری MIN_SIGNAL_CONFIDENCE و MIN_DIRECTION_GAP
     if long_base and long_score >= MIN_SIGNAL_CONFIDENCE and long_score >= short_score + MIN_DIRECTION_GAP:
         return "LONG", long_score, long_scores
     if short_base and short_score >= MIN_SIGNAL_CONFIDENCE and short_score >= long_score + MIN_DIRECTION_GAP:
@@ -1800,7 +1799,7 @@ def kb_admin_panel():
 def kb_back_main():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")]])
 
-# ---------- صفحه‌بندی لیست ارزها ----------
+# ---------- صفحه‌بندی لیست ارزها (اصلاح‌شده) ----------
 def kb_coins(page=0):
     start = page * PER_PAGE
     end = start + PER_PAGE
@@ -1844,7 +1843,7 @@ def kb_signal_details(code):
     ])
 
 def kb_back_to_signal(code):
-    # تغییر داده شد: به جای suggest_ از coin_ استفاده می‌شود تا برای ادمین هم کار کند
+    # دکمه برگشت به صفحه ارز (اصلاح‌شده)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 بازگشت به صفحه ارز", callback_data=f"coin_{code}")],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")],
@@ -1857,6 +1856,7 @@ def kb_weekly(code):
     ])
 
 def kb_suggestion(code):
+    # دکمه برگشت اصلاح‌شده به coin_ (نه suggest_)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"suggest_{code}")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data=f"coin_{code}")],
@@ -2408,7 +2408,7 @@ async def button_handler(update, context):
         await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
         return
 
-    # ---------- صفحه‌بندی ارزها ----------
+    # ---------- صفحه‌بندی ارزها (مدیریت دکمه‌های قبلی/بعدی) ----------
     if data.startswith("coins_page_"):
         page = int(data.split("_")[2])
         await query.edit_message_reply_markup(reply_markup=kb_coins(page))
@@ -2428,7 +2428,6 @@ async def button_handler(update, context):
 
     if data == "menu_coins":
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        # نمایش صفحه اول (0)
         await query.edit_message_text(rtl_lines(f"🪙 *انتخاب ارز مورد نظر*\n{DIVIDER}\n{MENU_PROMPT}"), reply_markup=kb_coins(0), parse_mode="Markdown")
         set_interactive_screen(chat_id, [query.message.message_id]); return
 
@@ -2513,7 +2512,7 @@ async def button_handler(update, context):
     # ----- Normal user direct handlers -----
     if data.startswith("suggest_"):
         if is_admin_role(chat_id):
-            # برای ادمین این مسیر مسدود است (همان محدودیت قبلی)
+            # محدودیت ادمین: این مسیر برای ادمین مسدود است (همان رفتار قبلی)
             return
         code = data.split("suggest_", 1)[1]
         if code not in COIN_CODES: return
@@ -2569,7 +2568,6 @@ async def button_handler(update, context):
             plan = await generate_trade_plan(code, mode)
             if not plan: await query.edit_message_text("💤 سیگنال فعلی موجود نیست.\nدلایل احتمالی: ADX پایین، عدم تأیید تایم‌فریم بالا، نسبت R/R کمتر از حد مجاز.", reply_markup=kb_back_main()); return
             details_text = format_technical_details(code, plan, ind, chat_id)
-            # از kb_back_to_signal استفاده می‌شود که اکنون به coin_ اشاره دارد
             await query.edit_message_text(split_long_message(details_text)[0], reply_markup=kb_back_to_signal(code), parse_mode="Markdown")
         except Exception as e:
             logger.exception("Details UI error | code=%s: %s", code, e)
@@ -2703,7 +2701,7 @@ async def post_init(app):
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
-    logger.info("Signal Bot V31 (KuCoin Final) started")
+    logger.info("Signal Bot V32 (KuCoin Final) started")
 
 def main():
     if not BOT_TOKEN:
