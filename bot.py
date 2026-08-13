@@ -1,9 +1,11 @@
 """
-Telegram Signal Bot V21 - KuCoin Futures (Multi-Mode Stable)
-- چهار حالت معاملاتی با تایم‌فریم‌های متفاوت
-- انتخاب حالت پس از انتخاب واحد پولی
-- دکمه تغییر سبک معاملاتی و توقف ربات
-- رفع مشکل قیمت‌ها با fetch_tickers و fallback
+Telegram Signal Bot V23 - KuCoin Futures (Final Stable & User-Friendly)
+- رفع مشکلات قیمت، تحلیل، داشبورد، نمودار، منو
+- چهار حالت معاملاتی
+- منوی مرتب ۸ دکمه برای کاربر، ۱۰ دکمه برای ادمین
+- علاقه‌مندی‌ها، راهنما، پیشنهاد لحظه‌ای برای هر ارز
+- حذف «همه پیشنهادات»
+- دکمه شروع مجدد و توقف ربات
 - گزارش مقایسه‌ای ادمین
 """
 
@@ -83,7 +85,6 @@ COIN_ICONS = {
 }
 COIN_CODES = list(COIN_ICONS.keys())
 
-TIMEFRAME = "1h"
 TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d")
 CHECK_INTERVAL_SECONDS = 15 * 60
 TOP_SIGNALS_COUNT = 5
@@ -131,6 +132,7 @@ last_plans = {}
 subscribed_chat_ids = set()
 user_currency = {}
 user_trading_mode = {}
+user_favorites = {}  # chat_id -> set of coin codes
 auto_message_history = {}
 overlay_messages = {}
 interactive_screen_messages = {}
@@ -1143,12 +1145,8 @@ def decide_direction(ind, mode):
         return None, max(long_score, short_score), None
 
     if long_base and long_score >= MIN_SIGNAL_CONFIDENCE and long_score >= short_score + MIN_DIRECTION_GAP:
-        if ind["higher_tf_trend_up"] is False or ind["higher_tf_trend_down"] is True:
-            return None, long_score, long_scores
         return "LONG", long_score, long_scores
     if short_base and short_score >= MIN_SIGNAL_CONFIDENCE and short_score >= long_score + MIN_DIRECTION_GAP:
-        if ind["higher_tf_trend_down"] is False or ind["higher_tf_trend_up"] is True:
-            return None, short_score, short_scores
         return "SHORT", short_score, short_scores
     return None, max(long_score, short_score), None
 
@@ -1713,12 +1711,13 @@ def kb_main(user_id, mode="standard"):
     mode_label = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])["label"]
     rows = [
         [InlineKeyboardButton("💰 قیمت لحظه‌ای", callback_data="menu_prices"), InlineKeyboardButton("🪙 انتخاب ارز", callback_data="menu_coins")],
-        [InlineKeyboardButton("📊 همه پیشنهادات", callback_data="menu_all"), InlineKeyboardButton("🧾 گزارش دوره‌ای", callback_data="periodic_report")],
-        [InlineKeyboardButton("📈 داشبورد تحلیلی", callback_data="dashboard"), InlineKeyboardButton("📅 رویدادها", callback_data="events")],
-        [InlineKeyboardButton("🔄 تغییر سبک معاملاتی", callback_data="change_mode"), InlineKeyboardButton("🛑 توقف ربات", callback_data="stop_bot")],
+        [InlineKeyboardButton("🧾 گزارش دوره‌ای", callback_data="periodic_report"), InlineKeyboardButton("📈 داشبورد تحلیلی", callback_data="dashboard")],
+        [InlineKeyboardButton("📅 رویدادها", callback_data="events"), InlineKeyboardButton("⭐ علاقه‌مندی‌ها", callback_data="favorites")],
+        [InlineKeyboardButton("🔄 تغییر سبک معاملاتی", callback_data="change_mode"), InlineKeyboardButton("🔄 شروع مجدد", callback_data="restart_bot")],
+        [InlineKeyboardButton("🛑 توقف ربات", callback_data="stop_bot"), InlineKeyboardButton("❓ راهنما", callback_data="help")],
     ]
     if is_admin(user_id):
-        rows.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel"), InlineKeyboardButton("\u2063", callback_data="noop")])
+        rows.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
     return InlineKeyboardMarkup(rows)
 
 def kb_admin_panel():
@@ -1743,10 +1742,13 @@ def kb_coins():
     rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
-def kb_coin_detail(code):
+def kb_coin_detail(code, is_fav):
+    fav_btn = InlineKeyboardButton("🗑️ حذف از علاقه‌مندی‌ها" if is_fav else "⭐ افزودن به علاقه‌مندی‌ها", callback_data=f"toggle_fav_{code}")
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧭 وضعیت لحظه‌ای", callback_data=f"suggest_{code}")],
         [InlineKeyboardButton("📆 تحلیل ۷ روز اخیر", callback_data=f"weekly_{code}")],
+        [InlineKeyboardButton("🚀 پیشنهاد لحظه‌ای", callback_data=f"instant_{code}")],
+        [fav_btn],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")],
     ])
 
@@ -1793,6 +1795,83 @@ def kb_periodic_report():
         [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")],
     ])
 
+def kb_help(step=0):
+    if step == 0:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("بعدی ⬅️", callback_data="help_1")],
+            [InlineKeyboardButton("بازگشت", callback_data="menu_main")],
+        ])
+    elif step == 1:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ قبلی", callback_data="help_0"), InlineKeyboardButton("بعدی ⬅️", callback_data="help_2")],
+            [InlineKeyboardButton("بازگشت", callback_data="menu_main")],
+        ])
+    elif step == 2:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ قبلی", callback_data="help_1"), InlineKeyboardButton("بعدی ⬅️", callback_data="help_3")],
+            [InlineKeyboardButton("بازگشت", callback_data="menu_main")],
+        ])
+    elif step == 3:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ قبلی", callback_data="help_2"), InlineKeyboardButton("بعدی ⬅️", callback_data="help_4")],
+            [InlineKeyboardButton("بازگشت", callback_data="menu_main")],
+        ])
+    else:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ قبلی", callback_data="help_3")],
+            [InlineKeyboardButton("بازگشت", callback_data="menu_main")],
+        ])
+
+def help_text(step):
+    if step == 0:
+        return rtl_lines(
+            "📖 *راهنمای سیگنال‌یار*\n"
+            f"{DIVIDER}\n"
+            "این ربات به شما کمک می‌کند سیگنال‌های معاملاتی فیوچرز دریافت کنید.\n"
+            "برای شروع، واحد پولی و سبک معاملاتی خود را انتخاب کنید."
+        )
+    elif step == 1:
+        return rtl_lines(
+            "🛠️ *حالت‌های معاملاتی*\n"
+            f"{DIVIDER}\n"
+            "⚡ سریع: تایم‌فریم ۵ دقیقه، اهرم تا ۱۰، برای اسکالپ\n"
+            "🔥 نیمه‌سریع: تایم‌فریم ۱۵ دقیقه، اهرم تا ۷\n"
+            "📊 استاندارد: تایم‌فریم ۱ ساعته، اهرم تا ۵\n"
+            "🛡️ محافظه‌کار: تایم‌فریم ۴ ساعته، اهرم تا ۳"
+        )
+    elif step == 2:
+        return rtl_lines(
+            "📊 *اندیکاتورها*\n"
+            f"{DIVIDER}\n"
+            "EMA: میانگین متحرک (۲۰، ۵۰، ۲۰۰)\n"
+            "RSI: قدرت خرید/فروش (۳۰-۷۰)\n"
+            "MACD: مومنتوم و تغییر روند\n"
+            "ADX: قدرت روند (بالای ۲۵ قوی)\n"
+            "ATR: نوسان‌پذیری (برای حد سود/ضرر)\n"
+            "VWAP: میانگین حجمی قیمت"
+        )
+    elif step == 3:
+        return rtl_lines(
+            "💡 *اصطلاحات فیوچرز*\n"
+            f"{DIVIDER}\n"
+            "لانگ: خرید با انتظار افزایش قیمت\n"
+            "شورت: فروش با انتظار کاهش قیمت\n"
+            "اهرم: چند برابر کردن سرمایه (ریسک بالا)\n"
+            "حد ضرر: سفارش خودکار برای خروج از ضرر\n"
+            "حد سود: سفارش خودکار برای برداشت سود\n"
+            "R/R: نسبت ریسک به بازده"
+        )
+    else:
+        return rtl_lines(
+            "⚙️ *امکانات*\n"
+            f"{DIVIDER}\n"
+            "علاقه‌مندی‌ها: ارزهای مورد نظر خود را نشان کنید\n"
+            "گزارش دوره‌ای: عملکرد هفتگی/ماهانه\n"
+            "داشبورد: آمار برد/باخت و شاخص‌ها\n"
+            "رویدادها: اخبار مهم کریپتو\n"
+            "توقف ربات: قطع اشتراک"
+        )
+
 def welcome_text():
     return rtl_lines(
         "🌟✨ *به سیگنال‌یار حرفه‌ای خوش اومدی!* ✨🌟\n"
@@ -1818,7 +1897,8 @@ async def finish_start(context, chat_id, user_id):
     ] if is_admin(user_id) else [BotCommand("menu", "منوی اصلی")]
     await context.bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=chat_id))
     await clear_interactive_screen(context, chat_id)
-    msg = await context.bot.send_message(chat_id=chat_id, text=welcome_text(), reply_markup=kb_main(user_id, user_trading_mode.get(chat_id, "standard")), parse_mode="Markdown")
+    mode = user_trading_mode.get(chat_id, "standard")
+    msg = await context.bot.send_message(chat_id=chat_id, text=welcome_text(), reply_markup=kb_main(user_id, mode), parse_mode="Markdown")
     set_interactive_screen(chat_id, [msg.message_id])
 
 # ---------- Trailing monitor ----------
@@ -2028,19 +2108,21 @@ def save_state():
                 "subscribed_chat_ids": list(subscribed_chat_ids),
                 "user_currency": user_currency,
                 "user_trading_mode": user_trading_mode,
+                "user_favorites": {str(k): list(v) for k, v in user_favorites.items()},
             }, f, ensure_ascii=False)
         os.replace(tmp, STATE_FILE)
     except Exception as e:
         logger.warning("State save failed: %s", e)
 
 def load_state():
-    global subscribed_chat_ids, user_currency, user_trading_mode
+    global subscribed_chat_ids, user_currency, user_trading_mode, user_favorites
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         subscribed_chat_ids = {int(x) for x in data.get("subscribed_chat_ids", [])}
         user_currency = {int(k): v for k, v in data.get("user_currency", {}).items()}
         user_trading_mode = {int(k): v for k, v in data.get("user_trading_mode", {}).items()}
+        user_favorites = {int(k): set(v) for k, v in data.get("user_favorites", {}).items()}
         logger.info("State restored: %s users", len(subscribed_chat_ids))
     except FileNotFoundError:
         logger.info("No state file; starting fresh.")
@@ -2074,11 +2156,30 @@ async def button_handler(update, context):
         await query.edit_message_text("🛠️ سبک معاملاتی جدید را انتخاب کن:", reply_markup=kb_mode_selection())
         return
 
+    if data == "restart_bot":
+        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
+        msg = await query.edit_message_text("👋 واحد پولی نمایش قیمت‌ها را انتخاب کن:", reply_markup=kb_currency())
+        set_interactive_screen(chat_id, [query.message.message_id])
+        return
+
     if data == "stop_bot":
         subscribed_chat_ids.discard(chat_id)
         active_signals.pop(chat_id, None)
         save_state()
         await query.edit_message_text("🛑 ربات برای شما متوقف شد.\nبرای فعال‌سازی دوباره /start را بزن.")
+        return
+
+    if data == "help":
+        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
+        await query.edit_message_text(help_text(0), reply_markup=kb_help(0), parse_mode="Markdown")
+        set_interactive_screen(chat_id, [query.message.message_id])
+        return
+
+    if data.startswith("help_"):
+        step = int(data.split("_")[1])
+        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
+        await query.edit_message_text(help_text(step), reply_markup=kb_help(step), parse_mode="Markdown")
+        set_interactive_screen(chat_id, [query.message.message_id])
         return
 
     if data == "close_temp":
@@ -2134,6 +2235,47 @@ async def button_handler(update, context):
                 text += f"• {ev['name']} — {shamsi_date(ev['time'])} {ev['time'].strftime('%H:%M')}\n"
         await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
         set_interactive_screen(chat_id, [query.message.message_id])
+        return
+
+    if data == "favorites":
+        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
+        favs = user_favorites.get(chat_id, set())
+        if not favs:
+            text = "⭐ *علاقه‌مندی‌ها*\n\nشما هنوز ارزی به علاقه‌مندی‌ها اضافه نکرده‌اید."
+            await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
+        else:
+            buttons = []
+            for code in favs:
+                status = cache.market_status.get(code, {}).get("status")
+                if status == "SWAP OK": label = f"{COIN_ICONS.get(code, '🔸')} {code} 🟢"
+                elif status == "TICKER ERROR": label = f"{COIN_ICONS.get(code, '🔸')} {code} 🟠"
+                else: label = f"{COIN_ICONS.get(code, '🔸')} {code} ⚪"
+                buttons.append(InlineKeyboardButton(label, callback_data=f"coin_{code}"))
+            rows = build_grid_keyboard(buttons, 2)
+            rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")])
+            await query.edit_message_text(
+                rtl_lines(f"⭐ *علاقه‌مندی‌ها*\n{DIVIDER}\n{MENU_PROMPT}"),
+                reply_markup=InlineKeyboardMarkup(rows),
+                parse_mode="Markdown",
+            )
+        set_interactive_screen(chat_id, [query.message.message_id])
+        return
+
+    if data.startswith("toggle_fav_"):
+        code = data.split("toggle_fav_", 1)[1]
+        favs = user_favorites.setdefault(chat_id, set())
+        if code in favs:
+            favs.discard(code)
+            await query.answer(f"❌ {code} از علاقه‌مندی‌ها حذف شد.")
+        else:
+            favs.add(code)
+            await query.answer(f"⭐ {code} به علاقه‌مندی‌ها اضافه شد.")
+        save_state()
+        # Update coin detail keyboard
+        try:
+            await query.edit_message_reply_markup(reply_markup=kb_coin_detail(code, code in favs))
+        except Exception:
+            pass
         return
 
     if data == "periodic_report":
@@ -2199,10 +2341,12 @@ async def button_handler(update, context):
             warning = ""
             if status == "TICKER ERROR":
                 warning = "⚠️ قیمت لحظه‌ای در دسترس نیست، اما تحلیل‌های دیگر کار می‌کنند.\n\n"
+            favs = user_favorites.get(chat_id, set())
+            is_fav = code in favs
             await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
             await query.edit_message_text(
                 rtl_lines(f"{COIN_ICONS.get(code, '🔸')} *{sym(code)}*\n{DIVIDER}\n{warning}🟢 وضعیت بازار: *SWAP OK*\n{MENU_PROMPT}"),
-                reply_markup=kb_coin_detail(code),
+                reply_markup=kb_coin_detail(code, is_fav),
                 parse_mode="Markdown",
             )
             set_interactive_screen(chat_id, [query.message.message_id])
@@ -2211,6 +2355,36 @@ async def button_handler(update, context):
             await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
             await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
             set_interactive_screen(chat_id, [query.message.message_id])
+        return
+
+    if data.startswith("instant_"):
+        code = data.split("instant_", 1)[1]
+        if code not in COIN_CODES: return
+        status = cache.market_status.get(code, {}).get("status")
+        if status != "SWAP OK":
+            await query.edit_message_text(f"⚠️ قرارداد {code} در KuCoin Futures در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            return
+        mode = user_trading_mode.get(chat_id, "standard")
+        await query.edit_message_text("⏳ در حال تحلیل و تولید پیشنهاد لحظه‌ای...")
+        try:
+            plan = await asyncio.wait_for(generate_trade_plan(code, mode), timeout=30)
+            if plan is None:
+                await query.edit_message_text(f"💤 فعلاً سیگنال نهایی برای {code} وجود ندارد.\nدلایل احتمالی: ADX پایین، عدم تأیید تایم‌فریم بالاتر، نسبت R/R کمتر از حد مجاز.", reply_markup=kb_back_main(), parse_mode="Markdown")
+                return
+            main_text = format_main_signal(plan, code, chat_id)
+            chart_buf = generate_price_chart(code, MODE_CONFIGS[mode]["main_tf"])
+            if chart_buf:
+                msg = await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=main_text, parse_mode="Markdown")
+                add_to_interactive_screen(chat_id, msg.message_id)
+            else:
+                msg = await context.bot.send_message(chat_id=chat_id, text=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
+                add_to_interactive_screen(chat_id, msg.message_id)
+            active_signals.setdefault(chat_id, {})[code] = {"plan": plan, "stage": 0, "last_notified": 0}
+        except asyncio.TimeoutError:
+            await query.edit_message_text("⏰ دریافت اطلاعات بیش از حد طول کشید.", reply_markup=kb_back_main())
+        except Exception as e:
+            logger.exception("Signal UI error | code=%s: %s", code, e)
+            await query.edit_message_text(f"❌ خطا در دریافت اطلاعات {code}.", reply_markup=kb_back_main())
         return
 
     if data.startswith("suggest_"):
@@ -2228,30 +2402,15 @@ async def button_handler(update, context):
         else:
             await query.edit_message_text("⏳ در حال دریافت وضعیت لحظه‌ای...")
         try:
-            if auto:
-                plan = await asyncio.wait_for(generate_trade_plan(code, mode), timeout=30)
-                if plan is None:
-                    await query.edit_message_text(f"💤 فعلاً سیگنال نهایی برای {code} وجود ندارد.\nدلایل احتمالی: ADX پایین، عدم تأیید تایم‌فریم بالا، نسبت R/R کمتر از حد مجاز.", reply_markup=kb_back_main(), parse_mode="Markdown")
-                    return
-                main_text = format_main_signal(plan, code, chat_id)
-                chart_buf = generate_price_chart(code, MODE_CONFIGS[mode]["main_tf"])
-                if chart_buf:
-                    msg = await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=main_text, parse_mode="Markdown")
-                    add_to_interactive_screen(chat_id, msg.message_id)
-                else:
-                    msg = await context.bot.send_message(chat_id=chat_id, text=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
-                    add_to_interactive_screen(chat_id, msg.message_id)
-                active_signals.setdefault(chat_id, {})[code] = {"plan": plan, "stage": 0, "last_notified": 0}
+            text = await asyncio.wait_for(generate_status_text_async(code, chat_id, mode), timeout=30)
+            chart_buf = generate_price_chart(code, MODE_CONFIGS[mode]["main_tf"])
+            if chart_buf:
+                await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
+                photo_msg = await context.bot.send_photo(chat_id=chat_id, photo=chart_buf)
+                add_to_interactive_screen(chat_id, photo_msg.message_id)
             else:
-                text = await asyncio.wait_for(generate_status_text_async(code, chat_id, mode), timeout=30)
-                chart_buf = generate_price_chart(code, MODE_CONFIGS[mode]["main_tf"])
-                if chart_buf:
-                    await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
-                    photo_msg = await context.bot.send_photo(chat_id=chat_id, photo=chart_buf)
-                    add_to_interactive_screen(chat_id, photo_msg.message_id)
-                else:
-                    await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
-                set_interactive_screen(chat_id, [query.message.message_id])
+                await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
+            set_interactive_screen(chat_id, [query.message.message_id])
         except asyncio.TimeoutError:
             await query.edit_message_text("⏰ دریافت اطلاعات بیش از حد طول کشید.", reply_markup=kb_back_main())
         except Exception as e:
@@ -2301,17 +2460,16 @@ async def button_handler(update, context):
             await query.edit_message_text(f"❌ خطا در تحلیل هفتگی {code}.", reply_markup=kb_back_main())
         return
 
-    if data == "menu_all":
+    if data == "menu_all":   # only used for admin refresh
+        if not is_admin(user_id):
+            await query.answer("⛔️ فقط ادمین.", show_alert=True); return
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        mode = user_trading_mode.get(chat_id, "standard")
-        await query.edit_message_text("⏳ در حال تحلیل همه ارزها...")
+        await query.edit_message_text("⏳ در حال تحلیل همه ارزها (برای ادمین)...")
         try:
+            mode = user_trading_mode.get(chat_id, "standard")
             plans = await asyncio.wait_for(refresh_all_plans(force_data=False, mode=mode), timeout=300)
         except asyncio.TimeoutError:
             await query.edit_message_text("⏰ تحلیل همه ارزها طول کشید.", reply_markup=kb_back_main()); return
-        except Exception as e:
-            logger.exception("Menu all error: %s", e)
-            await query.edit_message_text(f"❌ خطا در تحلیل همه ارزها.", reply_markup=kb_back_main()); return
         if not plans:
             text = f"📋 *نمایش همه پیشنهادات*\n🕒 {shamsi_now()}\n\n😴 فعلاً سیگنال نهایی نداریم.\n\nدلایل احتمالی:\n- ADX کمتر از {MODE_CONFIGS[mode]['adx_min']}\n- عدم تأیید تایم‌فریم بالاتر\n- نسبت R/R کمتر از {MODE_CONFIGS[mode]['min_rr']}\n- عدم وجود شرایط لازم در هیچ یک از {len(COIN_CODES)} ارز"
             await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
@@ -2416,8 +2574,22 @@ async def auto_report_loop(app):
                 await cache.update_ohlcv(force=True)
                 for chat_id in list(subscribed_chat_ids):
                     mode = user_trading_mode.get(chat_id, "standard")
-                    plans = await refresh_all_plans(force_data=False, mode=mode)
-                    top = sorted(plans.values(), key=lambda p: p.confidence, reverse=True)[:TOP_SIGNALS_COUNT]
+                    # فقط برای ارزهای مورد علاقه یا همه ارزها؟ برای فشار کمتر، فقط ارزهای مورد علاقه
+                    favs = user_favorites.get(chat_id)
+                    if favs:
+                        codes = list(favs)
+                    else:
+                        # اگر علاقه‌مندی خالی بود، از همه ارزها استفاده نکنیم تا فشار نیاد
+                        codes = []
+                    if codes:
+                        plans = {}
+                        for code in codes:
+                            plan = await generate_trade_plan(code, mode)
+                            if plan:
+                                plans[plan.symbol] = plan
+                        top = sorted(plans.values(), key=lambda p: p.confidence, reverse=True)[:TOP_SIGNALS_COUNT]
+                    else:
+                        top = []
                     await send_report_to_user(app, chat_id, top, mode)
         except asyncio.CancelledError:
             raise
@@ -2440,7 +2612,7 @@ async def post_init(app):
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
-    logger.info("Signal Bot V21 (Multi-Mode) started")
+    logger.info("Signal Bot V23 (Final Stable) started")
 
 def main():
     if not BOT_TOKEN:
