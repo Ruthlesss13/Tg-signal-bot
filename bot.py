@@ -13,6 +13,7 @@ Telegram Signal Bot V34 - KuCoin Futures (Final)
 - رفع مشکل پاک نشدن پیغام‌ها با clear_interactive_screen در تمام بخش‌ها
 - ذخیره‌سازی تاریخچه اخبار در state.json
 - رفع نمایش قیمت‌ها: نمایش قیمت از هر منبعی که موجود باشد، حتی اگر فیوچرز نباشد
+- رفع خطای Bad Request در دریافت قیمت از مکس و کوکوین با اصلاح فرمت سمبل‌ها و خطاگیری تکی
 """
 
 import asyncio
@@ -176,8 +177,8 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.4, 0.8, 1.2],
         "sl_atr_mult": 0.8,
         "max_leverage": 10,
-        "min_rr": 0.8,   # کاهش یافته از 1.0
-        "adx_min": 8,    # کاهش یافته از 10
+        "min_rr": 0.8,
+        "adx_min": 8,
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -189,7 +190,7 @@ MODE_CONFIGS = {
         "sl_atr_mult": 1.0,
         "max_leverage": 7,
         "min_rr": 1.1,
-        "adx_min": 9,    # کاهش یافته از 11
+        "adx_min": 9,
         "check_interval": 10 * 60,
     },
     "standard": {
@@ -219,8 +220,8 @@ MODE_CONFIGS = {
 }
 
 # ---------- متغیرهای سیگنال‌دهی ----------
-MIN_SIGNAL_CONFIDENCE = 50   # کاهش یافته از 55
-MIN_DIRECTION_GAP = 5        # کاهش یافته از 8
+MIN_SIGNAL_CONFIDENCE = 50
+MIN_DIRECTION_GAP = 5
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 
 @dataclass
@@ -300,7 +301,6 @@ class MarketDataCache:
             for code in COIN_CODES:
                 self.market_status[code] = {"status": "NO SWAP", "symbol": None, "error": None}
                 candidates = []
-                # جستجوی استاندارد
                 for symbol, market in markets.items():
                     if market.get("base") != code:
                         continue
@@ -313,7 +313,6 @@ class MarketDataCache:
                     if market.get("active") is False:
                         continue
                     candidates.append((symbol, market))
-                # اگر پیدا نشد، با فرمت‌های جایگزین (برای برخی ارزها)
                 if not candidates:
                     for symbol, market in markets.items():
                         if symbol == f"{code}/USDT:USDT" and market.get("type") == "swap":
@@ -372,6 +371,17 @@ class MarketDataCache:
                 return df.iloc[:-1].copy().reset_index(drop=True)
         return df.copy().reset_index(drop=True)
 
+    # ---------- دریافت قیمت با خطاگیری تکی ----------
+    async def _fetch_ticker_safe(self, exchange_obj, symbol, code):
+        try:
+            ticker = await asyncio.to_thread(exchange_obj.fetch_ticker, symbol)
+            price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
+            if price:
+                return code, float(price)
+        except Exception as e:
+            logger.debug("Ticker failed for %s: %s", code, e)
+        return None, None
+
     async def update_prices(self, force=False):
         if not self.exchange_symbols:
             self._load_markets()
@@ -382,12 +392,13 @@ class MarketDataCache:
         new_prices = {}
         price_sources.clear()
 
-        # 1) بیت‌پین (placeholder)
+        # 1) بیت‌پین
         try:
             bitpin_prices = await asyncio.to_thread(self._get_bitpin_prices)
             for code, price in bitpin_prices.items():
-                new_prices[code] = price
-                price_sources[code] = "B"
+                if price > 0:
+                    new_prices[code] = price
+                    price_sources[code] = "B"
         except Exception as e:
             logger.warning("Bitpin fetch failed: %s", e)
 
@@ -401,47 +412,64 @@ class MarketDataCache:
         except Exception as e:
             logger.warning("Wallex fetch failed: %s", e)
 
-        # 3) کوکوین فیوچرز
+        # 3) کوکوین فیوچرز (تکی)
         try:
-            kucoin_prices = await asyncio.to_thread(self._get_kucoin_prices)
-            for code, price in kucoin_prices.items():
-                if code not in new_prices and price > 0:
+            tasks = []
+            for code in self.exchange_symbols.keys():
+                symbol = self.symbol_for_code(code)
+                if symbol:
+                    tasks.append(self._fetch_ticker_safe(exchange, symbol, code))
+            results = await asyncio.gather(*tasks)
+            for code, price in results:
+                if code and price and code not in new_prices:
                     new_prices[code] = price
                     price_sources[code] = "K"
         except Exception as e:
             logger.warning("KuCoin fetch failed: %s", e)
 
-        # 4) مکس فیوچرز
+        # 4) مکس فیوچرز (تکی) - فرمت CODE/USDT
         try:
-            mexc_prices = await asyncio.to_thread(self._get_mexc_prices)
-            for code, price in mexc_prices.items():
-                if code not in new_prices and price > 0:
+            tasks = []
+            for code in COIN_CODES:
+                symbol = f"{code}/USDT"
+                tasks.append(self._fetch_ticker_safe(exchange_mexc, symbol, code))
+            results = await asyncio.gather(*tasks)
+            for code, price in results:
+                if code and price and code not in new_prices:
                     new_prices[code] = price
                     price_sources[code] = "M"
         except Exception as e:
             logger.warning("MEXC fetch failed: %s", e)
 
-        # 5) کوکوین اسپات
+        # 5) کوکوین اسپات (تکی)
         try:
-            spot_kucoin_prices = await asyncio.to_thread(self._get_spot_kucoin_prices)
-            for code, price in spot_kucoin_prices.items():
-                if code not in new_prices and price > 0:
+            tasks = []
+            for code in COIN_CODES:
+                symbol = f"{code}/USDT"
+                tasks.append(self._fetch_ticker_safe(exchange_spot_kucoin, symbol, code))
+            results = await asyncio.gather(*tasks)
+            for code, price in results:
+                if code and price and code not in new_prices:
                     new_prices[code] = price
                     price_sources[code] = "K"
         except Exception as e:
             logger.warning("KuCoin spot fetch failed: %s", e)
 
-        # 6) مکس اسپات
+        # 6) مکس اسپات (تکی)
         try:
-            spot_mexc_prices = await asyncio.to_thread(self._get_spot_mexc_prices)
-            for code, price in spot_mexc_prices.items():
-                if code not in new_prices and price > 0:
+            tasks = []
+            for code in COIN_CODES:
+                symbol = f"{code}/USDT"
+                tasks.append(self._fetch_ticker_safe(exchange_spot_mexc, symbol, code))
+            results = await asyncio.gather(*tasks)
+            for code, price in results:
+                if code and price and code not in new_prices:
                     new_prices[code] = price
                     price_sources[code] = "M"
         except Exception as e:
             logger.warning("MEXC spot fetch failed: %s", e)
 
-        # 7) CoinGecko (برای ارزهای باقی‌مانده)
+        # 7) CoinGecko
         try:
             missing_codes = [code for code in COIN_CODES if code not in new_prices]
             if missing_codes:
@@ -453,7 +481,7 @@ class MarketDataCache:
         except Exception as e:
             logger.warning("CoinGecko fetch failed: %s", e)
 
-        # fallback به آخرین کندل کوکوین (در صورت موجود بودن)
+        # fallback به کندل
         for code in COIN_CODES:
             if code not in new_prices:
                 df = self.ohlcv.get("1h", {}).get(code)
@@ -489,72 +517,6 @@ class MarketDataCache:
                 if last > 0:
                     prices[code] = last / usdt_rate
         return prices
-
-    def _get_kucoin_prices(self):
-        try:
-            tickers = exchange.fetch_tickers(list(self.exchange_symbols.values()))
-            prices = {}
-            for code, symbol in self.exchange_symbols.items():
-                ticker = tickers.get(symbol)
-                if ticker:
-                    price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
-                    if price:
-                        prices[code] = float(price)
-            return prices
-        except Exception as e:
-            logger.warning("KuCoin tickers failed: %s", e)
-            return {}
-
-    def _get_mexc_prices(self):
-        try:
-            symbols = [code + "/USDT:USDT" for code in COIN_CODES]
-            tickers = exchange_mexc.fetch_tickers(symbols)
-            prices = {}
-            for code in COIN_CODES:
-                sym = code + "/USDT:USDT"
-                ticker = tickers.get(sym)
-                if ticker:
-                    price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
-                    if price:
-                        prices[code] = float(price)
-            return prices
-        except Exception as e:
-            logger.warning("MEXC tickers failed: %s", e)
-            return {}
-
-    def _get_spot_kucoin_prices(self):
-        try:
-            symbols = [code + "/USDT" for code in COIN_CODES]
-            tickers = exchange_spot_kucoin.fetch_tickers(symbols)
-            prices = {}
-            for code in COIN_CODES:
-                sym = code + "/USDT"
-                ticker = tickers.get(sym)
-                if ticker:
-                    price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
-                    if price:
-                        prices[code] = float(price)
-            return prices
-        except Exception as e:
-            logger.warning("KuCoin spot tickers failed: %s", e)
-            return {}
-
-    def _get_spot_mexc_prices(self):
-        try:
-            symbols = [code + "/USDT" for code in COIN_CODES]
-            tickers = exchange_spot_mexc.fetch_tickers(symbols)
-            prices = {}
-            for code in COIN_CODES:
-                sym = code + "/USDT"
-                ticker = tickers.get(sym)
-                if ticker:
-                    price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
-                    if price:
-                        prices[code] = float(price)
-            return prices
-        except Exception as e:
-            logger.warning("MEXC spot tickers failed: %s", e)
-            return {}
 
     def _get_coingecko_prices(self, codes):
         prices = {}
@@ -610,6 +572,7 @@ class MarketDataCache:
             logger.warning("CoinGecko fetch failed: %s", e)
         return prices
 
+    # ---------- OHLCV ----------
     async def _fetch_ohlcv_symbol(self, code, timeframe, limit=1000):
         symbol = self.symbol_for_code(code)
         if not symbol:
@@ -855,15 +818,11 @@ async def guard(update):
     return True
 
 def add_news_alert(text: str):
-    """اضافه کردن خبر جدید به تاریخچه (حداکثر ۲۰ خبر) و ذخیره در state"""
     global news_history
-    news_history.append({
-        "time": shamsi_now(),
-        "text": text
-    })
+    news_history.append({"time": shamsi_now(), "text": text})
     if len(news_history) > 20:
         news_history.pop(0)
-    save_state()  # ذخیره خودکار در فایل
+    save_state()
 
 def fetch_irt_rate_nobitex():
     for _ in range(3):
@@ -1058,7 +1017,6 @@ async def whale_monitor_loop(app):
             if subscribed_chat_ids:
                 alerts = fetch_whale_alerts()
                 if alerts:
-                    # اضافه کردن به تاریخچه اخبار
                     for alert in alerts[:5]:
                         add_news_alert(f"🐋 حرکت نهنگ: {alert['amount_btc']:.0f} {alert['symbol']} جابه‌جا شد")
                     for chat_id in subscribed_chat_ids:
@@ -1694,32 +1652,17 @@ async def generate_weekly_summary_async(code, chat_id):
     )
     return rtl_lines(text)
 
-# ---------- Prices formatting (اصلاح‌شده برای نمایش قیمت از هر منبع) ----------
+# ---------- Prices formatting (اصلاح‌شده) ----------
 def format_prices_pretty(prices, chat_id):
     lines = ["💰 قیمت لحظه‌ای قراردادها", f"🕒 {shamsi_now()}", DIVIDER]
     for code in COIN_CODES:
-        # ابتدا بررسی می‌کنیم که قیمت موجود است یا خیر
         price = prices.get(code)
         if price is not None and price > 0:
             source_symbol = price_sources.get(code, "?")
-            source_emoji = {
-                "B": "🅑", "W": "🅦", "K": "🅚", "M": "🅜", "C": "🅒"
-            }.get(source_symbol, "🅚")
-            status = cache.market_status.get(code, {}).get("status")
-            if status == "SWAP OK":
-                status_icon = "🟢"
-            else:
-                status_icon = "🟡"  # قیمت از منبع جایگزین
-            lines.append(f"{status_icon} {COIN_ICONS.get(code, '🔸')} {code}  →  {fmt_amount(price, chat_id)}  {source_emoji}")
+            source_emoji = {"B": "🅑", "W": "🅦", "K": "🅚", "M": "🅜", "C": "🅒"}.get(source_symbol, "🅚")
+            lines.append(f"🟢 {COIN_ICONS.get(code, '🔸')} {code}  →  {fmt_amount(price, chat_id)}  {source_emoji}")
         else:
-            # اگر قیمت وجود نداشت، وضعیت را نمایش بده
-            status = cache.market_status.get(code, {}).get("status")
-            if status == "SWAP OK":
-                lines.append(f"🔶 {COIN_ICONS.get(code, '🔸')} {code}  ⚠️ در حال دریافت...")
-            elif status == "TICKER ERROR":
-                lines.append(f"🔶 {COIN_ICONS.get(code, '🔸')} {code}  🟠 خطا در دریافت قیمت")
-            else:
-                lines.append(f"⚪ {COIN_ICONS.get(code, '🔸')} {code}  در دسترس نیست")
+            lines.append(f"🔶 {COIN_ICONS.get(code, '🔸')} {code}  ⚠️ قیمت در دسترس نیست")
     return rtl_lines("\n".join(lines))
 
 # ---------- Split message ----------
@@ -2232,7 +2175,7 @@ def save_state():
                 "user_trading_mode": user_trading_mode,
                 "user_favorites": {str(k): list(v) for k, v in user_favorites.items()},
                 "user_role": {str(k): v for k, v in user_role.items()},
-                "news_history": news_history[-20:],  # ذخیره تاریخچه اخبار
+                "news_history": news_history[-20:],
             }, f, ensure_ascii=False)
         os.replace(tmp, STATE_FILE)
     except Exception as e:
@@ -2249,7 +2192,7 @@ def load_state():
         user_favorites = {int(k): set(v) for k, v in data.get("user_favorites", {}).items()}
         user_role = {int(k): v for k, v in data.get("user_role", {}).items()}
         news_history = data.get("news_history", [])
-        logger.info("State restored: %s users, %s news items", len(subscribed_chat_ids), len(news_history))
+        logger.info("State restored: %s users, %s news", len(subscribed_chat_ids), len(news_history))
     except FileNotFoundError:
         logger.info("No state file; starting fresh.")
         news_history = []
@@ -2264,7 +2207,6 @@ async def button_handler(update, context):
     data = query.data; chat_id = update.effective_chat.id; user_id = update.effective_user.id
     if data == "noop": return
 
-    # انتخاب نقش
     if data == "role_admin":
         user_role[chat_id] = "admin"
         save_state()
@@ -2343,7 +2285,6 @@ async def button_handler(update, context):
         await query.edit_message_text(MAIN_MENU_HEADER, reply_markup=kb_main(user_id, mode), parse_mode="Markdown")
         set_interactive_screen(chat_id, [query.message.message_id]); return
 
-    # ---------- منوی رویدادها ----------
     if data == "events_menu":
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         await query.edit_message_text("📋 *منوی رویدادها*\n" + DIVIDER + "\n" + MENU_PROMPT, reply_markup=kb_events_menu(), parse_mode="Markdown")
@@ -2481,7 +2422,6 @@ async def button_handler(update, context):
         await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
         return
 
-    # ---------- صفحه‌بندی ارزها ----------
     if data.startswith("coins_page_"):
         page = int(data.split("_")[2])
         await query.edit_message_reply_markup(reply_markup=kb_coins(page))
@@ -2528,7 +2468,6 @@ async def button_handler(update, context):
             set_interactive_screen(chat_id, [query.message.message_id])
         return
 
-    # ----- Admin mode selection before analysis -----
     if data.startswith("askmode_"):
         if not is_admin_role(chat_id):
             await query.answer("⛔️ فقط ادمین.", show_alert=True); return
@@ -2585,7 +2524,6 @@ async def button_handler(update, context):
                 await query.edit_message_text(f"❌ خطا در تحلیل جامع ارز {code}.", reply_markup=kb_back_main())
         return
 
-    # ----- Normal user direct handlers -----
     if data.startswith("suggest_"):
         if is_admin_role(chat_id):
             return
@@ -2696,8 +2634,6 @@ async def button_handler(update, context):
         await query.edit_message_text("⏳ در حال تحلیل همه ارزها (برای ادمین)...")
         try:
             mode = "standard"
-            # در صورت وجود تابع refresh_all_plans
-            from your_module import refresh_all_plans  # توجه: باید import شود
             plans = await asyncio.wait_for(refresh_all_plans(force_data=False, mode=mode), timeout=300)
         except asyncio.TimeoutError:
             await query.edit_message_text("⏰ تحلیل همه ارزها طول کشید.", reply_markup=kb_back_main()); return
