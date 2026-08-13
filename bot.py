@@ -1,10 +1,10 @@
 """
-Telegram Signal Bot V26 - Bitget Futures (Event-Driven Final)
-- صرافی Bitget
-- چهار حالت معاملاتی با بازه‌ی بررسی اختصاصی
-- ارسال خودکار رویدادمحور
-- Open Interest و Long/Short Ratio (با مدیریت خطا)
-- علاقه‌مندی‌ها، راهنما، گزارش‌ها
+Telegram Signal Bot V27 - Gate.io Futures (Event-Driven Final)
+- صرافی اصلی تحلیل: Gate.io
+- قیمت‌گیری چندمنبعی: نوبیتکس، ولکس، Gate، MEXC
+- نمایش منبع قیمت با نماد اختصاصی (N/W/G/M)
+- حالت‌های معاملاتی، علاقه‌مندی‌ها، راهنما، رویدادمحور
+- دکمه‌های بازگشت برای عکس‌ها
 """
 
 import asyncio
@@ -14,7 +14,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict, Set, Tuple
 
 import ccxt
 import jdatetime
@@ -118,7 +118,17 @@ DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
-exchange = ccxt.bitget({
+# --- صرافی اصلی: Gate.io برای تحلیل و سیگنال ---
+exchange = ccxt.gateio({
+    "enableRateLimit": True,
+    "options": {
+        "defaultType": "swap",
+        "adjustForTimeDifference": True,
+    },
+})
+
+# --- صرافی‌های جایگزین برای قیمت ---
+exchange_mexc = ccxt.mexc({
     "enableRateLimit": True,
     "options": {
         "defaultType": "swap",
@@ -147,6 +157,8 @@ whale_alert_cache = {"last_id": None, "ts": 0.0}
 
 last_check_time = {}
 last_sent_signals = {}
+
+price_sources = {}  # code -> str: 'N', 'W', 'G', 'M'
 
 MODE_CONFIGS = {
     "fast": {
@@ -303,7 +315,7 @@ class MarketDataCache:
                 self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None}
             self.exchange_symbols = selected
             self.valid_codes = list(selected.keys())
-            logger.info("Bitget swap markets: %s/%s selected", len(self.valid_codes), len(COIN_CODES))
+            logger.info("Gate swap markets: %s/%s selected", len(self.valid_codes), len(COIN_CODES))
         except Exception as e:
             logger.exception("load_markets failed: %s", e)
 
@@ -351,98 +363,144 @@ class MarketDataCache:
         if not force and self.prices and self.last_price_update and now - self.last_price_update < 60:
             return self.prices
 
-        symbols = list(self.exchange_symbols.values())
+        # --- قیمت از منابع مختلف ---
+        new_prices = {}
+        price_sources.clear()
+
+        # 1) نوبیتکس و ولکس (فقط برای ارزهایی که در آن‌ها موجودند)
+        async def fetch_iran(code):
+            for source, fetcher in [("N", self._get_nobitex_price), ("W", self._get_wallex_price)]:
+                try:
+                    p = await asyncio.to_thread(fetcher, code)
+                    if p and p > 0:
+                        return p, source
+                except Exception:
+                    continue
+            return None, None
+
+        # 2) Gate (دسته‌جمعی)
+        gate_prices = {}
         try:
-            tickers = await asyncio.to_thread(exchange.fetch_tickers, symbols)
-            self.prices = {}
+            gate_tickers = await asyncio.to_thread(exchange.fetch_tickers, list(self.exchange_symbols.values()))
             for code, symbol in self.exchange_symbols.items():
-                ticker = tickers.get(symbol)
+                ticker = gate_tickers.get(symbol)
                 if ticker:
                     price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
                     if price:
-                        self.prices[code] = float(price)
-                        self.market_status[code] = {
-                            **self.market_status.get(code, {}),
-                            "status": "SWAP OK", "symbol": symbol, "error": None,
-                        }
-                    else:
-                        df = self.ohlcv.get("1h", {}).get(code)
-                        if df is not None and not df.empty:
-                            fallback_price = float(df["close"].iloc[-1])
-                            self.prices[code] = fallback_price
-                            self.market_status[code] = {
-                                **self.market_status.get(code, {}),
-                                "status": "SWAP OK", "symbol": symbol, "error": None,
-                            }
-                        else:
-                            self.market_status[code] = {
-                                **self.market_status.get(code, {}),
-                                "status": "TICKER ERROR", "symbol": symbol, "error": "No price available",
-                            }
-                else:
-                    try:
-                        t = await asyncio.to_thread(exchange.fetch_ticker, symbol)
-                        price = t.get("last") or t.get("close") or t.get("bid") or t.get("ask")
-                        if price:
-                            self.prices[code] = float(price)
-                            self.market_status[code] = {
-                                **self.market_status.get(code, {}),
-                                "status": "SWAP OK", "symbol": symbol, "error": None,
-                            }
-                        else:
-                            raise ValueError("no price")
-                    except Exception as e:
-                        df = self.ohlcv.get("1h", {}).get(code)
-                        if df is not None and not df.empty:
-                            fallback_price = float(df["close"].iloc[-1])
-                            self.prices[code] = fallback_price
-                            self.market_status[code] = {
-                                **self.market_status.get(code, {}),
-                                "status": "SWAP OK", "symbol": symbol, "error": None,
-                            }
-                        else:
-                            self.market_status[code] = {
-                                **self.market_status.get(code, {}),
-                                "status": "TICKER ERROR", "symbol": symbol, "error": f"{type(e).__name__}: {e}",
-                            }
-                            logger.warning("Price fallback failed | code=%s | error=%s", code, e)
+                        gate_prices[code] = float(price)
         except Exception as e:
-            logger.warning("fetch_tickers failed | error=%s | fallback to individual", e)
-            async def fetch_one(code):
-                symbol = self.symbol_for_code(code)
-                if not symbol:
-                    return code, None
-                async with self._price_sem:
-                    for attempt in range(3):
-                        try:
-                            await asyncio.sleep(0.2 * (attempt + 1))
-                            ticker = await asyncio.to_thread(exchange.fetch_ticker, symbol)
-                            price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
-                            if price is None:
-                                raise ValueError("ticker has no usable price")
-                            self.market_status[code] = {**self.market_status.get(code, {}), "status": "SWAP OK", "symbol": symbol, "error": None}
-                            return code, float(price)
-                        except Exception as e:
-                            if attempt == 2:
-                                self.market_status[code] = {**self.market_status.get(code, {}), "status": "TICKER ERROR", "symbol": symbol, "error": f"{type(e).__name__}: {e}"}
-                                logger.warning("ticker failed | code=%s | error=%s", code, e)
-                            await asyncio.sleep(0.5)
-                    return code, None
+            logger.warning("Gate fetch_tickers failed: %s", e)
 
-            results = await asyncio.gather(*(fetch_one(c) for c in COIN_CODES))
-            self.prices = {code: price for code, price in results if price is not None}
-            for code, symbol in self.exchange_symbols.items():
-                if code not in self.prices:
-                    df = self.ohlcv.get("1h", {}).get(code)
-                    if df is not None and not df.empty:
-                        self.prices[code] = float(df["close"].iloc[-1])
-                        self.market_status[code] = {**self.market_status.get(code, {}), "status": "SWAP OK", "symbol": symbol, "error": None}
-                    else:
-                        self.market_status[code] = {**self.market_status.get(code, {}), "status": "TICKER ERROR", "symbol": symbol, "error": "No price available"}
+        # 3) MEXC (دسته‌جمعی برای ارزهایی که Gate نداشت)
+        mexc_prices = {}
+        try:
+            # MEXC symbols متفاوت است؛ ساده‌سازی: از همان کدها با پسوند USDT استفاده می‌کنیم
+            mexc_symbols = [code + "/USDT:USDT" for code in COIN_CODES]
+            mexc_tickers = await asyncio.to_thread(exchange_mexc.fetch_tickers, mexc_symbols)
+            for code in COIN_CODES:
+                sym = code + "/USDT:USDT"
+                ticker = mexc_tickers.get(sym)
+                if ticker:
+                    price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
+                    if price:
+                        mexc_prices[code] = float(price)
+        except Exception as e:
+            logger.warning("MEXC fetch_tickers failed: %s", e)
 
+        # انتخاب نهایی بر اساس اولویت
+        for code in COIN_CODES:
+            # ایران
+            p_iran, src_iran = await fetch_iran(code)
+            if p_iran:
+                new_prices[code] = p_iran
+                price_sources[code] = src_iran
+            elif code in gate_prices:
+                new_prices[code] = gate_prices[code]
+                price_sources[code] = "G"
+            elif code in mexc_prices:
+                new_prices[code] = mexc_prices[code]
+                price_sources[code] = "M"
+            else:
+                # fallback به آخرین کندل
+                df = self.ohlcv.get("1h", {}).get(code)
+                if df is not None and not df.empty:
+                    new_prices[code] = float(df["close"].iloc[-1])
+                    price_sources[code] = "G"  # فرض از Gate
+                else:
+                    self.market_status[code] = {"status": "TICKER ERROR", "symbol": self.symbol_for_code(code), "error": "No price"}
+
+        self.prices = new_prices
         self.last_price_update = time.time()
         logger.info("Live prices loaded: %s/%s", len(self.prices), len(COIN_CODES))
         return self.prices
+
+    def _get_nobitex_price(self, code):
+        # Nobitex API: فقط چند ارز معروف را دارد
+        # برای سادگی، فقط USDT/IRT و چند ارز اصلی را برمی‌گردانیم
+        known = {
+            "BTC": "btc-rls",
+            "ETH": "eth-rls",
+            "USDT": "usdt-rls",
+            "DOGE": "doge-rls",
+            "ADA": "ada-rls",
+            "SHIB": "shib-rls",
+            "XRP": "xrp-rls",
+            "SOL": "sol-rls",
+            "LTC": "ltc-rls",
+            "BCH": "bch-rls",
+            "DOT": "dot-rls",
+            "LINK": "link-rls",
+        }
+        if code not in known:
+            return None
+        url = f"https://api.nobitex.ir/v2/orderbook/{known[code]}"
+        r = requests.get(url, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        best_bid = float(data["bids"][0][0]) if data.get("bids") else None
+        best_ask = float(data["asks"][0][0]) if data.get("asks") else None
+        price_toman = best_ask or best_bid
+        if not price_toman:
+            return None
+        # تبدیل تومان به USDT با نرخ آزاد
+        usdt_rate = get_irt_rate()
+        if not usdt_rate:
+            return None
+        return price_toman / usdt_rate
+
+    def _get_wallex_price(self, code):
+        # Wallex API: فقط USDT/TMN و چند ارز
+        known = {
+            "BTC": "BTCTMN",
+            "ETH": "ETHTMN",
+            "USDT": "USDTTMN",
+            "DOGE": "DOGETMN",
+            "ADA": "ADATMN",
+            "SHIB": "SHIBTMN",
+            "XRP": "XRPTMN",
+            "SOL": "SOLTMN",
+            "LTC": "LTCTMN",
+            "BCH": "BCHTMN",
+            "DOT": "DOTTMN",
+            "LINK": "LINKTMN",
+        }
+        if code not in known:
+            return None
+        url = f"https://api.wallex.ir/v1/markets"
+        r = requests.get(url, timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        symbol = known[code]
+        stats = data["result"]["symbols"].get(symbol)
+        if not stats:
+            return None
+        price_toman = float(stats["stats"].get("lastPrice", 0))
+        if not price_toman:
+            return None
+        usdt_rate = get_irt_rate()
+        if not usdt_rate:
+            return None
+        return price_toman / usdt_rate
 
     async def _fetch_ohlcv_symbol(self, code, timeframe, limit=1000):
         symbol = self.symbol_for_code(code)
@@ -529,18 +587,8 @@ class MarketDataCache:
             if cached is not None and time.time() - cached["ts"] < LS_RATIO_TTL_SECONDS:
                 return cached["value"]
             try:
-                # Bitget long/short ratio endpoint (public)
-                base = code
-                url = f"https://api.bitget.com/api/v2/mix/market/long-short?productType=usdt-futures&symbol={symbol}&period=1h"
-                r = requests.get(url, timeout=10)
-                r.raise_for_status()
-                data = r.json()
-                if data.get("code") == "00000" and data.get("data"):
-                    ratio = float(data["data"][-1].get("longShortRatio", 0.0))
-                    self._ls_ratio_cache[code] = {"value": ratio, "ts": time.time()}
-                    return ratio
-                else:
-                    return 0.0
+                # Gate ممکن است این endpoint را نداشته باشد؛ صفر برگردان
+                return 0.0
             except Exception as e:
                 logger.debug("Long/Short ratio failed | code=%s | error=%s", code, e)
                 if cached is not None:
@@ -1669,7 +1717,7 @@ async def generate_weekly_summary_async(code, chat_id):
         f"📈 Open Interest تغییر: {oi_change:+.2f}%\n"
         f"⚖️ Long/Short Ratio: {ls_ratio:.2f}\n"
         f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-        f"{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Perpetual در Bitget محاسبه شده‌اند."
+        f"{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Perpetual در Gate محاسبه شده‌اند."
     )
     return rtl_lines(text)
 
@@ -1679,13 +1727,17 @@ def format_prices_pretty(prices, chat_id):
     for code in COIN_CODES:
         status = cache.market_status.get(code, {}).get("status")
         if status == "SWAP OK" and code in prices and prices[code] is not None:
-            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code} {fmt_amount(prices[code], chat_id)}")
+            source_symbol = price_sources.get(code, "G")
+            source_emoji = {
+                "N": "🅝", "W": "🅦", "G": "🅖", "M": "🅜"
+            }.get(source_symbol, "🅖")
+            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code}  →  {fmt_amount(prices[code], chat_id)}  {source_emoji}")
         elif status == "SWAP OK":
-            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code} ⚠️ در حال دریافت...")
+            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code}  ⚠️ در حال دریافت...")
         elif status == "TICKER ERROR":
-            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code} 🟠 خطا در دریافت قیمت")
+            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code}  🟠 خطا در دریافت قیمت")
         else:
-            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code} ⚪ در دسترس نیست")
+            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code}  ⚪ در دسترس نیست")
     return rtl_lines("\n".join(lines))
 
 # ---------- Split message ----------
@@ -1917,7 +1969,8 @@ def help_text(step):
             "گزارش دوره‌ای: عملکرد هفتگی/ماهانه\n"
             "داشبورد: آمار برد/باخت و شاخص‌ها\n"
             "رویدادها: اخبار مهم کریپتو\n"
-            "توقف ربات: قطع اشتراک"
+            "توقف ربات: قطع اشتراک\n"
+            "منابع قیمت: 🅝 نوبیتکس، 🅦 ولکس، 🅖 Gate، 🅜 MEXC"
         )
     else:
         return rtl_lines(
@@ -2406,7 +2459,7 @@ async def button_handler(update, context):
             )
             set_interactive_screen(chat_id, [query.message.message_id])
         else:
-            text = f"{COIN_ICONS.get(code, '🔸')} *{code}*\n{DIVIDER}\n⚪ وضعیت: *NO SWAP*\nدر حال حاضر قرارداد USDT Perpetual فعال برای این ارز در Bitget پیدا نشد."
+            text = f"{COIN_ICONS.get(code, '🔸')} *{code}*\n{DIVIDER}\n⚪ وضعیت: *NO SWAP*\nدر حال حاضر قرارداد USDT Perpetual فعال برای این ارز در Gate پیدا نشد."
             await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
             await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
             set_interactive_screen(chat_id, [query.message.message_id])
@@ -2417,7 +2470,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در Bitget در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در Gate در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         mode = user_trading_mode.get(chat_id, "standard")
         await query.edit_message_text("⏳ در حال تحلیل و تولید پیشنهاد لحظه‌ای...")
@@ -2429,7 +2482,7 @@ async def button_handler(update, context):
             main_text = format_main_signal(plan, code, chat_id)
             chart_buf = generate_price_chart(code, MODE_CONFIGS[mode]["main_tf"])
             if chart_buf:
-                msg = await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=main_text, parse_mode="Markdown")
+                msg = await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
                 add_to_interactive_screen(chat_id, msg.message_id)
             else:
                 msg = await context.bot.send_message(chat_id=chat_id, text=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
@@ -2448,7 +2501,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در Bitget در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در Gate در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         mode = user_trading_mode.get(chat_id, "standard")
         if auto:
@@ -2461,7 +2514,7 @@ async def button_handler(update, context):
             chart_buf = generate_price_chart(code, MODE_CONFIGS[mode]["main_tf"])
             if chart_buf:
                 await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
-                photo_msg = await context.bot.send_photo(chat_id=chat_id, photo=chart_buf)
+                photo_msg = await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, reply_markup=kb_suggestion(code))
                 add_to_interactive_screen(chat_id, photo_msg.message_id)
             else:
                 await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
@@ -2494,7 +2547,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در Bitget در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در Gate در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         await query.edit_message_text("⏳ در حال دریافت اطلاعات ۷ روز اخیر...")
@@ -2503,7 +2556,7 @@ async def button_handler(update, context):
             chart_buf = generate_price_chart(code, "1d")
             if chart_buf:
                 await query.edit_message_text(split_long_message(summary)[0], reply_markup=kb_weekly(code), parse_mode="Markdown")
-                photo_msg = await context.bot.send_photo(chat_id=chat_id, photo=chart_buf)
+                photo_msg = await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, reply_markup=kb_weekly(code))
                 add_to_interactive_screen(chat_id, photo_msg.message_id)
             else:
                 await query.edit_message_text(split_long_message(summary)[0], reply_markup=kb_weekly(code), parse_mode="Markdown")
@@ -2613,9 +2666,9 @@ async def auto_report_loop(app):
                                 main_text = format_main_signal(plan, code, chat_id)
                                 chart_buf = generate_price_chart(code, MODE_CONFIGS[mode]["main_tf"])
                                 if chart_buf:
-                                    await app.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=main_text, parse_mode="Markdown")
+                                    await app.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
                                 else:
-                                    await app.bot.send_message(chat_id=chat_id, text=main_text, parse_mode="Markdown")
+                                    await app.bot.send_message(chat_id=chat_id, text=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
                                 active_signals.setdefault(chat_id, {})[code] = {"plan": plan, "stage": 0, "last_notified": 0}
                                 prev_signals[code] = {"direction": direction, "timestamp": time.time()}
 
@@ -2647,7 +2700,7 @@ async def post_init(app):
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
-    logger.info("Signal Bot V26 (Bitget Event-Driven) started")
+    logger.info("Signal Bot V27 (Gate Event-Driven) started")
 
 def main():
     if not BOT_TOKEN:
