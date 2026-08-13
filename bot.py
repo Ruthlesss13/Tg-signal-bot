@@ -1,11 +1,9 @@
 """
-Telegram Signal Bot V35 - KuCoin Futures (Final - Optimized)
-- بهینه‌سازی مصرف حافظه برای پلن Trial Railway
-- کاهش تعداد کندل‌ها به ۲۰۰
-- کاهش همزمانی به ۲
-- بروزرسانی فقط ارز درخواستی در زمان انتخاب ارز
-- بدون تغییر در حلقه خودکار (auto_report_loop)
-- حفظ کیفیت سیگنال‌ها
+Telegram Signal Bot V36 - KuCoin Futures (Nobitex Prices Only)
+- فقط ۴۶ ارز موجود در نوبیتکس
+- دریافت قیمت‌ها فقط از نوبیتکس (نزدیک‌ترین به تومان)
+- حذف کامل ولکس، مکس، کوکوین فیوچرز و CoinGecko
+- بهینه‌سازی مصرف حافظه و سرعت بالا
 """
 
 import asyncio
@@ -56,38 +54,26 @@ ALWAYS_ALLOWED_USER_IDS = {
 }
 WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 
+# ---------- فقط ۴۶ ارز موجود در نوبیتکس ----------
 COIN_ICONS = {
-    "BTC": "₿", "ETH": "Ξ", "BNB": "🔶", "SOL": "◎", "XRP": "✕",
-    "DOGE": "🐕", "ADA": "🔷", "AVAX": "🔺", "DOT": "⚪", "LINK": "🔗",
-    "LTC": "Ł", "BCH": "🟢", "ETC": "⟠", "XLM": "✨", "ATOM": "⚛️",
-    "FIL": "📁", "UNI": "🦄", "AAVE": "👻", "TRX": "⚡", "NEAR": "Ⓝ",
-    "ARB": "🔵", "APT": "🅰️", "SUI": "💧", "PEPE": "🐸", "WIF": "🧢",
-    "FLOKI": "🐕‍🦺", "SHIB": "🦴", "TIA": "🛰️", "SEI": "🌊",
-    "INJ": "💉", "KAS": "🐍", "OP": "🔴", "RUNE": "🪙", "JUP": "🪐",
-    "PYTH": "🔮", "STX": "📚", "GRT": "📊", "SAND": "⏳", "MANA": "🌐",
-    "GALA": "🎮", "APE": "🦧", "MINA": "🌐", "LUNC": "🟤", "COMP": "💠",
-    "AXL": "🌉", "BLUR": "👁️", "AR": "🗂️", "FLOW": "🌊",
-    "XTZ": "🪙", "THETA": "🌀", "CHZ": "🌶️", "ZEC": "🛡️", "DASH": "⚡",
-    "SUSHI": "🍣", "CRV": "🥄", "1INCH": "1️⃣", "ENJ": "🎮", "GMT": "👟",
-    "IMX": "🛡️", "LDO": "🌊", "DYDX": "📉", "API3": "🔌", "SNX": "🧪",
-    "VET": "🌿", "CAKE": "🥞", "PENDLE": "📐", "TAO": "🧠", "RENDER": "🖥️",
-    "POL": "🟣", "MAGIC": "🪄", "CFX": "🌲", "WLD": "👁️",
-    "ENS": "🏷️", "ONE": "🎐", "ZRX": "0️⃣", "AXS": "🐚", "HBAR": "Ⓗ",
-    "CRO": "💠", "HMSTR": "🐹", "NOT": "💎", "DOGS": "🐾",
-    "PUMP": "🚀", "S": "💨", "SKY": "☁️", "HYPE": "🌊",
-    "ONDO": "🏦", "XAUT": "🥇", "ENA": "🌐", "STORJ": "💾",
-    "TON": "⚡", "XMR": "🔒", "NEO": "🌐", "QTUM": "🔗", "ZIL": "📊", "BAT": "🦇",
+    "BTC": "₿", "ETH": "Ξ", "USDT": "💵", "XRP": "✕", "DOGE": "🐕",
+    "ADA": "🔷", "SOL": "◎", "DOT": "⚪", "LINK": "🔗", "LTC": "Ł",
+    "BCH": "🟢", "ETC": "⟠", "XLM": "✨", "ATOM": "⚛️", "FIL": "📁",
+    "UNI": "🦄", "AAVE": "👻", "TRX": "⚡", "NEAR": "Ⓝ", "AVAX": "🔺",
+    "SHIB": "🦴", "POL": "🟣", "VET": "🌿", "XMR": "🔒", "NEO": "🌐",
     "ALGO": "🅰️", "ICP": "🌐", "EGLD": "🛡️", "KSM": "🔗", "KAVA": "⚡",
-    "BAND": "📡", "OCEAN": "🌊", "FET": "🤖", "AGIX": "🧠", "LRC": "🔄",
-    "JASMY": "🌿", "ORDI": "🔍", "1000SATS": "🔢", "AI": "🤖", "MKR": "⚙️",
-    "RAY": "☀️", "HNT": "📡", "CORE": "🧩",
+    "FET": "🤖", "MKR": "⚙️", "TON": "⚡", "RUNE": "🪙", "OP": "🔴",
+    "ARB": "🔵", "APT": "🅰️", "SUI": "💧", "INJ": "💉", "KAS": "🐍",
+    "STX": "📚", "GRT": "📊", "SAND": "⏳", "MANA": "🌐", "GALA": "🎮",
+    "APE": "🦧", "MINA": "🌐", "LUNC": "🟤", "COMP": "💠", "BLUR": "👁️",
+    "AR": "🗂️", "FLOW": "🌊",
 }
-COIN_CODES = list(COIN_ICONS.keys())
+COIN_CODES = list(COIN_ICONS.keys())  # ۴۶ ارز
 
 TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d")
 TOP_SIGNALS_COUNT = 5
 TELEGRAM_MSG_LIMIT = 3500
-IRT_RATE_TTL_SECONDS = 300
+IRT_RATE_TTL_SECONDS = 60
 COINS_GRID_COLUMNS = 5
 AUTO_KEEP_LAST_N = 3
 TRAILING_CHECK_SECONDS = 5 * 60
@@ -96,7 +82,6 @@ EVENTS_CHECK_SECONDS = 6 * 3600
 WHALE_CHECK_SECONDS = 30 * 60
 WHALE_MIN_AMOUNT_BTC = 1000
 
-# ---------- بهینه‌سازی مصرف حافظه ----------
 PER_PAGE = 20
 WEIGHT_TREND = 25
 WEIGHT_MOMENTUM = 25
@@ -104,12 +89,12 @@ WEIGHT_VOLUME = 15
 WEIGHT_VOLATILITY = 15
 WEIGHT_HTF = 20
 
-OHLCV_TTL_SECONDS = 30          # کاهش یافته از 120
+OHLCV_TTL_SECONDS = 30
 FULL_REFRESH_TTL_SECONDS = 300
-FUNDING_TTL_SECONDS = 30         # کاهش یافته از 120
-MAX_OHLCV_CONCURRENCY = 2        # کاهش یافته از 6
-MAX_SIGNAL_CONCURRENCY = 2       # کاهش یافته از 3
-MAX_PRICE_CONCURRENCY = 2        # کاهش یافته از 3
+FUNDING_TTL_SECONDS = 30
+MAX_OHLCV_CONCURRENCY = 2
+MAX_SIGNAL_CONCURRENCY = 2
+MAX_PRICE_CONCURRENCY = 2
 RLM = "\u200f"
 
 DATA_DIR = os.getenv("DATA_DIR", "/data")
@@ -119,17 +104,11 @@ DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
+# ---------- فقط از کوکوین فیوچرز برای کندل‌ها استفاده می‌شود ----------
 exchange = ccxt.kucoinfutures({
     "enableRateLimit": True,
     "options": {"defaultType": "swap", "adjustForTimeDifference": True},
 })
-
-exchange_mexc = ccxt.mexc({
-    "enableRateLimit": True,
-    "options": {"defaultType": "swap", "adjustForTimeDifference": True},
-})
-exchange_spot_kucoin = ccxt.kucoin({"enableRateLimit": True})
-exchange_spot_mexc = ccxt.mexc({"enableRateLimit": True})
 
 last_plans = {}
 subscribed_chat_ids = set()
@@ -358,213 +337,72 @@ class MarketDataCache:
                 return df.iloc[:-1].copy().reset_index(drop=True)
         return df.copy().reset_index(drop=True)
 
-    # ---------- دریافت قیمت با خطاگیری تکی (بهینه) ----------
-    async def _fetch_ticker_safe(self, exchange_obj, symbol, code):
-        try:
-            ticker = await asyncio.to_thread(exchange_obj.fetch_ticker, symbol)
-            price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
-            if price:
-                return code, float(price)
-        except Exception as e:
-            logger.debug("Ticker failed for %s: %s", code, e)
-        return None, None
-
+    # ---------- دریافت قیمت فقط از نوبیتکس ----------
     async def update_prices(self, force=False, codes=None):
-        """به‌روزرسانی قیمت‌ها. اگر codes داده شود، فقط برای همان ارزها"""
-        if not self.exchange_symbols:
-            self._load_markets()
+        """دریافت قیمت فقط از نوبیتکس (نزدیک‌ترین به تومان)"""
+        target_codes = codes if codes is not None else COIN_CODES
         now = time.time()
-        if not force and self.prices and self.last_price_update and now - self.last_price_update < 60:
+        if not force and self.prices and self.last_price_update and now - self.last_price_update < 30:
             return self.prices
 
-        target_codes = codes if codes is not None else COIN_CODES
         new_prices = {}
         price_sources.clear()
 
-        # 1) بیت‌پین
         try:
-            bitpin_prices = await asyncio.to_thread(self._get_bitpin_prices)
-            for code, price in bitpin_prices.items():
+            nobitex_data = await asyncio.to_thread(self._get_nobitex_prices)
+            for code, price in nobitex_data.items():
                 if code in target_codes and price > 0:
                     new_prices[code] = price
-                    price_sources[code] = "B"
+                    price_sources[code] = "N"
         except Exception as e:
-            logger.warning("Bitpin fetch failed: %s", e)
+            logger.exception("Nobitex fetch failed: %s", e)
 
-        # 2) ولکس
-        try:
-            wallex_prices = await asyncio.to_thread(self._get_wallex_prices)
-            for code, price in wallex_prices.items():
-                if code in target_codes and code not in new_prices and price > 0:
-                    new_prices[code] = price
-                    price_sources[code] = "W"
-        except Exception as e:
-            logger.warning("Wallex fetch failed: %s", e)
-
-        # 3) کوکوین فیوچرز (تکی)
-        try:
-            tasks = []
-            for code in target_codes:
-                symbol = self.symbol_for_code(code)
-                if symbol:
-                    tasks.append(self._fetch_ticker_safe(exchange, symbol, code))
-            results = await asyncio.gather(*tasks)
-            for code, price in results:
-                if code and price and code not in new_prices:
-                    new_prices[code] = price
-                    price_sources[code] = "K"
-        except Exception as e:
-            logger.warning("KuCoin fetch failed: %s", e)
-
-        # 4) مکس فیوچرز (تکی)
-        try:
-            tasks = []
-            for code in target_codes:
-                symbol = f"{code}/USDT"
-                tasks.append(self._fetch_ticker_safe(exchange_mexc, symbol, code))
-            results = await asyncio.gather(*tasks)
-            for code, price in results:
-                if code and price and code not in new_prices:
-                    new_prices[code] = price
-                    price_sources[code] = "M"
-        except Exception as e:
-            logger.warning("MEXC fetch failed: %s", e)
-
-        # 5) کوکوین اسپات (تکی)
-        try:
-            tasks = []
-            for code in target_codes:
-                symbol = f"{code}/USDT"
-                tasks.append(self._fetch_ticker_safe(exchange_spot_kucoin, symbol, code))
-            results = await asyncio.gather(*tasks)
-            for code, price in results:
-                if code and price and code not in new_prices:
-                    new_prices[code] = price
-                    price_sources[code] = "K"
-        except Exception as e:
-            logger.warning("KuCoin spot fetch failed: %s", e)
-
-        # 6) مکس اسپات (تکی)
-        try:
-            tasks = []
-            for code in target_codes:
-                symbol = f"{code}/USDT"
-                tasks.append(self._fetch_ticker_safe(exchange_spot_mexc, symbol, code))
-            results = await asyncio.gather(*tasks)
-            for code, price in results:
-                if code and price and code not in new_prices:
-                    new_prices[code] = price
-                    price_sources[code] = "M"
-        except Exception as e:
-            logger.warning("MEXC spot fetch failed: %s", e)
-
-        # 7) CoinGecko
-        try:
-            missing_codes = [code for code in target_codes if code not in new_prices]
-            if missing_codes:
-                gecko_prices = await asyncio.to_thread(self._get_coingecko_prices, missing_codes)
-                for code, price in gecko_prices.items():
-                    if code not in new_prices and price > 0:
-                        new_prices[code] = price
-                        price_sources[code] = "C"
-        except Exception as e:
-            logger.warning("CoinGecko fetch failed: %s", e)
-
-        # fallback به کندل
-        for code in target_codes:
-            if code not in new_prices:
-                df = self.ohlcv.get("1h", {}).get(code)
-                if df is not None and not df.empty:
-                    new_prices[code] = float(df["close"].iloc[-1])
-                    price_sources[code] = "K"
-
-        # فقط قیمت‌های درخواستی را به‌روز می‌کنیم
         for code in target_codes:
             if code in new_prices:
                 self.prices[code] = new_prices[code]
         self.last_price_update = time.time()
-        logger.info("Live prices loaded: %s/%s", len(self.prices), len(COIN_CODES))
+        logger.info("Prices loaded: %s/%s from Nobitex", len(self.prices), len(COIN_CODES))
         return self.prices
 
-    def _get_bitpin_prices(self):
-        return {}
-
-    def _get_wallex_prices(self):
-        r = requests.get("https://api.wallex.ir/v1/markets", timeout=8)
-        r.raise_for_status()
-        data = r.json()["result"]["symbols"]
-        mapping = {
-            "BTC": "BTCTMN", "ETH": "ETHTMN", "USDT": "USDTTMN",
-            "DOGE": "DOGETMN", "ADA": "ADATMN", "SHIB": "SHIBTMN",
-            "XRP": "XRPTMN", "SOL": "SOLTMN", "LTC": "LTCTMN",
-            "BCH": "BCHTMN", "DOT": "DOTTMN", "LINK": "LINKTMN",
-        }
-        prices = {}
-        usdt_rate = get_irt_rate()
-        if not usdt_rate:
-            return prices
-        for code, symbol in mapping.items():
-            if symbol in data:
-                last = float(data[symbol]["stats"].get("lastPrice", 0))
-                if last > 0:
-                    prices[code] = last / usdt_rate
-        return prices
-
-    def _get_coingecko_prices(self, codes):
-        prices = {}
+    def _get_nobitex_prices(self):
         try:
-            ids_map = {
-                "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "BNB": "binancecoin",
-                "XRP": "ripple", "ADA": "cardano", "DOGE": "dogecoin", "AVAX": "avalanche-2",
-                "DOT": "polkadot", "LINK": "chainlink", "LTC": "litecoin", "BCH": "bitcoin-cash",
-                "ETC": "ethereum-classic", "XLM": "stellar", "ATOM": "cosmos", "FIL": "filecoin",
-                "UNI": "uniswap", "AAVE": "aave", "TRX": "tron", "NEAR": "near",
-                "ARB": "arbitrum", "APT": "aptos", "SUI": "sui", "PEPE": "pepe",
-                "WIF": "dogwifcoin", "FLOKI": "floki", "SHIB": "shiba-inu", "TIA": "celestia",
-                "SEI": "sei-network", "INJ": "injective-protocol", "KAS": "kaspa", "OP": "optimism",
-                "RUNE": "thorchain", "JUP": "jupiter-exchange-solana", "PYTH": "pyth-network",
-                "STX": "blockstack", "GRT": "the-graph", "SAND": "the-sandbox", "MANA": "decentraland",
-                "GALA": "gala", "APE": "apecoin", "MINA": "mina-protocol", "LUNC": "terra-luna-classic",
-                "COMP": "compound-governance-token", "AXL": "axelar", "BLUR": "blur", "AR": "arweave",
-                "FLOW": "flow", "XTZ": "tezos", "THETA": "theta-token", "CHZ": "chiliz",
-                "ZEC": "zcash", "DASH": "dash", "SUSHI": "sushi", "CRV": "curve-dao-token",
-                "1INCH": "1inch", "ENJ": "enjincoin", "GMT": "stepn", "IMX": "immutable-x",
-                "LDO": "lido-dao", "DYDX": "dydx-chain", "API3": "api3", "SNX": "havven",
-                "VET": "vechain", "CAKE": "pancakeswap-token", "PENDLE": "pendle", "TAO": "bittensor",
-                "RENDER": "render-token", "POL": "polygon-ecosystem-token", "MAGIC": "magic",
-                "CFX": "conflux-token", "WLD": "worldcoin-wld", "ENS": "ethereum-name-service",
-                "ONE": "harmony", "ZRX": "0x", "AXS": "axie-infinity", "HBAR": "hedera-hashgraph",
-                "CRO": "crypto-com-chain", "HMSTR": "hamster-kombat", "NOT": "notcoin",
-                "DOGS": "dogs", "PUMP": "pump", "S": "sonic", "SKY": "sky",
-                "HYPE": "hyperliquid", "ONDO": "ondo-finance", "XAUT": "tether-gold",
-                "ENA": "ethena", "STORJ": "storj", "TON": "the-open-network", "XMR": "monero",
-                "NEO": "neo", "QTUM": "qtum", "ZIL": "zilliqa", "BAT": "basic-attention-token",
-                "ALGO": "algorand", "ICP": "internet-computer", "EGLD": "elrond-erd-2",
-                "KSM": "kusama", "KAVA": "kava", "BAND": "band-protocol", "OCEAN": "ocean-protocol",
-                "FET": "fetch-ai", "AGIX": "singularitynet", "LRC": "loopring", "JASMY": "jasmycoin",
-                "ORDI": "ordinals", "1000SATS": "sats", "AI": "sleepless-ai", "MKR": "maker",
-                "RAY": "raydium", "HNT": "helium", "CORE": "core-dao",
-            }
-            ids = [ids_map[code] for code in codes if code in ids_map]
-            if not ids:
-                return prices
-            url = "https://api.coingecko.com/api/v3/simple/price"
-            params = {"ids": ",".join(ids), "vs_currencies": "usd"}
-            r = requests.get(url, params=params, timeout=10)
+            r = requests.get("https://api.nobitex.ir/market/stats", params={"srcCurrency": "usdt", "dstCurrency": "rls"}, timeout=10)
             r.raise_for_status()
-            data = r.json()
-            reverse_map = {v: k for k, v in ids_map.items()}
-            for cg_id, info in data.items():
-                if cg_id in reverse_map:
-                    code = reverse_map[cg_id]
-                    price = info.get("usd")
-                    if price:
-                        prices[code] = float(price)
-        except Exception as e:
-            logger.warning("CoinGecko fetch failed: %s", e)
-        return prices
+            rate_data = r.json()
+            usdt_rate = float(rate_data["stats"]["usdt-rls"]["latest"]) / 10
+            if not usdt_rate or usdt_rate <= 0:
+                logger.warning("Invalid USDT rate from Nobitex")
+                return {}
 
-    # ---------- OHLCV (با کاهش تعداد کندل‌ها به ۲۰۰) ----------
+            r = requests.get("https://api.nobitex.ir/market/stats", timeout=10)
+            r.raise_for_status()
+            data = r.json()["stats"]
+
+            symbol_map = {
+                "btc": "BTC", "eth": "ETH", "usdt": "USDT", "xrp": "XRP", "doge": "DOGE",
+                "ada": "ADA", "sol": "SOL", "dot": "DOT", "link": "LINK", "ltc": "LTC",
+                "bch": "BCH", "etc": "ETC", "xlm": "XLM", "atom": "ATOM", "fil": "FIL",
+                "uni": "UNI", "aave": "AAVE", "trx": "TRX", "near": "NEAR", "avax": "AVAX",
+                "shib": "SHIB", "pol": "POL", "vet": "VET", "xmr": "XMR", "neo": "NEO",
+                "algo": "ALGO", "icp": "ICP", "egld": "EGLD", "ksm": "KSM", "kava": "KAVA",
+                "fet": "FET", "mkr": "MKR", "ton": "TON", "rune": "RUNE", "op": "OP",
+                "arb": "ARB", "apt": "APT", "sui": "SUI", "inj": "INJ", "kas": "KAS",
+                "stx": "STX", "grt": "GRT", "sand": "SAND", "mana": "MANA", "gala": "GALA",
+                "ape": "APE", "mina": "MINA", "lunc": "LUNC", "comp": "COMP", "blur": "BLUR",
+                "ar": "AR", "flow": "FLOW",
+            }
+            prices = {}
+            for sym, code in symbol_map.items():
+                if sym in data:
+                    price_tmn = float(data[sym]["latest"])
+                    if price_tmn > 0:
+                        prices[code] = price_tmn / usdt_rate
+            return prices
+        except Exception as e:
+            logger.error("Nobitex fetch error: %s", e)
+            return {}
+
+    # ---------- OHLCV (از کوکوین فیوچرز) ----------
     async def _fetch_ohlcv_symbol(self, code, timeframe, limit=200):
         symbol = self.symbol_for_code(code)
         if not symbol:
@@ -826,23 +664,17 @@ def fetch_irt_rate_nobitex():
             time.sleep(1)
     raise RuntimeError("Nobitex failed")
 
-def fetch_irt_rate_wallex():
-    r = requests.get("https://api.wallex.ir/v1/markets", timeout=8)
-    r.raise_for_status()
-    return float(r.json()["result"]["symbols"]["USDTTMN"]["stats"]["lastPrice"])
-
 def get_irt_rate():
     now = time.time()
     if _irt_rate_cache["value"] is not None and now - _irt_rate_cache["ts"] < IRT_RATE_TTL_SECONDS:
         return _irt_rate_cache["value"]
-    for name, fn in (("nobitex", fetch_irt_rate_nobitex), ("wallex", fetch_irt_rate_wallex)):
-        try:
-            rate = fn()
-            if rate and rate > 0:
-                _irt_rate_cache.update(value=rate, ts=now, source=name)
-                return rate
-        except Exception as e:
-            logger.warning("IRT rate %s failed: %s", name, e)
+    try:
+        rate = fetch_irt_rate_nobitex()
+        if rate and rate > 0:
+            _irt_rate_cache.update(value=rate, ts=now, source="nobitex")
+            return rate
+    except Exception as e:
+        logger.warning("IRT rate failed: %s", e)
     return _irt_rate_cache["value"]
 
 def get_pref(chat_id):
@@ -1264,7 +1096,6 @@ def determine_leverage(confidence, mode):
 
 async def generate_trade_plan(code, mode="standard"):
     try:
-        # بروزرسانی فقط قیمت همین ارز
         await cache.update_prices(force=True, codes=[code])
         ind = await cache.get_indicators(code, mode)
         if not ind:
@@ -1467,7 +1298,6 @@ def format_ladder_block(entries, take_profits, stop_losses, chat_id):
 
 # ---------- Instant status ----------
 async def generate_status_text_async(code, chat_id, mode="standard"):
-    # بروزرسانی فقط قیمت همین ارز
     await cache.update_prices(force=True, codes=[code])
     ind = await cache.get_indicators(code, mode)
     if not ind:
@@ -1542,7 +1372,6 @@ async def generate_status_text_async(code, chat_id, mode="standard"):
 
 # ---------- Weekly summary ----------
 async def generate_weekly_summary_async(code, chat_id):
-    # بروزرسانی فقط قیمت همین ارز
     await cache.update_prices(force=True, codes=[code])
     week_df = await cache.get_weekly_data(code)
     if week_df is None or len(week_df) < 2:
@@ -1656,8 +1485,8 @@ def format_prices_pretty(prices, chat_id):
     for code in COIN_CODES:
         price = prices.get(code)
         if price is not None and price > 0:
-            source_symbol = price_sources.get(code, "?")
-            source_emoji = {"B": "🅑", "W": "🅦", "K": "🅚", "M": "🅜", "C": "🅒"}.get(source_symbol, "🅚")
+            source_symbol = price_sources.get(code, "N")
+            source_emoji = {"N": "🇮🇷", "K": "🅚", "C": "🅒"}.get(source_symbol, "N")
             lines.append(f"🟢 {COIN_ICONS.get(code, '🔸')} {code}  →  {fmt_amount(price, chat_id)}  {source_emoji}")
         else:
             lines.append(f"🔶 {COIN_ICONS.get(code, '🔸')} {code}  ⚠️ قیمت در دسترس نیست")
@@ -1885,12 +1714,8 @@ def help_text(step):
         return rtl_lines(
             "💰 *قیمت‌های لحظه‌ای و منابع*\n"
             f"{DIVIDER}\n"
-            "قیمت‌ها از چند صرافی دریافت می‌شوند:\n"
-            "🅑 بیت‌پین\n"
-            "🅦 ولکس\n"
-            "🅚 کوکوین\n"
-            "🅜 مکس\n"
-            "منبع قیمت در انتهای هر خط نمایش داده می‌شود."
+            "قیمت‌ها از نوبیتکس دریافت می‌شوند (نزدیک‌ترین قیمت به تومان).\n"
+            "منبع قیمت با 🇮🇷 نشان داده می‌شود."
         )
     elif step == 2:
         return rtl_lines(
@@ -2721,7 +2546,7 @@ async def post_init(app):
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
-    logger.info("Signal Bot V35 (Optimized) started")
+    logger.info("Signal Bot V36 (Nobitex Prices) started")
 
 def main():
     if not BOT_TOKEN:
