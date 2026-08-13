@@ -1,16 +1,15 @@
 """
-Telegram Signal Bot V12 - Binance Edition (Fixed Prices & Restored Status/Weekly)
-- رفع باگ عدم نمایش قیمت
-- بازگشت وضعیت لحظه‌ای کامل
-- بازگشت تحلیل ۷ روز اخیر با اطلاعات بیشتر
-- جزئیات فنی فقط برای سیگنال‌های خودکار
-- تریلینگ متحرک ۵ دقیقه‌ای
+Telegram Signal Bot V14 - MEXC Edition (Final)
+- صرافی MEXC
+- لیست ۶۴ ارز با جایگزینی ارزهای ناموجود در MEXC
+- حذف کامل Long/Short Ratio
+- حمایت/مقاومت، واگرایی RSI، شکست سطح
+- حد سود سه‌پله‌ای + حد ضرر تریلینگ
 """
 
 import asyncio
 import json
 import logging
-import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -43,7 +42,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("signal_bot")
 
-# ---------- Bot Config ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALLOWED_USER_IDS = {
     int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()
@@ -55,25 +53,24 @@ ALWAYS_ALLOWED_USER_IDS = {
     int(x) for x in os.getenv("ALWAYS_ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()
 }
 
-# ---------- 64 coins ----------
+# ---------- 64 coins (updated for MEXC) ----------
 COIN_ICONS = {
-    "DOGE": "🐕", "SOL": "◎", "SHIB": "🦴", "BTC": "₿", "ETH": "Ξ",
-    "BNB": "🔶", "ZEC": "🛡️", "ADA": "🔷", "DOGS": "🐾", "NOT": "💎",
-    "LINK": "🔗", "LTC": "Ł", "UNI": "🦄", "TRX": "⚡", "VET": "🌿",
-    "SUI": "💧", "PEPE": "🐸", "HMSTR": "🐹", "BABYDOGE": "🐶", "PUMP": "🚀",
-    "THETA": "🌀", "PENDLE": "📐", "CAKE": "🥞", "S": "💨", "DEXE": "🗳️",
-    "SKY": "☁️", "FTM": "🔥", "HYPE": "🌊", "RENDER": "🖥️", "POL": "🟣",
-    "ONDO": "🏦", "XAUT": "🥇", "ENA": "🌐", "FLOKI": "🐕‍🦺", "TAO": "🧠",
-    "ARB": "🔵", "MAGIC": "🪄", "CFX": "🌲", "WLD": "👁️", "LDO": "🌊",
-    "DYDX": "📉", "APT": "🅰️", "ENS": "🏷️", "ONE": "🎐", "API3": "🔌",
-    "STORJ": "💾", "SLP": "🍯", "ZRX": "0️⃣", "ATOM": "⚛️", "AVAX": "🔺",
-    "AXS": "🐚", "NEAR": "Ⓝ", "GMT": "👟", "CHZ": "🌶️", "HBAR": "Ⓗ",
-    "CRO": "💠", "ETC": "⟠", "DOT": "⚪", "AAVE": "👻", "FIL": "📁",
-    "XRP": "✕", "BCH": "🟢", "IMX": "🛡️", "XLM": "✨", "RNDR": "🎨",
+    "BTC": "₿", "ETH": "Ξ", "BNB": "🔶", "SOL": "◎", "XRP": "✕",
+    "DOGE": "🐕", "ADA": "🔷", "AVAX": "🔺", "DOT": "⚪", "LINK": "🔗",
+    "LTC": "Ł", "BCH": "🟢", "ETC": "⟠", "XLM": "✨", "ATOM": "⚛️",
+    "FIL": "📁", "UNI": "🦄", "AAVE": "👻", "TRX": "⚡", "NEAR": "Ⓝ",
+    "ARB": "🔵", "APT": "🅰️", "SUI": "💧", "PEPE": "🐸", "WIF": "🧢",
+    "BONK": "🐕", "FLOKI": "🐕‍🦺", "SHIB": "🦴", "TIA": "🛰️", "SEI": "🌊",
+    "INJ": "💉", "KAS": "🐍", "OP": "🔴", "RUNE": "🪙", "JUP": "🪐",
+    "PYTH": "🔮", "STX": "📚", "GRT": "📊", "SAND": "⏳", "MANA": "🌐",
+    "GALA": "🎮", "APE": "🦧", "MINA": "🌐", "LUNC": "🟤", "COMP": "💠",
+    "AXL": "🌉", "BLUR": "👁️", "AR": "🗂️", "FLOW": "🌊", "EOS": "⚙️",
+    "XTZ": "🪙", "THETA": "🌀", "CHZ": "🌶️", "ZEC": "🛡️", "DASH": "⚡",
+    "SUSHI": "🍣", "CRV": "🥄", "1INCH": "1️⃣", "ENJ": "🎮", "GMT": "👟",
+    "IMX": "🛡️", "LDO": "🌊", "DYDX": "📉", "API3": "🔌", "SNX": "🧪",
 }
 COIN_CODES = list(COIN_ICONS.keys())
 
-# ---------- Time & Limits ----------
 TIMEFRAME = "1h"
 TIMEFRAMES = ("1h", "4h", "1d")
 CHECK_INTERVAL_SECONDS = 15 * 60
@@ -91,7 +88,6 @@ COINS_GRID_COLUMNS = 4
 AUTO_KEEP_LAST_N = 3
 TRAILING_CHECK_SECONDS = 5 * 60
 
-# Category weights (sum = 100)
 WEIGHT_TREND = 25
 WEIGHT_MOMENTUM = 25
 WEIGHT_VOLUME = 15
@@ -102,7 +98,6 @@ OHLCV_TTL_SECONDS = 90
 FULL_REFRESH_TTL_SECONDS = 240
 FUNDING_TTL_SECONDS = 120
 OI_TTL_SECONDS = 180
-LS_RATIO_TTL_SECONDS = 300
 MAX_OHLCV_CONCURRENCY = 5
 MAX_SIGNAL_CONCURRENCY = 8
 RLM = "\u200f"
@@ -114,7 +109,7 @@ DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
-exchange = ccxt.binance({
+exchange = ccxt.mexc({
     "enableRateLimit": True,
     "options": {
         "defaultType": "swap",
@@ -149,10 +144,15 @@ class TradePlan:
     leverage: int = 1
     liquidation_price: float = 0.0
     oi_change_pct: float = 0.0
-    ls_ratio: float = 0.0
     scores: dict = field(default_factory=dict)
     reasons: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
+    support: float = 0.0
+    resistance: float = 0.0
+    breakout_up: bool = False
+    breakout_down: bool = False
+    bullish_div: bool = False
+    bearish_div: bool = False
 
 class MarketDataCache:
     _instance = None
@@ -179,7 +179,6 @@ class MarketDataCache:
         }
         self.last_price_update = 0.0
         self.last_full_ohlcv_update = 0.0
-        self.last_full_refresh_started = 0.0
         self._sem = asyncio.Semaphore(MAX_OHLCV_CONCURRENCY)
         self._price_sem = asyncio.Semaphore(8)
         self._update_lock = asyncio.Lock()
@@ -188,8 +187,6 @@ class MarketDataCache:
         self._funding_lock = asyncio.Lock()
         self._oi_cache = {}
         self._oi_lock = asyncio.Lock()
-        self._ls_ratio_cache = {}
-        self._ls_ratio_lock = asyncio.Lock()
         self._load_markets()
 
     def _symbol_lock(self, code):
@@ -203,9 +200,7 @@ class MarketDataCache:
             selected = {}
             for code in COIN_CODES:
                 self.market_status[code] = {
-                    "status": "NO SWAP",
-                    "symbol": None,
-                    "error": None,
+                    "status": "NO SWAP", "symbol": None, "error": None,
                 }
                 candidates = []
                 for symbol, market in markets.items():
@@ -217,14 +212,11 @@ class MarketDataCache:
                         continue
                     if not market.get("swap", False):
                         continue
-                    if market.get("settle") != "USDT":
-                        continue
-                    if not market.get("linear", False):
-                        continue
                     if market.get("active") is False:
                         continue
                     candidates.append((symbol, market))
                 if not candidates:
+                    logger.debug("No active USDT swap for %s on MEXC", code)
                     continue
                 candidates.sort(key=lambda x: x[0])
                 symbol, market = candidates[0]
@@ -238,7 +230,7 @@ class MarketDataCache:
             self.exchange_symbols = selected
             self.valid_codes = list(selected.keys())
             logger.info(
-                "Binance swap markets: %s/%s selected (USDT linear perpetual)",
+                "MEXC swap markets: %s/%s selected (USDT perpetual)",
                 len(self.valid_codes), len(COIN_CODES),
             )
         except Exception as e:
@@ -299,8 +291,12 @@ class MarketDataCache:
         if not self.exchange_symbols:
             self._load_markets()
         now = time.time()
-        # Fix: always fetch if prices empty or force or stale
-        if (not force and self.prices and self.last_price_update and now - self.last_price_update < 60):
+        if (
+            not force
+            and self.prices
+            and self.last_price_update
+            and now - self.last_price_update < 60
+        ):
             return self.prices
 
         async def fetch_one(code):
@@ -330,7 +326,10 @@ class MarketDataCache:
                         "symbol": symbol,
                         "error": f"{type(e).__name__}: {e}",
                     }
-                    logger.warning("ticker failed | code=%s | error=%s", code, e)
+                    logger.warning(
+                        "ticker failed | code=%s | type=%s | symbol=%s | error=%s",
+                        code, type(e).__name__, symbol, e,
+                    )
                     return code, None
 
         results = await asyncio.gather(*(fetch_one(c) for c in COIN_CODES))
@@ -356,7 +355,10 @@ class MarketDataCache:
                     return None
                 return closed
             except Exception as e:
-                logger.warning("OHLCV failed | code=%s | tf=%s | error=%s", code, timeframe, e)
+                logger.warning(
+                    "OHLCV failed | code=%s | tf=%s | error=%s",
+                    code, timeframe, e,
+                )
                 return None
 
     async def ensure_symbol_data(self, code, timeframes=None, force=False):
@@ -385,7 +387,11 @@ class MarketDataCache:
     async def update_ohlcv(self, force=False, codes=None):
         async with self._update_lock:
             now = time.time()
-            if (not force and self.last_full_ohlcv_update and now - self.last_full_ohlcv_update < FULL_REFRESH_TTL_SECONDS):
+            if (
+                not force
+                and self.last_full_ohlcv_update
+                and now - self.last_full_ohlcv_update < FULL_REFRESH_TTL_SECONDS
+            ):
                 return
             if not self.valid_codes:
                 self._load_markets()
@@ -394,8 +400,10 @@ class MarketDataCache:
             target_codes = list(codes or self.valid_codes)
             await asyncio.gather(*(self.ensure_symbol_data(c, TIMEFRAMES, force=force) for c in target_codes))
             self.last_full_ohlcv_update = time.time()
-            logger.info("OHLCV refresh complete: 1h=%s 4h=%s 1d=%s",
-                        len(self.ohlcv["1h"]), len(self.ohlcv["4h"]), len(self.ohlcv["1d"]))
+            logger.info(
+                "OHLCV refresh complete: 1h=%s 4h=%s 1d=%s",
+                len(self.ohlcv["1h"]), len(self.ohlcv["4h"]), len(self.ohlcv["1d"]),
+            )
 
     async def get_open_interest_info(self, code):
         symbol = self.symbol_for_code(code)
@@ -413,33 +421,15 @@ class MarketDataCache:
                 current = float(oi.get("openInterestAmount") or oi.get("openInterestValue") or 0)
                 prev = cached.get("value") if cached else None
                 change_pct = ((current - prev) / prev * 100) if prev else 0.0
-                self._oi_cache[code] = {"value": current, "ts": time.time(), "change_pct": change_pct}
+                self._oi_cache[code] = {
+                    "value": current,
+                    "ts": time.time(),
+                    "change_pct": change_pct,
+                }
                 return current, change_pct
             except Exception as e:
                 logger.debug("Open interest failed | code=%s | error=%s", code, e)
-                return (cached.get("value", 0.0), cached.get("change_pct", 0.0)) if cached else (0.0, 0.0)
-
-    async def get_long_short_ratio(self, code):
-        symbol = self.symbol_for_code(code)
-        if not symbol:
-            return 0.0
-        cached = self._ls_ratio_cache.get(code)
-        if cached and time.time() - cached["ts"] < LS_RATIO_TTL_SECONDS:
-            return cached["value"]
-        async with self._ls_ratio_lock:
-            cached = self._ls_ratio_cache.get(code)
-            if cached and time.time() - cached["ts"] < LS_RATIO_TTL_SECONDS:
-                return cached["value"]
-            try:
-                url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={symbol.replace('/USDT:USDT','')}&period=1h&limit=1"
-                r = requests.get(url, timeout=8)
-                r.raise_for_status()
-                ratio = float(r.json()[-1].get("longShortRatio", 0))
-                self._ls_ratio_cache[code] = {"value": ratio, "ts": time.time()}
-                return ratio
-            except Exception as e:
-                logger.debug("Long/Short ratio failed | code=%s | error=%s", code, e)
-                return cached.get("value", 0.0) if cached else 0.0
+                return cached.get("value", 0.0), cached.get("change_pct", 0.0) if cached else (0.0, 0.0)
 
     async def get_funding_rate(self, code):
         symbol = self.symbol_for_code(code)
@@ -513,6 +503,7 @@ class MarketDataCache:
             ).volume_weighted_average_price()
 
             price = float(close.iloc[-1])
+            price_prev = float(close.iloc[-2])
             atr_value = float(atr.iloc[-1])
             atr_pct = (atr_value / price * 100) if price > 0 else 0
             ema20_value = float(ema20.iloc[-1])
@@ -525,6 +516,9 @@ class MarketDataCache:
             ema50_prev = float(ema50.iloc[-2]) if len(ema50) >= 2 else ema50_value
             bullish_cross = (ema20_prev <= ema50_prev and ema20_value > ema50_value)
             bearish_cross = (ema20_prev >= ema50_prev and ema20_value < ema50_value)
+
+            rsi_prev = float(rsi.iloc[-2]) if len(rsi) >= 2 else float(rsi.iloc[-1])
+            macd_hist_prev = float(macd_hist.iloc[-2]) if len(macd_hist) >= 2 else float(macd_hist.iloc[-1])
 
             vr = float(volume_ratio.iloc[-1])
             volume_spike = vr >= 1.5
@@ -546,8 +540,17 @@ class MarketDataCache:
                 if pd.notna(daily_ema200_value):
                     daily_trend_up = bool(dfd["close"].iloc[-1] > daily_ema200_value)
 
+            support = float(df["low"].iloc[-20:].min())
+            resistance = float(df["high"].iloc[-20:].max())
+            breakout_up = price > resistance * 1.001
+            breakout_down = price < support * 0.999
+
+            bullish_div = (price < price_prev and rsi.iloc[-1] > rsi_prev)
+            bearish_div = (price > price_prev and rsi.iloc[-1] < rsi_prev)
+
             values = {
                 "price": price,
+                "price_prev": price_prev,
                 "ema20": ema20_value,
                 "ema50": ema50_value,
                 "ema200": ema200_value,
@@ -560,10 +563,12 @@ class MarketDataCache:
                 "ema20_bullish_cross": bullish_cross,
                 "ema20_bearish_cross": bearish_cross,
                 "rsi": float(rsi.iloc[-1]),
+                "rsi_prev": rsi_prev,
                 "stoch_k": float(stoch_k.iloc[-1]),
                 "macd": float(macd_line.iloc[-1]),
                 "macd_signal": float(macd_signal.iloc[-1]),
                 "macd_hist": float(macd_hist.iloc[-1]),
+                "macd_hist_prev": macd_hist_prev,
                 "roc": float(roc.iloc[-1]),
                 "cci": float(cci.iloc[-1]),
                 "williams_r": float(williams.iloc[-1]),
@@ -585,6 +590,12 @@ class MarketDataCache:
                 "daily_ema200": daily_ema200_value,
                 "trend_label": "صعودی 📈" if price > ema200_value else "نزولی 📉",
                 "is_trending": bool(adx.iloc[-1] >= ADX_TREND_THRESHOLD),
+                "support": support,
+                "resistance": resistance,
+                "breakout_up": breakout_up,
+                "breakout_down": breakout_down,
+                "bullish_div": bullish_div,
+                "bearish_div": bearish_div,
             }
             if any(pd.isna(v) for v in values.values() if isinstance(v, (int, float))):
                 return None
@@ -816,6 +827,8 @@ def signal_reasons(direction, ind):
         if ind["price_above_vwap"]: reasons.append("قیمت بالای VWAP")
         if ind["roc"] > 0: reasons.append("ROC مثبت")
         if ind["cci"] > 0: reasons.append("CCI مثبت")
+        if ind["breakout_up"]: reasons.append("شکست مقاومت (Breakout)")
+        if ind["bullish_div"]: reasons.append("واگرایی مثبت RSI")
         if ind["rsi"] >= 68: warnings.append(f"RSI = {ind['rsi']:.1f} — نزدیک اشباع خرید")
         if ind["williams_r"] > -20: warnings.append(f"Williams %R = {ind['williams_r']:.1f} — اشباع خرید")
     else:
@@ -832,8 +845,11 @@ def signal_reasons(direction, ind):
         if not ind["price_above_vwap"]: reasons.append("قیمت زیر VWAP")
         if ind["roc"] < 0: reasons.append("ROC منفی")
         if ind["cci"] < 0: reasons.append("CCI منفی")
+        if ind["breakout_down"]: reasons.append("شکست حمایت (Breakdown)")
+        if ind["bearish_div"]: reasons.append("واگرایی منفی RSI")
         if ind["rsi"] <= 32: warnings.append(f"RSI = {ind['rsi']:.1f} — نزدیک اشباع فروش")
         if ind["williams_r"] < -80: warnings.append(f"Williams %R = {ind['williams_r']:.1f} — اشباع فروش")
+
     return reasons, warnings
 
 def format_quality(scores):
@@ -915,30 +931,57 @@ async def generate_trade_plan(code):
     levels = build_ladder_weighted(ind, direction)
     funding = await cache.get_funding_rate(code)
     oi, oi_change = await cache.get_open_interest_info(code)
-    ls_ratio = await cache.get_long_short_ratio(code)
-    if direction == "LONG" and funding > 0.05: confidence -= 5
-    elif direction == "LONG" and funding > 0.1: confidence -= 10
-    elif direction == "SHORT" and funding < -0.05: confidence -= 5
-    elif direction == "SHORT" and funding < -0.1: confidence -= 10
-    if oi_change > 5: confidence += 2
-    elif oi_change < -5: confidence -= 2
-    if direction == "LONG" and ls_ratio > 2.5: confidence -= 3
-    elif direction == "SHORT" and ls_ratio < 0.4: confidence -= 3
+
+    # Funding penalty
+    if direction == "LONG" and funding > 0.05:
+        confidence -= 5
+    elif direction == "LONG" and funding > 0.1:
+        confidence -= 10
+    elif direction == "SHORT" and funding < -0.05:
+        confidence -= 5
+    elif direction == "SHORT" and funding < -0.1:
+        confidence -= 10
+
+    # OI alignment
+    if oi_change > 5:
+        confidence += 2
+    elif oi_change < -5:
+        confidence -= 2
+
     confidence = max(0, min(100, confidence))
     leverage = determine_leverage(confidence)
     entry_avg = levels["avg_entry"]
     liq = calc_liquidation_price(direction, entry_avg, leverage)
+
     reasons, warnings = signal_reasons(direction, ind)
-    if oi_change > 5: reasons.append(f"OI در حال افزایش ({oi_change:+.1f}%)")
-    elif oi_change < -5: warnings.append(f"OI در حال کاهش ({oi_change:+.1f}%)")
-    if ls_ratio > 2.5 or ls_ratio < 0.4: warnings.append(f"Long/Short Ratio غیرعادی: {ls_ratio:.2f}")
+    if oi_change > 5:
+        reasons.append(f"OI در حال افزایش ({oi_change:+.1f}%)")
+    elif oi_change < -5:
+        warnings.append(f"OI در حال کاهش ({oi_change:+.1f}%)")
+
     return TradePlan(
-        symbol=code, direction=direction, trend=ind["trend_label"], rsi=float(ind["rsi"]),
-        current_price=float(ind["price"]), confidence=float(confidence),
-        entries=levels["entries"], stop_losses=levels["stop_losses"],
-        take_profits=levels["take_profits"], funding_rate=funding, leverage=leverage,
-        liquidation_price=liq, oi_change_pct=oi_change, ls_ratio=ls_ratio,
-        scores=scores, reasons=reasons, warnings=warnings,
+        symbol=code,
+        direction=direction,
+        trend=ind["trend_label"],
+        rsi=float(ind["rsi"]),
+        current_price=float(ind["price"]),
+        confidence=float(confidence),
+        entries=levels["entries"],
+        stop_losses=levels["stop_losses"],
+        take_profits=levels["take_profits"],
+        funding_rate=funding,
+        leverage=leverage,
+        liquidation_price=liq,
+        oi_change_pct=oi_change,
+        scores=scores,
+        reasons=reasons,
+        warnings=warnings,
+        support=ind["support"],
+        resistance=ind["resistance"],
+        breakout_up=ind["breakout_up"],
+        breakout_down=ind["breakout_down"],
+        bullish_div=ind["bullish_div"],
+        bearish_div=ind["bearish_div"],
     )
 
 async def refresh_all_plans(force_data=False):
@@ -961,7 +1004,7 @@ async def refresh_all_plans(force_data=False):
     logger.info("Active signals: %s", len(plans))
     return last_plans
 
-# ---------- Formatting main signal / technical details ----------
+# ---------- Formatting functions ----------
 def format_main_signal(plan, code, chat_id):
     direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
     funding = f"\n💰 فاندینگ: {plan.funding_rate:+.3f}%" if plan.funding_rate else ""
@@ -1013,16 +1056,16 @@ def format_technical_details(code, plan, ind, chat_id):
         f"ATR: {fmt_amount(ind['atr'], chat_id)} ({ind['atr_pct']:.2f}%)\n"
         f"روند ۴ساعته: {'صعودی 📈' if ind['higher_tf_trend_up'] is True else 'نزولی 📉' if ind['higher_tf_trend_up'] is False else 'نامشخص'}\n"
         f"روند روزانه: {'صعودی 📈' if ind['daily_trend_up'] is True else 'نزولی 📉' if ind['daily_trend_up'] is False else 'نامشخص'}\n"
+        f"حمایت: {fmt_amount(ind['support'], chat_id)} | مقاومت: {fmt_amount(ind['resistance'], chat_id)}\n"
         f"{DIVIDER}\n"
         f"📈 Open Interest تغییر: {plan.oi_change_pct:+.2f}%\n"
-        f"⚖️ Long/Short Ratio: {plan.ls_ratio:.2f}\n"
         f"💰 فاندینگ: {plan.funding_rate:+.3f}%\n"
         f"{DIVIDER}\n"
         f"⚠️ این تحلیل تکنیکال است و تضمین سود نیست."
     )
     return rtl_lines(text)
 
-# ---------- Instant status (restored) ----------
+# ---------- Instant status ----------
 async def generate_status_text_async(code, chat_id):
     ind = await cache.get_indicators(code)
     if not ind:
@@ -1031,7 +1074,6 @@ async def generate_status_text_async(code, chat_id):
             "⚠️ داده‌ی کافی برای تحلیل این ارز دریافت نشد."
         )
     plan = await generate_trade_plan(code)
-    # Header
     header = (
         f"🧭 *وضعیت لحظه‌ای* {COIN_ICONS.get(code, '🔸')} *{sym(code)}*\n"
         f"🕒 {shamsi_now()}\n{DIVIDER}\n"
@@ -1057,6 +1099,7 @@ async def generate_status_text_async(code, chat_id):
         f"📡 VWAP: {fmt_amount(ind['vwap'], chat_id)}\n"
         f"🗺️ روند ۴ساعته: {'صعودی 📈' if ind['higher_tf_trend_up'] is True else 'نزولی 📉' if ind['higher_tf_trend_up'] is False else 'نامشخص'}\n"
         f"⚡ ATR: {fmt_amount(ind['atr'], chat_id)} ({ind['atr_pct']:.2f}%)\n"
+        f"🏔️ حمایت: {fmt_amount(ind['support'], chat_id)} | مقاومت: {fmt_amount(ind['resistance'], chat_id)}\n"
         f"{DIVIDER}\n"
     )
     if plan and plan.confidence >= MIN_SIGNAL_CONFIDENCE:
@@ -1084,7 +1127,7 @@ async def generate_status_text_async(code, chat_id):
         )
     return rtl_lines(header + body + footer + f"\n{DIVIDER}\n⚠️ این تحلیل تکنیکال است و تضمین سود یا توصیه مالی نیست.")
 
-# ---------- Weekly summary with extra futures data ----------
+# ---------- Weekly summary ----------
 async def generate_weekly_summary_async(code, chat_id):
     week_df = await cache.get_weekly_data(code)
     if week_df is None or len(week_df) < 2:
@@ -1147,10 +1190,8 @@ async def generate_weekly_summary_async(code, chat_id):
     ret_24h = float(returns.iloc[-1]) if not returns.empty else 0
     best_date = shamsi_date(week_df.loc[best_idx, "timestamp"]) if best_idx in week_df.index else "-"
     worst_date = shamsi_date(week_df.loc[worst_idx, "timestamp"]) if worst_idx in week_df.index else "-"
-    # Fetch extra futures data
     funding = await cache.get_funding_rate(code)
     oi, oi_change = await cache.get_open_interest_info(code)
-    ls_ratio = await cache.get_long_short_ratio(code)
     text = (
         f"📊 *تحلیل ۷ روز اخیر* {COIN_ICONS.get(code, '🔸')} *{code}*\n"
         f"🕒 {shamsi_now()}\n{DIVIDER}\n"
@@ -1191,12 +1232,11 @@ async def generate_weekly_summary_async(code, chat_id):
         f"📊 *داده‌های فیوچرز*\n"
         f"💰 فاندینگ: {funding:+.3f}%\n"
         f"📈 Open Interest تغییر: {oi_change:+.2f}%\n"
-        f"⚖️ Long/Short Ratio: {ls_ratio:.2f}\n"
-        f"{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Linear Perpetual در بایننس محاسبه شده‌اند."
+        f"{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Perpetual در MEXC محاسبه شده‌اند."
     )
     return rtl_lines(text)
 
-# ---------- Formatting prices ----------
+# ---------- Prices formatting ----------
 def format_prices_pretty(prices, chat_id):
     lines = ["💰 قیمت لحظه‌ای قراردادها", f"🕒 {shamsi_now()}", DIVIDER]
     for code in COIN_CODES:
@@ -1467,6 +1507,29 @@ async def status(update, context):
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
+def save_state():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"subscribed_chat_ids": list(subscribed_chat_ids), "user_currency": user_currency}, f, ensure_ascii=False)
+        os.replace(tmp, STATE_FILE)
+    except Exception as e:
+        logger.warning("State save failed: %s", e)
+
+def load_state():
+    global subscribed_chat_ids, user_currency
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        subscribed_chat_ids = {int(x) for x in data.get("subscribed_chat_ids", [])}
+        user_currency = {int(k): v for k, v in data.get("user_currency", {}).items()}
+        logger.info("State restored: %s users", len(subscribed_chat_ids))
+    except FileNotFoundError:
+        logger.info("No state file; starting fresh.")
+    except Exception as e:
+        logger.warning("State load failed: %s", e)
+
 # ---------- Button handler ----------
 async def button_handler(update, context):
     if not await guard(update): return
@@ -1520,7 +1583,7 @@ async def button_handler(update, context):
             if status == "TICKER ERROR":
                 text = f"{COIN_ICONS.get(code, '🔸')} *{sym(code)}*\n{DIVIDER}\n🟠 وضعیت: *TICKER ERROR*\n⚠️ دریافت قیمت لحظه‌ای ناموفق بود.\nنوع خطا: `{error or '-'}`"
             else:
-                text = f"{COIN_ICONS.get(code, '🔸')} *{code}*\n{DIVIDER}\n⚪ وضعیت: *NO SWAP*\nدر حال حاضر قرارداد USDT Linear Perpetual فعال برای این ارز در بایننس پیدا نشد."
+                text = f"{COIN_ICONS.get(code, '🔸')} *{code}*\n{DIVIDER}\n⚪ وضعیت: *NO SWAP*\nدر حال حاضر قرارداد USDT Perpetual فعال برای این ارز در MEXC پیدا نشد."
             await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
             await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
             set_interactive_screen(chat_id, [query.message.message_id]); return
@@ -1534,7 +1597,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در بایننس در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در MEXC در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         if auto:
             await clear_overlay(context, chat_id)
@@ -1585,7 +1648,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در بایننس در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در MEXC در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         await query.edit_message_text("⏳ در حال دریافت اطلاعات ۷ روز اخیر...")
@@ -1690,30 +1753,6 @@ async def auto_report_loop(app):
         elapsed = time.time() - cycle_started
         await asyncio.sleep(max(5, CHECK_INTERVAL_SECONDS - elapsed))
 
-# ---------- State ----------
-def save_state():
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        tmp = STATE_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"subscribed_chat_ids": list(subscribed_chat_ids), "user_currency": user_currency}, f, ensure_ascii=False)
-        os.replace(tmp, STATE_FILE)
-    except Exception as e:
-        logger.warning("State save failed: %s", e)
-
-def load_state():
-    global subscribed_chat_ids, user_currency
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        subscribed_chat_ids = {int(x) for x in data.get("subscribed_chat_ids", [])}
-        user_currency = {int(k): v for k, v in data.get("user_currency", {}).items()}
-        logger.info("State restored: %s users", len(subscribed_chat_ids))
-    except FileNotFoundError:
-        logger.info("No state file; starting fresh.")
-    except Exception as e:
-        logger.warning("State load failed: %s", e)
-
 async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("start", "شروع ربات"),
@@ -1722,7 +1761,7 @@ async def post_init(app):
     ])
     app.create_task(auto_report_loop(app))
     app.create_task(trailing_monitor_loop(app))
-    logger.info("Signal Bot V12 (Binance) started")
+    logger.info("Signal Bot V14 (MEXC) started")
 
 def main():
     if not BOT_TOKEN:
