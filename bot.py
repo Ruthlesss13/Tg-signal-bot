@@ -1,12 +1,13 @@
 """
-Telegram Signal Bot V10 - Binance Edition
-- Fixed forming candle bug
-- Multi-timeframe confirmation (1h, 4h, 1d)
-- Funding rate affects confidence
-- Open Interest & Long/Short Ratio
-- 3 take-profits + trailing stop-loss
-- Trailing monitor every 5 min (one notification per stage)
-- Cleaner message layout (main signal + technical details)
+Telegram Signal Bot V11 - Binance Edition (Complete & Fixed)
+- تمام توابع لازم موجود است
+- اصلاح باگ کندل در حال تشکیل
+- تأیید چند تایم‌فریمی (1h, 4h, 1d)
+- تأثیر فاندینگ، Open Interest و Long/Short Ratio
+- حد سود سه‌پله‌ای + حد ضرر تریلینگ متحرک
+- پایش خودکار تریلینگ هر ۵ دقیقه (یک‌بار اطلاع‌رسانی برای هر مرحله)
+- قالب پیام بهبود یافته: سیگنال اصلی خلاصه + جزئیات فنی جداگانه
+- وضعیت سیستم کامل‌تر
 """
 
 import asyncio
@@ -45,6 +46,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("signal_bot")
 
+# ---------- Bot Config ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALLOWED_USER_IDS = {
     int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()
@@ -74,6 +76,7 @@ COIN_ICONS = {
 }
 COIN_CODES = list(COIN_ICONS.keys())
 
+# ---------- Time & Limits ----------
 TIMEFRAME = "1h"
 TIMEFRAMES = ("1h", "4h", "1d")
 CHECK_INTERVAL_SECONDS = 15 * 60
@@ -89,9 +92,9 @@ TELEGRAM_MSG_LIMIT = 3500
 IRT_RATE_TTL_SECONDS = 300
 COINS_GRID_COLUMNS = 4
 AUTO_KEEP_LAST_N = 3
-TRAILING_CHECK_SECONDS = 5 * 60   # 5 دقیقه
+TRAILING_CHECK_SECONDS = 5 * 60   # ۵ دقیقه
 
-# Category weights
+# Category weights (sum = 100)
 WEIGHT_TREND = 25
 WEIGHT_MOMENTUM = 25
 WEIGHT_VOLUME = 15
@@ -112,6 +115,7 @@ STATE_FILE = os.path.join(DATA_DIR, "state.json")
 
 DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
+MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
 # ---------- Binance Exchange ----------
 exchange = ccxt.binance({
@@ -130,6 +134,9 @@ overlay_messages = {}
 interactive_screen_messages = {}
 _irt_rate_cache = {"value": None, "ts": 0.0, "source": None}
 active_signals = {}   # chat_id -> { code: {"plan": TradePlan, "stage": int, "last_notified": int} }
+START_TIME = time.time()
+TOTAL_SIGNALS_GENERATED = 0
+LAST_REPORT_TIME = None
 
 @dataclass
 class TradePlan:
@@ -140,8 +147,8 @@ class TradePlan:
     current_price: float = 0.0
     confidence: float = 0.0
     entries: list = field(default_factory=list)
-    stop_losses: list = field(default_factory=list)  # initial SL
-    take_profits: list = field(default_factory=list)  # TP1, TP2, TP3
+    stop_losses: list = field(default_factory=list)
+    take_profits: list = field(default_factory=list)
     funding_rate: float = 0.0
     leverage: int = 1
     liquidation_price: float = 0.0
@@ -448,7 +455,6 @@ class MarketDataCache:
             if cached and time.time() - cached["ts"] < OI_TTL_SECONDS:
                 return cached["value"], cached.get("change_pct", 0.0)
             try:
-                # Use ccxt fetch_open_interest
                 oi = await asyncio.to_thread(exchange.fetch_open_interest, symbol)
                 current = float(oi.get("openInterestAmount") or oi.get("openInterestValue") or 0)
                 prev = cached.get("value") if cached else None
@@ -477,9 +483,6 @@ class MarketDataCache:
             if cached and time.time() - cached["ts"] < LS_RATIO_TTL_SECONDS:
                 return cached["value"]
             try:
-                # fetch from Binance futures data API via ccxt
-                # Use exchange.fetch_positions? Not exactly. We'll use ccxt's generic fetch
-                # For simplicity, we'll attempt to fetch via public API with requests
                 base = code
                 url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={symbol.replace('/USDT:USDT','')}&period=1h&limit=1"
                 r = requests.get(url, timeout=8)
@@ -797,7 +800,7 @@ def mood_emoji(plan):
 def category_scores(direction, ind):
     long_side = direction == "LONG"
 
-    # ============ TREND / 25 ============
+    # TREND
     trend = 0
     if long_side:
         if ind["price_above_ema200"]:
@@ -823,7 +826,7 @@ def category_scores(direction, ind):
             trend += 3
     trend = min(trend, 25)
 
-    # ============ MOMENTUM / 25 ============
+    # MOMENTUM
     momentum = 0
     macd_ok = ind["macd_hist"] > 0 if long_side else ind["macd_hist"] < 0
     di_ok = ind["plus_di"] > ind["minus_di"] if long_side else ind["minus_di"] > ind["plus_di"]
@@ -843,7 +846,7 @@ def category_scores(direction, ind):
         momentum += 4
     momentum = min(momentum, 25)
 
-    # ============ VOLUME / 15 ============
+    # VOLUME
     volume = 0
     if ind["volume_ratio"] >= 1.5:
         volume += 8
@@ -857,7 +860,7 @@ def category_scores(direction, ind):
         volume += 3
     volume = min(volume, 15)
 
-    # ============ VOLATILITY / 15 ============
+    # VOLATILITY
     volatility = 0
     if 0.5 <= ind["atr_pct"] <= 5:
         volatility += 6
@@ -878,21 +881,18 @@ def category_scores(direction, ind):
         volatility += 3
     volatility = min(volatility, 15)
 
-    # ============ HIGHER TIMEFRAME / 20 ============
+    # HIGHER TIMEFRAME
     htf = 0
-    # 4h confirm
     if ind["higher_tf_trend_up"] is not None:
         if long_side and ind["higher_tf_trend_up"]:
             htf += 10
         elif not long_side and not ind["higher_tf_trend_up"]:
             htf += 10
-    # daily confirm
     if ind["daily_trend_up"] is not None:
         if long_side and ind["daily_trend_up"]:
             htf += 10
         elif not long_side and not ind["daily_trend_up"]:
             htf += 10
-    # VWAP confirm
     vwap_ok = ind["price_above_vwap"] if long_side else not ind["price_above_vwap"]
     if vwap_ok:
         htf += 5
@@ -1003,11 +1003,11 @@ def format_quality(scores):
 
     return (
         f"📊 *کیفیت سیگنال*\n"
-        f"Trend {bar(scores['trend'], 25)} {scores['trend'] / 25 * 100:.0f}%\n"
-        f"Momentum {bar(scores['momentum'], 25)} {scores['momentum'] / 25 * 100:.0f}%\n"
-        f"Volume {bar(scores['volume'], 15)} {scores['volume'] / 15 * 100:.0f}%\n"
-        f"Volatility {bar(scores['volatility'], 15)} {scores['volatility'] / 15 * 100:.0f}%\n"
-        f"HTF Confirm {bar(scores['htf'], 20)} {scores['htf'] / 20 * 100:.0f}%"
+        f"روند {bar(scores['trend'], 25)} {scores['trend'] / 25 * 100:.0f}%\n"
+        f"مومنتوم {bar(scores['momentum'], 25)} {scores['momentum'] / 25 * 100:.0f}%\n"
+        f"حجم {bar(scores['volume'], 15)} {scores['volume'] / 15 * 100:.0f}%\n"
+        f"نوسان {bar(scores['volatility'], 15)} {scores['volatility'] / 15 * 100:.0f}%\n"
+        f"تأیید تایم‌فریم بالا {bar(scores['htf'], 20)} {scores['htf'] / 20 * 100:.0f}%"
     )
 
 def build_ladder_weighted(ind, direction):
@@ -1022,14 +1022,12 @@ def build_ladder_weighted(ind, direction):
     ]
     avg_entry = sum(e * w for e, w in zip(entries, ENTRY_WEIGHTS))
 
-    # TP levels: use ATR multiples increasing
     tp_multipliers = [2.0, 3.0, 4.0]   # TP1, TP2, TP3
     take_profits = [
         avg_entry + atr * m if direction == "LONG" else avg_entry - atr * m
         for m in tp_multipliers
     ]
 
-    # Initial stop (will be moved by trailing)
     if direction == "LONG":
         initial_stop = avg_entry - SL_ATR_MULT * atr
     else:
@@ -1043,7 +1041,7 @@ def build_ladder_weighted(ind, direction):
 
     return {
         "entries": entries,
-        "stop_losses": [initial_stop],   # initial, will be updated
+        "stop_losses": [initial_stop],
         "take_profits": take_profits,
         "avg_entry": avg_entry,
         "risk": risk,
@@ -1111,25 +1109,12 @@ async def generate_trade_plan(code):
         confidence -= 10
 
     # Open Interest alignment
-    if direction == "LONG" and oi_change > 5:
-        confidence += 3
-        if "افزایش Open Interest" not in []:
-            pass
-    elif direction == "SHORT" and oi_change > 5:
-        confidence -= 3   # OI rising but price falling? Actually for short if price falling and OI rising, that's bearish, so we should add? Wait: For short direction, if price is falling and OI increases, that confirms downtrend. So for short, OI increase should be positive. So:
-        # Actually let's handle:
-        # For LONG: if price up and OI up => +; if price up and OI down => -
-        # For SHORT: if price down and OI up => +; if price down and OI down => -
-        # We'll base on direction: long: OI increase positive; short: OI increase positive too? Actually OI increase means new money entering, if direction aligns with price movement, it confirms. So for both, if OI increase and direction is chosen, likely confirm. So we can add +3 if oi_change > 5 regardless of direction.
-        pass  # placeholder
-
-    # Simple: if oi_change > 5: confidence += 2; if < -5: confidence -= 2
     if oi_change > 5:
         confidence += 2
     elif oi_change < -5:
         confidence -= 2
 
-    # Long/Short ratio extreme warning (not score much)
+    # Long/Short ratio extreme
     if direction == "LONG" and ls_ratio > 2.5:
         confidence -= 3
     elif direction == "SHORT" and ls_ratio < 0.4:
@@ -1142,7 +1127,6 @@ async def generate_trade_plan(code):
     liq = calc_liquidation_price(direction, entry_avg, leverage)
 
     reasons, warnings = signal_reasons(direction, ind)
-    # Add OI/LS info to reasons/warnings maybe
     if oi_change > 5:
         reasons.append(f"OI در حال افزایش ({oi_change:+.1f}%)")
     elif oi_change < -5:
@@ -1171,6 +1155,7 @@ async def generate_trade_plan(code):
     )
 
 async def refresh_all_plans(force_data=False):
+    global TOTAL_SIGNALS_GENERATED, LAST_REPORT_TIME
     if force_data or not cache.last_full_ohlcv_update or time.time() - cache.last_full_ohlcv_update > FULL_REFRESH_TTL_SECONDS:
         await cache.update_ohlcv(force=force_data)
 
@@ -1188,10 +1173,12 @@ async def refresh_all_plans(force_data=False):
     plans = {p.symbol: p for p in results if p is not None}
     last_plans.clear()
     last_plans.update(plans)
+    TOTAL_SIGNALS_GENERATED = len(plans)
+    LAST_REPORT_TIME = time.time()
     logger.info("Active signals: %s", len(plans))
     return last_plans
 
-# ---------- Formatting functions for messages ----------
+# ---------- Formatting functions ----------
 def format_main_signal(plan, code, chat_id):
     direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
     funding = f"\n💰 فاندینگ: {plan.funding_rate:+.3f}%" if plan.funding_rate else ""
@@ -1205,7 +1192,7 @@ def format_main_signal(plan, code, chat_id):
         f"💰 قیمت فعلی: {fmt_amount(plan.current_price, chat_id)}\n\n"
         f"{format_ladder_block(plan.entries, plan.take_profits, plan.stop_losses, chat_id)}\n"
         f"{DIVIDER}\n"
-        f"📐 R/R تا TP3: 1:{plan.rr:.2f}\n"
+        f"📐 نسبت ریسک به بازده تا TP3: 1:{plan.rr:.2f}\n"
         f"⚠️ مدیریت ریسک: حداکثر ۱٪ سرمایه در این معامله.\n"
         f"برای جزئیات فنی روی دکمه زیر بزنید."
     )
@@ -1254,7 +1241,231 @@ def format_technical_details(code, plan, ind, chat_id):
     )
     return rtl_lines(text)
 
-# ---------- Interactive keyboards ----------
+# ---------- Weekly summary function (from V8) ----------
+async def generate_weekly_summary_async(code, chat_id):
+    week_df = await cache.get_weekly_data(code)
+    if week_df is None or len(week_df) < 2:
+        return rtl_lines(
+            f"{COIN_ICONS.get(code, '🔸')} *{code}*\n\n"
+            "⚠️ حداقل داده‌ی لازم برای تحلیل ۷ روزه دریافت نشد."
+        )
+
+    week_df = week_df.sort_values("timestamp").reset_index(drop=True)
+    close = week_df["close"]
+    first_price = float(close.iloc[0])
+    current_price = float(close.iloc[-1])
+    if first_price <= 0:
+        return "⚠️ قیمت تاریخی نامعتبر است."
+
+    cumulative_return = ((current_price / first_price) - 1) * 100
+    returns = close.pct_change() * 100
+    positive_days = int((returns > 0).sum())
+    negative_days = int((returns < 0).sum())
+    best_day = float(returns.max())
+    worst_day = float(returns.min())
+    best_idx = returns.idxmax()
+    worst_idx = returns.idxmin()
+
+    highest = float(week_df["high"].max())
+    lowest = float(week_df["low"].min())
+    range_pct = ((highest - lowest) / first_price * 100)
+    high_row = week_df.loc[week_df["high"].idxmax()]
+    low_row = week_df.loc[week_df["low"].idxmin()]
+
+    running_max = close.cummax()
+    drawdown = (close / running_max - 1) * 100
+    max_drawdown = float(drawdown.min())
+
+    running_min = close.cummin()
+    runup = (close / running_min - 1) * 100
+    max_runup = float(runup.max())
+
+    volatility = float(returns.dropna().std() or 0)
+
+    atr_series = AverageTrueRange(
+        week_df["high"], week_df["low"], close,
+        window=min(14, max(2, len(week_df) - 1))
+    ).average_true_range()
+    atr_daily = float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else 0
+    atr_pct = (atr_daily / current_price * 100) if current_price > 0 else 0
+
+    avg_volume = float(week_df["volume"].mean())
+    first_volume = float(week_df["volume"].iloc[0])
+    last_volume = float(week_df["volume"].iloc[-1])
+    volume_trend_pct = ((last_volume / first_volume) - 1) * 100 if first_volume > 0 else 0
+    volume_trend = "افزایشی 🔊" if volume_trend_pct > 10 else "کاهشی 🔇" if volume_trend_pct < -10 else "خنثی"
+
+    daily_all = cache.ohlcv["1d"].get(code)
+    if daily_all is not None and len(daily_all) >= 50:
+        d_close = daily_all["close"]
+        rsi = RSIIndicator(d_close, window=14).rsi()
+        ema20 = EMAIndicator(d_close, window=20).ema_indicator()
+        ema50 = EMAIndicator(d_close, window=50).ema_indicator()
+        macd = MACD(d_close, window_slow=26, window_fast=12, window_sign=9)
+        adx_ind = ADXIndicator(daily_all["high"], daily_all["low"], d_close, window=14)
+        bb = BollingerBands(d_close, window=20, window_dev=2)
+
+        daily_rsi = float(rsi.iloc[-1]) if pd.notna(rsi.iloc[-1]) else None
+        daily_ema20 = float(ema20.iloc[-1]) if pd.notna(ema20.iloc[-1]) else None
+        daily_ema50 = float(ema50.iloc[-1]) if pd.notna(ema50.iloc[-1]) else None
+        daily_macd = float(macd.macd_diff().iloc[-1]) if pd.notna(macd.macd_diff().iloc[-1]) else None
+        daily_adx = float(adx_ind.adx().iloc[-1]) if pd.notna(adx_ind.adx().iloc[-1]) else None
+        bb_position = float(bb.bollinger_pband().iloc[-1]) if pd.notna(bb.bollinger_pband().iloc[-1]) else None
+        bb_width = float(bb.bollinger_wband().iloc[-1]) if pd.notna(bb.bollinger_wband().iloc[-1]) else None
+    else:
+        daily_rsi = daily_ema20 = daily_ema50 = daily_macd = daily_adx = bb_position = bb_width = None
+
+    if daily_ema20 is not None and daily_ema50 is not None:
+        if current_price > daily_ema20 and daily_ema20 > daily_ema50:
+            trend = "صعودی قوی 📈"
+        elif current_price > daily_ema50:
+            trend = "صعودی ملایم 📈"
+        elif current_price < daily_ema20 and daily_ema20 < daily_ema50:
+            trend = "نزولی قوی 📉"
+        else:
+            trend = "نزولی ملایم 📉"
+    else:
+        trend = "نامشخص"
+
+    returns_vals = returns.dropna().tolist()
+    consecutive_up = 0
+    for v in reversed(returns_vals):
+        if v > 0:
+            consecutive_up += 1
+        else:
+            break
+    consecutive_down = 0
+    for v in reversed(returns_vals):
+        if v < 0:
+            consecutive_down += 1
+        else:
+            break
+
+    if daily_macd is not None and daily_macd > 0 and volume_trend_pct > 0:
+        momentum_volume = "مومنتوم با حجم تأیید می‌شود 🟢"
+    elif daily_macd is not None and daily_macd < 0 and volume_trend_pct < 0:
+        momentum_volume = "ضعف مومنتوم با کاهش حجم 🔴"
+    else:
+        momentum_volume = "تأیید کامل وجود ندارد ⚠️"
+
+    ret_3d = ((current_price / float(close.iloc[max(0, len(close)-4)])) - 1) * 100 if len(close) >= 4 else 0
+    ret_24h = float(returns.iloc[-1]) if not returns.empty else 0
+
+    best_date = shamsi_date(week_df.loc[best_idx, "timestamp"]) if best_idx in week_df.index else "-"
+    worst_date = shamsi_date(week_df.loc[worst_idx, "timestamp"]) if worst_idx in week_df.index else "-"
+
+    text = (
+        f"📊 *تحلیل ۷ روز اخیر* {COIN_ICONS.get(code, '🔸')} *{code}*\n"
+        f"🕒 {shamsi_now()}\n{DIVIDER}\n"
+        f"💰 قیمت فعلی: {fmt_amount(current_price, chat_id)}\n"
+        f"📈 بازده ۷ روزه: *{cumulative_return:+.2f}%*\n"
+        f"📈 بازده ۳ روزه: *{ret_3d:+.2f}%*\n"
+        f"📈 بازده ۲۴h: *{ret_24h:+.2f}%*\n"
+        f"{DIVIDER}\n"
+        f"📈 بالاترین: {fmt_amount(highest, chat_id)} 📅 {shamsi_date(high_row['timestamp'])}\n"
+        f"📉 پایین‌ترین: {fmt_amount(lowest, chat_id)} 📅 {shamsi_date(low_row['timestamp'])}\n"
+        f"📏 محدوده ۷ روزه: *{range_pct:.2f}%*\n"
+        f"🚀 بیشینه رشد: *{max_runup:+.2f}%*\n"
+        f"🛑 بیشینه کاهش: *{max_drawdown:.2f}%*\n"
+        f"⚡ ATR روزانه: *{atr_pct:.2f}%*\n"
+        f"📐 نوسان‌پذیری: *{volatility:.2f}%*\n"
+        f"{DIVIDER}\n"
+        f"🟢 روز مثبت: {positive_days} | 🔴 روز منفی: {negative_days}\n"
+        f"🔥 بهترین روز: *{best_day:+.2f}%* ({best_date})\n"
+        f"💥 بدترین روز: *{worst_day:+.2f}%* ({worst_date})\n"
+        f"📈 پشت‌سرهم صعودی: {consecutive_up} روز\n"
+        f"📉 پشت‌سرهم نزولی: {consecutive_down} روز\n"
+        f"{DIVIDER}\n"
+        f"📊 میانگین حجم: `{avg_volume:,.0f}`\n"
+        f"🔊 روند حجم: {volume_trend} ({volume_trend_pct:+.1f}%)\n"
+        f"🧠 {momentum_volume}\n"
+        f"{DIVIDER}\n"
+        f"📈 *روند روزانه:* {trend}\n"
+        f"📐 قیمت نسبت به EMA20: {'بالای 📈' if daily_ema20 is not None and current_price > daily_ema20 else 'زیر 📉' if daily_ema20 is not None else 'نامشخص'}\n"
+        f"📐 قیمت نسبت به EMA50: {'بالای 📈' if daily_ema50 is not None and current_price > daily_ema50 else 'زیر 📉' if daily_ema50 is not None else 'نامشخص'}\n"
+        f"📈 MACD روزانه: {'مثبت 📈' if daily_macd is not None and daily_macd > 0 else 'منفی 📉' if daily_macd is not None else '-'}\n"
+        f"💪 ADX روزانه: {daily_adx:.1f}" if daily_adx is not None else "💪 ADX روزانه: -"
+    )
+    text += f"\n🎯 RSI روزانه: {daily_rsi:.1f}" if daily_rsi is not None else "\n🎯 RSI روزانه: -"
+    text += f"\n📏 موقعیت بولینگر: {bb_position*100:.1f}%" if bb_position is not None else "\n📏 موقعیت بولینگر: -"
+    text += f"\n📐 پهنای بولینگر: {bb_width:.2f}" if bb_width is not None else "\n📐 پهنای بولینگر: -"
+    text += f"\n{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Linear Perpetual در بایننس محاسبه شده‌اند."
+
+    return rtl_lines(text)
+
+def format_prices_pretty(prices, chat_id):
+    lines = ["💰 قیمت لحظه‌ای قراردادها", f"🕒 {shamsi_now()}", DIVIDER]
+    for code in COIN_CODES:
+        status = cache.market_status.get(code, {}).get("status")
+        if status == "SWAP OK" and code in prices and prices[code] is not None:
+            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code} {fmt_amount(prices[code], chat_id)}")
+        elif status == "SWAP OK":
+            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code} ⚠️ در حال دریافت...")
+        elif status == "TICKER ERROR":
+            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code} 🟠 خطا در دریافت قیمت")
+        else:
+            lines.append(f"{COIN_ICONS.get(code, '🔸')} {code} ⚪ در دسترس نیست")
+    return rtl_lines("\n".join(lines))
+
+def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
+    if len(text) <= limit:
+        return [text]
+    parts, current = [], ""
+    for block in text.split("\n\n"):
+        if len(block) > limit:
+            if current:
+                parts.append(current.strip())
+                current = ""
+            for i in range(0, len(block), limit):
+                parts.append(block[i:i + limit])
+            continue
+        candidate = f"{current}\n\n{block}" if current else block
+        if len(candidate) > limit:
+            parts.append(current.strip())
+            current = block
+        else:
+            current = candidate
+    if current:
+        parts.append(current.strip())
+    return parts
+
+async def clear_interactive_screen(context, chat_id, keep_id=None):
+    ids = interactive_screen_messages.pop(chat_id, [])
+    for mid in ids:
+        if mid == keep_id:
+            continue
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+
+def set_interactive_screen(chat_id, message_ids):
+    interactive_screen_messages[chat_id] = message_ids
+
+async def clear_overlay(context, chat_id):
+    ids = overlay_messages.pop(chat_id, [])
+    for mid in ids:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+
+async def track_auto_message(app, chat_id, message_id):
+    history = auto_message_history.setdefault(chat_id, [])
+    history.append(message_id)
+    while len(history) > AUTO_KEEP_LAST_N:
+        old = history.pop(0)
+        try:
+            await app.bot.delete_message(chat_id=chat_id, message_id=old)
+        except Exception:
+            pass
+
+def build_grid_keyboard(buttons, columns):
+    rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
+    if rows and len(rows[-1]) < columns:
+        rows[-1].extend(InlineKeyboardButton("\u2063", callback_data="noop") for _ in range(columns - len(rows[-1])))
+    return rows
+
 def kb_currency():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💵 دلار (USDT)", callback_data="cur_USDT")],
@@ -1334,24 +1545,47 @@ def kb_auto_report(top_plans):
     rows.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
-def build_grid_keyboard(buttons, columns):
-    rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
-    if rows and len(rows[-1]) < columns:
-        rows[-1].extend(InlineKeyboardButton("\u2063", callback_data="noop") for _ in range(columns - len(rows[-1])))
-    return rows
+def welcome_text():
+    return rtl_lines(
+        "🌟 به سیگنالستان خوش اومدی! 🌟\n"
+        f"{DIVIDER}\n"
+        f"🛰️ در حال رصد {len(cache.valid_codes)} قرارداد Perpetual هستم\n"
+        "⏱️ هر ۱۵ دقیقه بهترین سیگنال‌ها بررسی می‌شوند\n"
+        "👇 برای بررسی دستی از منوی زیر استفاده کن\n\n"
+        "برای توقف اشتراک: /stop\n\n"
+        "⚠️ تحلیل تکنیکال است، نه توصیه مالی."
+    )
 
-# ---------- Trailing stop monitor ----------
+MAIN_MENU_HEADER = "✨ پنل سیگنال‌یار ✨\n" + DIVIDER + "\n" + MENU_PROMPT
+
+async def finish_start(context, chat_id, user_id):
+    commands = [
+        BotCommand("start", "شروع ربات"),
+        BotCommand("menu", "منوی اصلی"),
+        BotCommand("status", "وضعیت سیستم"),
+        BotCommand("stop", "لغو اشتراک"),
+    ] if is_admin(user_id) else [BotCommand("menu", "منوی اصلی")]
+
+    await context.bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=chat_id))
+    await clear_interactive_screen(context, chat_id)
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=welcome_text(),
+        reply_markup=kb_main(user_id),
+        parse_mode="Markdown",
+    )
+    set_interactive_screen(chat_id, [msg.message_id])
+
+# ---------- Trailing monitor ----------
 async def trailing_monitor_loop(app):
     await asyncio.sleep(20)
     while True:
         try:
             if active_signals:
-                # iterate over copy
                 for chat_id, signals in list(active_signals.items()):
                     for code, data in list(signals.items()):
                         plan = data["plan"]
                         stage = data["stage"]
-                        # fetch current price
                         try:
                             ticker = await asyncio.to_thread(exchange.fetch_ticker, cache.symbol_for_code(code))
                             current = float(ticker.get("last") or ticker.get("close") or 0)
@@ -1361,7 +1595,6 @@ async def trailing_monitor_loop(app):
                         if current <= 0:
                             continue
 
-                        # Check TP levels
                         tp1, tp2, tp3 = plan.take_profits[0], plan.take_profits[1], plan.take_profits[2]
                         if plan.direction == "LONG":
                             hit_tp1 = current >= tp1
@@ -1381,7 +1614,6 @@ async def trailing_monitor_loop(app):
                             new_stage = 1
 
                         if new_stage > stage:
-                            # update stop loss
                             if new_stage == 1:
                                 new_sl = plan.entries[0]  # breakeven
                             elif new_stage == 2:
@@ -1390,7 +1622,6 @@ async def trailing_monitor_loop(app):
                                 new_sl = tp2
                             data["stage"] = new_stage
                             data["last_notified"] = new_stage
-                            # send message
                             text = (
                                 f"🔔 بروزرسانی حد ضرر | {COIN_ICONS.get(code,'🔸')} {sym(code)}\n"
                                 f"🕒 {shamsi_now()}\n{DIVIDER}\n"
@@ -1441,18 +1672,36 @@ async def status(update, context):
     ok = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "SWAP OK")
     no_swap = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "NO SWAP")
     ticker_error = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "TICKER ERROR")
-    await update.message.reply_text(
-        f"🕒 {shamsi_now()}\n"
+    uptime_sec = time.time() - START_TIME
+    hours, remainder = divmod(uptime_sec, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    uptime_str = f"{int(hours)}:{int(minutes):02d}:{int(seconds):02d}"
+    last_update_str = shamsi_now()
+    if LAST_REPORT_TIME:
+        last_update_str = shamsi_date(datetime.fromtimestamp(LAST_REPORT_TIME, TEHRAN_TZ))
+    active_trailing_count = sum(len(signals) for signals in active_signals.values())
+    text = (
+        f"📊 *وضعیت سیستم*\n"
+        f"🕒 {shamsi_now()}\n{DIVIDER}\n"
+        f"⏳ مدت زمان اجرا: `{uptime_str}`\n"
+        f"👥 اعضای فعال: {len(subscribed_chat_ids)}\n"
+        f"⚡ سیگنال‌های فعال: {len(last_plans)}\n"
+        f"🔁 سیگنال‌های دنبال‌شده (تریلینگ): {active_trailing_count}\n"
+        f"📊 کل سیگنال‌های تولیدشده: {TOTAL_SIGNALS_GENERATED}\n"
+        f"🕒 آخرین بروزرسانی سیگنال: {last_update_str}\n"
+        f"{DIVIDER}\n"
         f"🪙 کل ارزهای تعریف‌شده: {len(COIN_CODES)}\n"
         f"🟢 SWAP OK: {ok}\n"
         f"⚪ NO SWAP: {no_swap}\n"
         f"🟠 TICKER ERROR: {ticker_error}\n"
-        f"📊 داده 1h: {len(cache.ohlcv['1h'])}\n"
-        f"📊 داده 4h: {len(cache.ohlcv['4h'])}\n"
-        f"📊 داده 1d: {len(cache.ohlcv['1d'])}\n"
-        f"⚡ سیگنال‌ها: {len(last_plans)}\n"
-        f"👥 اعضا: {len(subscribed_chat_ids)}"
+        f"{DIVIDER}\n"
+        f"📊 داده‌های ذخیره‌شده:\n"
+        f"1h: {len(cache.ohlcv['1h'])} ارز\n"
+        f"4h: {len(cache.ohlcv['4h'])} ارز\n"
+        f"1d: {len(cache.ohlcv['1d'])} ارز\n"
+        f"قیمت لحظه‌ای: {len(cache.prices)} ارز\n"
     )
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 def save_state():
     try:
@@ -1476,8 +1725,6 @@ def load_state():
         logger.info("No state file; starting fresh.")
     except Exception as e:
         logger.warning("State load failed: %s", e)
-
-MAIN_MENU_HEADER = "✨ پنل سیگنال‌یار ✨\n" + DIVIDER + "\n" + "👇 یکی از گزینه‌ها رو انتخاب کن:"
 
 async def button_handler(update, context):
     if not await guard(update):
@@ -1608,7 +1855,7 @@ async def button_handler(update, context):
                 await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
                 return
             main_text = format_main_signal(plan, code, chat_id)
-            markup = kb_signal_details(code) if not auto else kb_signal_details(code)  # same
+            markup = kb_signal_details(code)
             if auto:
                 msg = await context.bot.send_message(
                     chat_id=chat_id,
@@ -1620,6 +1867,10 @@ async def button_handler(update, context):
             else:
                 await query.edit_message_text(split_long_message(main_text)[0], reply_markup=markup, parse_mode="Markdown")
                 set_interactive_screen(chat_id, [query.message.message_id])
+            # ذخیره سیگنال فعال برای تریلینگ
+            if chat_id not in active_signals:
+                active_signals[chat_id] = {}
+            active_signals[chat_id][code] = {"plan": plan, "stage": 0, "last_notified": 0}
         except asyncio.TimeoutError:
             await query.edit_message_text("⏰ دریافت اطلاعات بیش از حد طول کشید.", reply_markup=kb_back_main())
         except Exception as e:
@@ -1631,7 +1882,6 @@ async def button_handler(update, context):
         code = data.split("_", 1)[1]
         if code not in COIN_CODES:
             return
-        # Regenerate indicator and plan to show details
         try:
             await asyncio.wait_for(cache.ensure_symbol_data(code, ("1h", "4h", "1d")), timeout=90)
             ind = await cache.get_indicators(code)
@@ -1713,6 +1963,11 @@ async def button_handler(update, context):
         )
         new_ids.append(last.message_id)
         set_interactive_screen(chat_id, new_ids)
+        # ذخیره سیگنال‌های فعال برای تریلینگ
+        for p in sorted_plans:
+            if chat_id not in active_signals:
+                active_signals[chat_id] = {}
+            active_signals[chat_id][p.symbol] = {"plan": p, "stage": 0, "last_notified": 0}
         return
 
     if data == "admin_panel":
@@ -1759,6 +2014,11 @@ async def send_report_to_user(app, chat_id, top_plans):
             await track_auto_message(app, chat_id, msg.message_id)
         msg = await app.bot.send_message(chat_id=chat_id, text=chunks[-1], reply_markup=keyboard, parse_mode="Markdown")
         await track_auto_message(app, chat_id, msg.message_id)
+        # ذخیره سیگنال‌های فعال برای تریلینگ
+        for p in top_plans:
+            if chat_id not in active_signals:
+                active_signals[chat_id] = {}
+            active_signals[chat_id][p.symbol] = {"plan": p, "stage": 0, "last_notified": 0}
     except Exception as e:
         logger.exception("Auto report failed | chat_id=%s | error=%s", chat_id, e)
 
@@ -1788,7 +2048,7 @@ async def post_init(app):
     ])
     app.create_task(auto_report_loop(app))
     app.create_task(trailing_monitor_loop(app))
-    logger.info("Signal Bot V10 (Binance) started")
+    logger.info("Signal Bot V11 (Binance) started")
 
 def main():
     if not BOT_TOKEN:
