@@ -1,12 +1,11 @@
 """
-Telegram Signal Bot V23 - KuCoin Futures (Final Stable & User-Friendly)
-- رفع مشکلات قیمت، تحلیل، داشبورد، نمودار، منو
-- چهار حالت معاملاتی
-- منوی مرتب ۸ دکمه برای کاربر، ۱۰ دکمه برای ادمین
-- علاقه‌مندی‌ها، راهنما، پیشنهاد لحظه‌ای برای هر ارز
-- حذف «همه پیشنهادات»
-- دکمه شروع مجدد و توقف ربات
-- گزارش مقایسه‌ای ادمین
+Telegram Signal Bot V25 - OKX Futures (Event-Driven Final)
+- صرافی OKX
+- چهار حالت معاملاتی با بازه‌ی بررسی اختصاصی
+- ارسال خودکار رویدادمحور (فقط سیگنال جدید، تغییر جهت، بسته‌شدن)
+- Open Interest و Long/Short Ratio
+- تحلیل‌ها، پیشنهاد لحظه‌ای و گزارش‌ها
+- علاقه‌مندی‌ها، راهنما، منوی مرتب
 """
 
 import asyncio
@@ -16,7 +15,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Set
 
 import ccxt
 import jdatetime
@@ -86,7 +85,6 @@ COIN_ICONS = {
 COIN_CODES = list(COIN_ICONS.keys())
 
 TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d")
-CHECK_INTERVAL_SECONDS = 15 * 60
 TOP_SIGNALS_COUNT = 5
 TELEGRAM_MSG_LIMIT = 3500
 IRT_RATE_TTL_SECONDS = 300
@@ -108,6 +106,7 @@ OHLCV_TTL_SECONDS = 90
 FULL_REFRESH_TTL_SECONDS = 300
 FUNDING_TTL_SECONDS = 120
 OI_TTL_SECONDS = 180
+LS_RATIO_TTL_SECONDS = 300
 MAX_OHLCV_CONCURRENCY = 4
 MAX_SIGNAL_CONCURRENCY = 3
 MAX_PRICE_CONCURRENCY = 3
@@ -120,7 +119,7 @@ DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
-exchange = ccxt.kucoinfutures({
+exchange = ccxt.okx({
     "enableRateLimit": True,
     "options": {
         "defaultType": "swap",
@@ -132,7 +131,7 @@ last_plans = {}
 subscribed_chat_ids = set()
 user_currency = {}
 user_trading_mode = {}
-user_favorites = {}  # chat_id -> set of coin codes
+user_favorites = {}
 auto_message_history = {}
 overlay_messages = {}
 interactive_screen_messages = {}
@@ -147,6 +146,10 @@ fear_greed_cache = {"value": None, "ts": 0.0, "classification": ""}
 upcoming_events_cache = {"events": [], "ts": 0.0}
 whale_alert_cache = {"last_id": None, "ts": 0.0}
 
+# Event-driven auto report state
+last_check_time = {}       # chat_id -> timestamp
+last_sent_signals = {}     # chat_id -> {code: {"direction": str, "timestamp": float}}
+
 MODE_CONFIGS = {
     "fast": {
         "label": "⚡ سریع",
@@ -158,6 +161,7 @@ MODE_CONFIGS = {
         "max_leverage": 10,
         "min_rr": 1.0,
         "adx_min": 12,
+        "check_interval": 5 * 60,       # 5 دقیقه
     },
     "semi_fast": {
         "label": "🔥 نیمه‌سریع",
@@ -169,6 +173,7 @@ MODE_CONFIGS = {
         "max_leverage": 7,
         "min_rr": 1.1,
         "adx_min": 13,
+        "check_interval": 10 * 60,      # 10 دقیقه
     },
     "standard": {
         "label": "📊 استاندارد",
@@ -180,6 +185,7 @@ MODE_CONFIGS = {
         "max_leverage": 5,
         "min_rr": 1.2,
         "adx_min": 15,
+        "check_interval": 30 * 60,      # 30 دقیقه
     },
     "conservative": {
         "label": "🛡️ محافظه‌کار",
@@ -191,6 +197,7 @@ MODE_CONFIGS = {
         "max_leverage": 3,
         "min_rr": 1.5,
         "adx_min": 20,
+        "check_interval": 60 * 60,      # 60 دقیقه
     },
 }
 
@@ -209,6 +216,7 @@ class TradePlan:
     leverage: int = 1
     liquidation_price: float = 0.0
     oi_change_pct: float = 0.0
+    ls_ratio: float = 0.0
     scores: dict = field(default_factory=dict)
     reasons: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
@@ -260,6 +268,8 @@ class MarketDataCache:
         self._funding_lock = asyncio.Lock()
         self._oi_cache = {}
         self._oi_lock = asyncio.Lock()
+        self._ls_ratio_cache = {}
+        self._ls_ratio_lock = asyncio.Lock()
         self._load_markets()
 
     def _symbol_lock(self, code):
@@ -295,7 +305,7 @@ class MarketDataCache:
                 self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None}
             self.exchange_symbols = selected
             self.valid_codes = list(selected.keys())
-            logger.info("KuCoin Futures markets: %s/%s selected", len(self.valid_codes), len(COIN_CODES))
+            logger.info("OKX swap markets: %s/%s selected", len(self.valid_codes), len(COIN_CODES))
         except Exception as e:
             logger.exception("load_markets failed: %s", e)
 
@@ -490,33 +500,64 @@ class MarketDataCache:
         if not symbol:
             return 0.0, 0.0
         cached = self._oi_cache.get(code)
-        if cached and time.time() - cached["ts"] < OI_TTL_SECONDS:
+        if cached is not None and time.time() - cached["ts"] < OI_TTL_SECONDS:
             return cached["value"], cached.get("change_pct", 0.0)
         async with self._oi_lock:
             cached = self._oi_cache.get(code)
-            if cached and time.time() - cached["ts"] < OI_TTL_SECONDS:
+            if cached is not None and time.time() - cached["ts"] < OI_TTL_SECONDS:
                 return cached["value"], cached.get("change_pct", 0.0)
             try:
                 oi = await asyncio.to_thread(exchange.fetch_open_interest, symbol)
                 current = float(oi.get("openInterestAmount") or oi.get("openInterestValue") or 0)
-                prev = cached.get("value") if cached else None
+                prev = cached.get("value") if cached is not None else None
                 change_pct = ((current - prev) / prev * 100) if prev else 0.0
                 self._oi_cache[code] = {"value": current, "ts": time.time(), "change_pct": change_pct}
                 return current, change_pct
             except Exception as e:
                 logger.debug("Open interest failed | code=%s | error=%s", code, e)
-                return cached.get("value", 0.0), cached.get("change_pct", 0.0) if cached else (0.0, 0.0)
+                if cached is not None:
+                    return cached.get("value", 0.0), cached.get("change_pct", 0.0)
+                return 0.0, 0.0
+
+    async def get_long_short_ratio(self, code):
+        symbol = self.symbol_for_code(code)
+        if not symbol:
+            return 0.0
+        cached = self._ls_ratio_cache.get(code)
+        if cached is not None and time.time() - cached["ts"] < LS_RATIO_TTL_SECONDS:
+            return cached["value"]
+        async with self._ls_ratio_lock:
+            cached = self._ls_ratio_cache.get(code)
+            if cached is not None and time.time() - cached["ts"] < LS_RATIO_TTL_SECONDS:
+                return cached["value"]
+            try:
+                base = code
+                url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={base}&period=1h"
+                r = requests.get(url, timeout=10)
+                r.raise_for_status()
+                data = r.json()
+                if data.get("code") == "0" and data.get("data"):
+                    ratio = float(data["data"][-1].get("ratio", 0.0))
+                    self._ls_ratio_cache[code] = {"value": ratio, "ts": time.time()}
+                    return ratio
+                else:
+                    return 0.0
+            except Exception as e:
+                logger.debug("Long/Short ratio failed | code=%s | error=%s", code, e)
+                if cached is not None:
+                    return cached["value"]
+                return 0.0
 
     async def get_funding_rate(self, code):
         symbol = self.symbol_for_code(code)
         if not symbol:
             return 0.0
         cached = self._funding_cache.get(code)
-        if cached and time.time() - cached["ts"] < FUNDING_TTL_SECONDS:
+        if cached is not None and time.time() - cached["ts"] < FUNDING_TTL_SECONDS:
             return cached["value"]
         async with self._funding_lock:
             cached = self._funding_cache.get(code)
-            if cached and time.time() - cached["ts"] < FUNDING_TTL_SECONDS:
+            if cached is not None and time.time() - cached["ts"] < FUNDING_TTL_SECONDS:
                 return cached["value"]
             try:
                 funding = await asyncio.to_thread(exchange.fetch_funding_rate, symbol)
@@ -525,7 +566,9 @@ class MarketDataCache:
                 return value
             except Exception as e:
                 logger.debug("Funding failed | code=%s | error=%s", code, e)
-                return cached.get("value", 0.0) if cached else 0.0
+                if cached is not None:
+                    return cached["value"]
+                return 0.0
 
     async def get_indicators(self, code, mode="standard"):
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
@@ -1251,6 +1294,7 @@ async def generate_trade_plan(code, mode="standard"):
         return None
     funding = await cache.get_funding_rate(code)
     oi, oi_change = await cache.get_open_interest_info(code)
+    ls_ratio = await cache.get_long_short_ratio(code)
 
     fg_value, _ = await get_fear_greed()
     if fg_value is not None:
@@ -1273,6 +1317,11 @@ async def generate_trade_plan(code, mode="standard"):
     elif oi_change < -5:
         confidence -= 2
 
+    if direction == "LONG" and ls_ratio > 2.5:
+        confidence -= 3
+    elif direction == "SHORT" and ls_ratio < 0.4:
+        confidence -= 3
+
     confidence = max(0, min(100, confidence))
     leverage = determine_leverage(confidence, mode)
     entry_avg = levels["avg_entry"]
@@ -1283,6 +1332,8 @@ async def generate_trade_plan(code, mode="standard"):
         reasons.append(f"OI در حال افزایش ({oi_change:+.1f}%)")
     elif oi_change < -5:
         warnings.append(f"OI در حال کاهش ({oi_change:+.1f}%)")
+    if ls_ratio > 0:
+        reasons.append(f"Long/Short Ratio: {ls_ratio:.2f}")
 
     plan = TradePlan(
         symbol=code,
@@ -1298,6 +1349,7 @@ async def generate_trade_plan(code, mode="standard"):
         leverage=leverage,
         liquidation_price=liq,
         oi_change_pct=oi_change,
+        ls_ratio=ls_ratio,
         scores=scores,
         reasons=reasons,
         warnings=warnings,
@@ -1416,6 +1468,7 @@ def format_technical_details(code, plan, ind, chat_id):
         f"حمایت: {fmt_amount(ind['support'], chat_id)} | مقاومت: {fmt_amount(ind['resistance'], chat_id)}\n"
         f"{DIVIDER}\n"
         f"📈 Open Interest تغییر: {plan.oi_change_pct:+.2f}%\n"
+        f"⚖️ Long/Short Ratio: {plan.ls_ratio:.2f}\n"
         f"💰 فاندینگ: {plan.funding_rate:+.3f}%\n"
         f"{DIVIDER}\n"
         f"⚠️ این تحلیل تکنیکال است و تضمین سود نیست."
@@ -1573,6 +1626,7 @@ async def generate_weekly_summary_async(code, chat_id):
     worst_date = shamsi_date(week_df.loc[worst_idx, "timestamp"]) if worst_idx in week_df.index else "-"
     funding = await cache.get_funding_rate(code)
     oi, oi_change = await cache.get_open_interest_info(code)
+    ls_ratio = await cache.get_long_short_ratio(code)
     fg_value, fg_class = await get_fear_greed()
     text = (
         f"📊 *تحلیل ۷ روز اخیر* {COIN_ICONS.get(code, '🔸')} *{code}*\n"
@@ -1614,8 +1668,9 @@ async def generate_weekly_summary_async(code, chat_id):
         f"📊 *داده‌های فیوچرز*\n"
         f"💰 فاندینگ: {funding:+.3f}%\n"
         f"📈 Open Interest تغییر: {oi_change:+.2f}%\n"
+        f"⚖️ Long/Short Ratio: {ls_ratio:.2f}\n"
         f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-        f"{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Perpetual در KuCoin Futures محاسبه شده‌اند."
+        f"{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Perpetual در OKX محاسبه شده‌اند."
     )
     return rtl_lines(text)
 
@@ -1708,7 +1763,6 @@ def kb_mode_selection():
     ])
 
 def kb_main(user_id, mode="standard"):
-    mode_label = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])["label"]
     rows = [
         [InlineKeyboardButton("💰 قیمت لحظه‌ای", callback_data="menu_prices"), InlineKeyboardButton("🪙 انتخاب ارز", callback_data="menu_coins")],
         [InlineKeyboardButton("🧾 گزارش دوره‌ای", callback_data="periodic_report"), InlineKeyboardButton("📈 داشبورد تحلیلی", callback_data="dashboard")],
@@ -1717,13 +1771,15 @@ def kb_main(user_id, mode="standard"):
         [InlineKeyboardButton("🛑 توقف ربات", callback_data="stop_bot"), InlineKeyboardButton("❓ راهنما", callback_data="help")],
     ]
     if is_admin(user_id):
-        rows.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
+        rows.append([
+            InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel"),
+            InlineKeyboardButton("📊 گزارش مقایسه‌ای", callback_data="admin_compare"),
+        ])
     return InlineKeyboardMarkup(rows)
 
 def kb_admin_panel():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 بروزرسانی کامل", callback_data="menu_all")],
-        [InlineKeyboardButton("📊 گزارش مقایسه‌ای حالت‌ها", callback_data="admin_compare")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")],
     ])
 
@@ -1796,31 +1852,14 @@ def kb_periodic_report():
     ])
 
 def kb_help(step=0):
-    if step == 0:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("بعدی ⬅️", callback_data="help_1")],
-            [InlineKeyboardButton("بازگشت", callback_data="menu_main")],
-        ])
-    elif step == 1:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ قبلی", callback_data="help_0"), InlineKeyboardButton("بعدی ⬅️", callback_data="help_2")],
-            [InlineKeyboardButton("بازگشت", callback_data="menu_main")],
-        ])
-    elif step == 2:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ قبلی", callback_data="help_1"), InlineKeyboardButton("بعدی ⬅️", callback_data="help_3")],
-            [InlineKeyboardButton("بازگشت", callback_data="menu_main")],
-        ])
-    elif step == 3:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ قبلی", callback_data="help_2"), InlineKeyboardButton("بعدی ⬅️", callback_data="help_4")],
-            [InlineKeyboardButton("بازگشت", callback_data="menu_main")],
-        ])
-    else:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ قبلی", callback_data="help_3")],
-            [InlineKeyboardButton("بازگشت", callback_data="menu_main")],
-        ])
+    buttons = []
+    if step < 6:
+        buttons.append(InlineKeyboardButton("بعدی ⬅️", callback_data=f"help_{step+1}"))
+    if step > 0:
+        buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"help_{step-1}"))
+    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton("بازگشت", callback_data="menu_main")])
+    return InlineKeyboardMarkup(rows)
 
 def help_text(step):
     if step == 0:
@@ -1828,42 +1867,52 @@ def help_text(step):
             "📖 *راهنمای سیگنال‌یار*\n"
             f"{DIVIDER}\n"
             "این ربات به شما کمک می‌کند سیگنال‌های معاملاتی فیوچرز دریافت کنید.\n"
-            "برای شروع، واحد پولی و سبک معاملاتی خود را انتخاب کنید."
+            "ابتدا واحد پولی و سبک معاملاتی را انتخاب کنید.\n"
+            "سیگنال‌ها فقط در صورت وجود رویداد مهم (سیگنال جدید، تغییر جهت، بسته‌شدن) ارسال می‌شوند."
         )
     elif step == 1:
         return rtl_lines(
             "🛠️ *حالت‌های معاملاتی*\n"
             f"{DIVIDER}\n"
-            "⚡ سریع: تایم‌فریم ۵ دقیقه، اهرم تا ۱۰، برای اسکالپ\n"
-            "🔥 نیمه‌سریع: تایم‌فریم ۱۵ دقیقه، اهرم تا ۷\n"
-            "📊 استاندارد: تایم‌فریم ۱ ساعته، اهرم تا ۵\n"
-            "🛡️ محافظه‌کار: تایم‌فریم ۴ ساعته، اهرم تا ۳"
+            "⚡ سریع: تایم‌فریم ۵ دقیقه، اهرم تا ۱۰، اسکن هر ۵ دقیقه\n"
+            "🔥 نیمه‌سریع: تایم‌فریم ۱۵ دقیقه، اهرم تا ۷، اسکن هر ۱۰ دقیقه\n"
+            "📊 استاندارد: تایم‌فریم ۱ ساعته، اهرم تا ۵، اسکن هر ۳۰ دقیقه\n"
+            "🛡️ محافظه‌کار: تایم‌فریم ۴ ساعته، اهرم تا ۳، اسکن هر ۶۰ دقیقه"
         )
     elif step == 2:
         return rtl_lines(
             "📊 *اندیکاتورها*\n"
             f"{DIVIDER}\n"
-            "EMA: میانگین متحرک (۲۰، ۵۰، ۲۰۰)\n"
-            "RSI: قدرت خرید/فروش (۳۰-۷۰)\n"
+            "EMA: میانگین متحرک\n"
+            "RSI: قدرت خرید/فروش\n"
             "MACD: مومنتوم و تغییر روند\n"
-            "ADX: قدرت روند (بالای ۲۵ قوی)\n"
-            "ATR: نوسان‌پذیری (برای حد سود/ضرر)\n"
+            "ADX: قدرت روند\n"
+            "ATR: نوسان‌پذیری\n"
             "VWAP: میانگین حجمی قیمت"
         )
     elif step == 3:
         return rtl_lines(
+            "📊 *داده‌های فیوچرز*\n"
+            f"{DIVIDER}\n"
+            "Open Interest: تعداد قراردادهای باز\n"
+            "Long/Short Ratio: نسبت لانگ به شورت\n"
+            "Funding Rate: هزینه نگهداری پوزیشن\n"
+            "Liquidation: قیمت بسته‌شدن خودکار"
+        )
+    elif step == 4:
+        return rtl_lines(
             "💡 *اصطلاحات فیوچرز*\n"
             f"{DIVIDER}\n"
-            "لانگ: خرید با انتظار افزایش قیمت\n"
-            "شورت: فروش با انتظار کاهش قیمت\n"
-            "اهرم: چند برابر کردن سرمایه (ریسک بالا)\n"
-            "حد ضرر: سفارش خودکار برای خروج از ضرر\n"
-            "حد سود: سفارش خودکار برای برداشت سود\n"
+            "لانگ: خرید با انتظار افزایش\n"
+            "شورت: فروش با انتظار کاهش\n"
+            "اهرم: چند برابر کردن سرمایه\n"
+            "حد ضرر: خروج از ضرر\n"
+            "حد سود: برداشت سود\n"
             "R/R: نسبت ریسک به بازده"
         )
-    else:
+    elif step == 5:
         return rtl_lines(
-            "⚙️ *امکانات*\n"
+            "⚙️ *امکانات ربات*\n"
             f"{DIVIDER}\n"
             "علاقه‌مندی‌ها: ارزهای مورد نظر خود را نشان کنید\n"
             "گزارش دوره‌ای: عملکرد هفتگی/ماهانه\n"
@@ -1871,13 +1920,22 @@ def help_text(step):
             "رویدادها: اخبار مهم کریپتو\n"
             "توقف ربات: قطع اشتراک"
         )
+    else:
+        return rtl_lines(
+            "❓ *پرسش‌های متداول*\n"
+            f"{DIVIDER}\n"
+            "چطور سیگنال بگیرم؟ → انتخاب ارز → پیشنهاد لحظه‌ای\n"
+            "ارسال خودکار چگونه است؟ → فقط برای ارزهای مورد علاقه، رویدادمحور\n"
+            "چطور ربات را متوقف کنم؟ → دکمه توقف ربات یا /stop\n"
+            "آیا سیگنال‌ها تضمین سود هستند؟ → خیر، تحلیل تکنیکال است"
+        )
 
 def welcome_text():
     return rtl_lines(
         "🌟✨ *به سیگنال‌یار حرفه‌ای خوش اومدی!* ✨🌟\n"
         f"{DIVIDER}\n"
         f"🛰️ در حال رصد {len(cache.valid_codes)} قرارداد Perpetual هستم\n"
-        "⏱️ هر ۱۵ دقیقه بهترین سیگنال‌ها بررسی می‌شوند\n"
+        "🔔 ارسال سیگنال‌ها رویدادمحور است؛ فقط هنگام سیگنال جدید، تغییر جهت یا بسته‌شدن پیام می‌فرستم\n"
         "👇 برای بررسی دستی از منوی زیر استفاده کن\n\n"
         "برای توقف ربات: /stop\n\n"
         "⚠️ تحلیل تکنیکال است، نه توصیه مالی."
@@ -2158,8 +2216,7 @@ async def button_handler(update, context):
 
     if data == "restart_bot":
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        msg = await query.edit_message_text("👋 واحد پولی نمایش قیمت‌ها را انتخاب کن:", reply_markup=kb_currency())
-        set_interactive_screen(chat_id, [query.message.message_id])
+        await query.edit_message_text("👋 واحد پولی نمایش قیمت‌ها را انتخاب کن:", reply_markup=kb_currency())
         return
 
     if data == "stop_bot":
@@ -2271,7 +2328,6 @@ async def button_handler(update, context):
             favs.add(code)
             await query.answer(f"⭐ {code} به علاقه‌مندی‌ها اضافه شد.")
         save_state()
-        # Update coin detail keyboard
         try:
             await query.edit_message_reply_markup(reply_markup=kb_coin_detail(code, code in favs))
         except Exception:
@@ -2351,7 +2407,7 @@ async def button_handler(update, context):
             )
             set_interactive_screen(chat_id, [query.message.message_id])
         else:
-            text = f"{COIN_ICONS.get(code, '🔸')} *{code}*\n{DIVIDER}\n⚪ وضعیت: *NO SWAP*\nدر حال حاضر قرارداد USDT Perpetual فعال برای این ارز در KuCoin Futures پیدا نشد."
+            text = f"{COIN_ICONS.get(code, '🔸')} *{code}*\n{DIVIDER}\n⚪ وضعیت: *NO SWAP*\nدر حال حاضر قرارداد USDT Perpetual فعال برای این ارز در OKX پیدا نشد."
             await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
             await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
             set_interactive_screen(chat_id, [query.message.message_id])
@@ -2362,7 +2418,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در KuCoin Futures در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در OKX در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         mode = user_trading_mode.get(chat_id, "standard")
         await query.edit_message_text("⏳ در حال تحلیل و تولید پیشنهاد لحظه‌ای...")
@@ -2393,7 +2449,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در KuCoin Futures در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در OKX در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         mode = user_trading_mode.get(chat_id, "standard")
         if auto:
@@ -2439,7 +2495,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در KuCoin Futures در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در OKX در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         await query.edit_message_text("⏳ در حال دریافت اطلاعات ۷ روز اخیر...")
@@ -2460,7 +2516,7 @@ async def button_handler(update, context):
             await query.edit_message_text(f"❌ خطا در تحلیل هفتگی {code}.", reply_markup=kb_back_main())
         return
 
-    if data == "menu_all":   # only used for admin refresh
+    if data == "menu_all":   # only admin refresh
         if not is_admin(user_id):
             await query.answer("⛔️ فقط ادمین.", show_alert=True); return
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
@@ -2521,82 +2577,62 @@ async def button_handler(update, context):
             )
         await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
 
-# ---------- Auto report ----------
-async def send_report_to_user(app, chat_id, top_plans, mode="standard"):
-    header = f"📢✨ پیشنهادات لحظه‌ای ✨📢\n🕒 {shamsi_now()}\n{BIG_DIVIDER}\n\n"
-    if top_plans:
-        body = f"\n\n{DIVIDER}\n\n".join(format_main_signal(p, p.symbol, chat_id) for p in top_plans)
-        footer = "\n\n⚠️ امتیاز اطمینان تخمینی است، نه تضمین."
-        keyboard = kb_auto_report(top_plans)
-    else:
-        body = "😴 فعلاً سیگنال واضحی پیدا نشد.\n\nدلایل احتمالی:\n- ADX کمتر از آستانه\n- عدم تأیید تایم‌فریم بالاتر\n- نسبت R/R کمتر از حد مجاز\n- عدم وجود شرایط لازم در بازار"
-        footer = "\n🔍 بازار ممکن است در حالت رنج باشد."
-        keyboard = kb_back_main()
-    try:
-        chunks = split_long_message(rtl_lines(header + body + footer))
-        for chunk in chunks[:-1]:
-            msg = await app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
-            await track_auto_message(app, chat_id, msg.message_id)
-        msg = await app.bot.send_message(chat_id=chat_id, text=chunks[-1], reply_markup=keyboard, parse_mode="Markdown")
-        await track_auto_message(app, chat_id, msg.message_id)
-        for p in top_plans:
-            active_signals.setdefault(chat_id, {})[p.symbol] = {"plan": p, "stage": 0, "last_notified": 0}
-    except Exception as e:
-        logger.exception("Auto report failed | chat_id=%s | error=%s", chat_id, e)
-
-async def refresh_all_plans(force_data=False, mode="standard"):
-    global TOTAL_SIGNALS_GENERATED, LAST_REPORT_TIME
-    if force_data or not cache.last_full_ohlcv_update or time.time() - cache.last_full_ohlcv_update > FULL_REFRESH_TTL_SECONDS:
-        await cache.update_ohlcv(force=force_data)
-    sem = asyncio.Semaphore(MAX_SIGNAL_CONCURRENCY)
-    async def one(code):
-        async with sem:
-            try:
-                return await generate_trade_plan(code, mode)
-            except Exception as e:
-                logger.exception("Signal error | code=%s | error=%s", code, e)
-                return None
-    results = await asyncio.gather(*(one(c) for c in cache.valid_codes))
-    plans = {p.symbol: p for p in results if p is not None}
-    last_plans.clear(); last_plans.update(plans)
-    TOTAL_SIGNALS_GENERATED = len(plans)
-    LAST_REPORT_TIME = time.time()
-    logger.info("Active signals (%s): %s", mode, len(plans))
-    return last_plans
-
+# ---------- Auto report (event-driven) ----------
 async def auto_report_loop(app):
     await asyncio.sleep(10)
     while True:
-        cycle_started = time.time()
         try:
             if subscribed_chat_ids:
                 await cache.update_prices(force=True)
                 await cache.update_ohlcv(force=True)
+                now = time.time()
                 for chat_id in list(subscribed_chat_ids):
                     mode = user_trading_mode.get(chat_id, "standard")
-                    # فقط برای ارزهای مورد علاقه یا همه ارزها؟ برای فشار کمتر، فقط ارزهای مورد علاقه
-                    favs = user_favorites.get(chat_id)
-                    if favs:
-                        codes = list(favs)
-                    else:
-                        # اگر علاقه‌مندی خالی بود، از همه ارزها استفاده نکنیم تا فشار نیاد
-                        codes = []
-                    if codes:
-                        plans = {}
-                        for code in codes:
-                            plan = await generate_trade_plan(code, mode)
+                    interval = MODE_CONFIGS[mode]["check_interval"]
+                    last_ts = last_check_time.get(chat_id, 0)
+                    if now - last_ts < interval:
+                        continue
+
+                    favs = user_favorites.get(chat_id, set())
+                    if not favs:
+                        continue
+
+                    current_signals = {}
+                    for code in favs:
+                        plan = await generate_trade_plan(code, mode)
+                        if plan:
+                            current_signals[code] = plan.direction
+
+                    prev_signals = last_sent_signals.get(chat_id, {})
+
+                    # New signals or direction change
+                    for code, direction in current_signals.items():
+                        prev = prev_signals.get(code)
+                        if prev is None or prev["direction"] != direction:
+                            plan = await generate_trade_plan(code, mode)  # re-generate to get full plan
                             if plan:
-                                plans[plan.symbol] = plan
-                        top = sorted(plans.values(), key=lambda p: p.confidence, reverse=True)[:TOP_SIGNALS_COUNT]
-                    else:
-                        top = []
-                    await send_report_to_user(app, chat_id, top, mode)
+                                main_text = format_main_signal(plan, code, chat_id)
+                                chart_buf = generate_price_chart(code, MODE_CONFIGS[mode]["main_tf"])
+                                if chart_buf:
+                                    await app.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=main_text, parse_mode="Markdown")
+                                else:
+                                    await app.bot.send_message(chat_id=chat_id, text=main_text, parse_mode="Markdown")
+                                active_signals.setdefault(chat_id, {})[code] = {"plan": plan, "stage": 0, "last_notified": 0}
+                                prev_signals[code] = {"direction": direction, "timestamp": time.time()}
+
+                    # Closed signals
+                    for code in list(prev_signals.keys()):
+                        if code not in current_signals:
+                            await app.bot.send_message(chat_id=chat_id, text=f"🔴 سیگنال {code} بسته شد.")
+                            del prev_signals[code]
+
+                    last_sent_signals[chat_id] = prev_signals
+                    last_check_time[chat_id] = now
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.exception("Auto loop failed | error=%s", e)
-        elapsed = time.time() - cycle_started
-        await asyncio.sleep(max(5, CHECK_INTERVAL_SECONDS - elapsed))
+        await asyncio.sleep(60)   # base sleep 1 minute, but actual per-user interval controls
 
 async def post_init(app):
     await app.bot.set_my_commands([
@@ -2612,7 +2648,7 @@ async def post_init(app):
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
-    logger.info("Signal Bot V23 (Final Stable) started")
+    logger.info("Signal Bot V25 (Event-Driven OKX) started")
 
 def main():
     if not BOT_TOKEN:
