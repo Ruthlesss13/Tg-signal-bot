@@ -1,10 +1,10 @@
 """
-Telegram Signal Bot V14 - MEXC Edition (Final)
-- صرافی MEXC
-- لیست ۶۴ ارز با جایگزینی ارزهای ناموجود در MEXC
-- حذف کامل Long/Short Ratio
-- حمایت/مقاومت، واگرایی RSI، شکست سطح
-- حد سود سه‌پله‌ای + حد ضرر تریلینگ
+Telegram Signal Bot V16 - KuCoin Futures Edition
+- صرافی KuCoin Futures
+- لیست 80 ارز پرحجم و معتبر
+- تمام توابع لازم تعریف شده‌اند
+- رفع خطای kb_admin_panel
+- بهینه‌سازی برای جلوگیری از کرش و Rate Limit
 """
 
 import asyncio
@@ -42,6 +42,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("signal_bot")
 
+# ---------- Bot Config ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALLOWED_USER_IDS = {
     int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()
@@ -53,7 +54,7 @@ ALWAYS_ALLOWED_USER_IDS = {
     int(x) for x in os.getenv("ALWAYS_ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()
 }
 
-# ---------- 64 coins (updated for MEXC) ----------
+# ---------- 80 Coins for KuCoin Futures ----------
 COIN_ICONS = {
     "BTC": "₿", "ETH": "Ξ", "BNB": "🔶", "SOL": "◎", "XRP": "✕",
     "DOGE": "🐕", "ADA": "🔷", "AVAX": "🔺", "DOT": "⚪", "LINK": "🔗",
@@ -68,6 +69,12 @@ COIN_ICONS = {
     "XTZ": "🪙", "THETA": "🌀", "CHZ": "🌶️", "ZEC": "🛡️", "DASH": "⚡",
     "SUSHI": "🍣", "CRV": "🥄", "1INCH": "1️⃣", "ENJ": "🎮", "GMT": "👟",
     "IMX": "🛡️", "LDO": "🌊", "DYDX": "📉", "API3": "🔌", "SNX": "🧪",
+    "VET": "🌿", "CAKE": "🥞", "PENDLE": "📐", "TAO": "🧠", "RENDER": "🖥️",
+    "POL": "🟣", "FTM": "🔥", "MAGIC": "🪄", "CFX": "🌲", "WLD": "👁️",
+    "ENS": "🏷️", "ONE": "🎐", "ZRX": "0️⃣", "AXS": "🐚", "HBAR": "Ⓗ",
+    "CRO": "💠", "HMSTR": "🐹", "NOT": "💎", "DOGS": "🐾", "BABYDOGE": "🐶",
+    "PUMP": "🚀", "S": "💨", "DEXE": "🗳️", "SKY": "☁️", "HYPE": "🌊",
+    "ONDO": "🏦", "XAUT": "🥇", "ENA": "🌐", "STORJ": "💾", "SLP": "🍯"
 }
 COIN_CODES = list(COIN_ICONS.keys())
 
@@ -98,8 +105,9 @@ OHLCV_TTL_SECONDS = 90
 FULL_REFRESH_TTL_SECONDS = 240
 FUNDING_TTL_SECONDS = 120
 OI_TTL_SECONDS = 180
-MAX_OHLCV_CONCURRENCY = 5
-MAX_SIGNAL_CONCURRENCY = 8
+MAX_OHLCV_CONCURRENCY = 4
+MAX_SIGNAL_CONCURRENCY = 6
+MAX_PRICE_CONCURRENCY = 3
 RLM = "\u200f"
 
 DATA_DIR = os.getenv("DATA_DIR", "/data")
@@ -109,7 +117,7 @@ DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
-exchange = ccxt.mexc({
+exchange = ccxt.kucoinfutures({
     "enableRateLimit": True,
     "options": {
         "defaultType": "swap",
@@ -180,7 +188,7 @@ class MarketDataCache:
         self.last_price_update = 0.0
         self.last_full_ohlcv_update = 0.0
         self._sem = asyncio.Semaphore(MAX_OHLCV_CONCURRENCY)
-        self._price_sem = asyncio.Semaphore(8)
+        self._price_sem = asyncio.Semaphore(MAX_PRICE_CONCURRENCY)
         self._update_lock = asyncio.Lock()
         self._symbol_locks = {}
         self._funding_cache = {}
@@ -216,7 +224,7 @@ class MarketDataCache:
                         continue
                     candidates.append((symbol, market))
                 if not candidates:
-                    logger.debug("No active USDT swap for %s on MEXC", code)
+                    logger.debug("No active USDT swap for %s on KuCoin Futures", code)
                     continue
                 candidates.sort(key=lambda x: x[0])
                 symbol, market = candidates[0]
@@ -230,7 +238,7 @@ class MarketDataCache:
             self.exchange_symbols = selected
             self.valid_codes = list(selected.keys())
             logger.info(
-                "MEXC swap markets: %s/%s selected (USDT perpetual)",
+                "KuCoin Futures markets: %s/%s selected (USDT perpetual)",
                 len(self.valid_codes), len(COIN_CODES),
             )
         except Exception as e:
@@ -304,33 +312,37 @@ class MarketDataCache:
             if not symbol:
                 return code, None
             async with self._price_sem:
-                try:
-                    ticker = await asyncio.to_thread(exchange.fetch_ticker, symbol)
-                    price = (
-                        ticker.get("last") or ticker.get("close")
-                        or ticker.get("bid") or ticker.get("ask")
-                    )
-                    if price is None:
-                        raise ValueError("ticker has no usable price")
-                    self.market_status[code] = {
-                        **self.market_status.get(code, {}),
-                        "status": "SWAP OK",
-                        "symbol": symbol,
-                        "error": None,
-                    }
-                    return code, float(price)
-                except Exception as e:
-                    self.market_status[code] = {
-                        **self.market_status.get(code, {}),
-                        "status": "TICKER ERROR",
-                        "symbol": symbol,
-                        "error": f"{type(e).__name__}: {e}",
-                    }
-                    logger.warning(
-                        "ticker failed | code=%s | type=%s | symbol=%s | error=%s",
-                        code, type(e).__name__, symbol, e,
-                    )
-                    return code, None
+                for attempt in range(3):
+                    try:
+                        await asyncio.sleep(0.1 * (attempt + 1))
+                        ticker = await asyncio.to_thread(exchange.fetch_ticker, symbol)
+                        price = (
+                            ticker.get("last") or ticker.get("close")
+                            or ticker.get("bid") or ticker.get("ask")
+                        )
+                        if price is None:
+                            raise ValueError("ticker has no usable price")
+                        self.market_status[code] = {
+                            **self.market_status.get(code, {}),
+                            "status": "SWAP OK",
+                            "symbol": symbol,
+                            "error": None,
+                        }
+                        return code, float(price)
+                    except Exception as e:
+                        if attempt == 2:
+                            self.market_status[code] = {
+                                **self.market_status.get(code, {}),
+                                "status": "TICKER ERROR",
+                                "symbol": symbol,
+                                "error": f"{type(e).__name__}: {e}",
+                            }
+                            logger.warning(
+                                "ticker failed | code=%s | type=%s | symbol=%s | error=%s",
+                                code, type(e).__name__, symbol, e,
+                            )
+                        await asyncio.sleep(0.5)
+                return code, None
 
         results = await asyncio.gather(*(fetch_one(c) for c in COIN_CODES))
         self.prices = {code: price for code, price in results if price is not None}
@@ -343,23 +355,25 @@ class MarketDataCache:
         if not symbol:
             return None
         async with self._sem:
-            try:
-                raw = await asyncio.to_thread(
-                    exchange.fetch_ohlcv, symbol, timeframe, None, limit,
-                )
-                df = self._to_dataframe(raw)
-                if df is None or len(df) < 10:
-                    return None
-                closed = self._drop_forming_candle(df)
-                if closed is None or len(closed) < 5:
-                    return None
-                return closed
-            except Exception as e:
-                logger.warning(
-                    "OHLCV failed | code=%s | tf=%s | error=%s",
-                    code, timeframe, e,
-                )
-                return None
+            for attempt in range(3):
+                try:
+                    raw = await asyncio.to_thread(
+                        exchange.fetch_ohlcv, symbol, timeframe, None, limit,
+                    )
+                    df = self._to_dataframe(raw)
+                    if df is None or len(df) < 10:
+                        return None
+                    closed = self._drop_forming_candle(df)
+                    if closed is None or len(closed) < 5:
+                        return None
+                    return closed
+                except Exception as e:
+                    logger.warning(
+                        "OHLCV failed | code=%s | tf=%s | attempt=%s | error=%s",
+                        code, timeframe, attempt, e,
+                    )
+                    await asyncio.sleep(1)
+            return None
 
     async def ensure_symbol_data(self, code, timeframes=None, force=False):
         if timeframes is None:
@@ -932,7 +946,6 @@ async def generate_trade_plan(code):
     funding = await cache.get_funding_rate(code)
     oi, oi_change = await cache.get_open_interest_info(code)
 
-    # Funding penalty
     if direction == "LONG" and funding > 0.05:
         confidence -= 5
     elif direction == "LONG" and funding > 0.1:
@@ -942,7 +955,6 @@ async def generate_trade_plan(code):
     elif direction == "SHORT" and funding < -0.1:
         confidence -= 10
 
-    # OI alignment
     if oi_change > 5:
         confidence += 2
     elif oi_change < -5:
@@ -1232,7 +1244,7 @@ async def generate_weekly_summary_async(code, chat_id):
         f"📊 *داده‌های فیوچرز*\n"
         f"💰 فاندینگ: {funding:+.3f}%\n"
         f"📈 Open Interest تغییر: {oi_change:+.2f}%\n"
-        f"{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Perpetual در MEXC محاسبه شده‌اند."
+        f"{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Perpetual در KuCoin Futures محاسبه شده‌اند."
     )
     return rtl_lines(text)
 
@@ -1319,6 +1331,12 @@ def kb_main(user_id):
     if is_admin(user_id):
         rows.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel"), InlineKeyboardButton("\u2063", callback_data="noop")])
     return InlineKeyboardMarkup(rows)
+
+def kb_admin_panel():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 بروزرسانی کامل", callback_data="menu_all")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")],
+    ])
 
 def kb_back_main():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")]])
@@ -1561,7 +1579,7 @@ async def button_handler(update, context):
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         await query.edit_message_text("⏳ در حال دریافت قیمت‌ها...")
         try:
-            prices = await asyncio.wait_for(cache.update_prices(), timeout=60)
+            prices = await asyncio.wait_for(cache.update_prices(), timeout=90)
             await query.edit_message_text(format_prices_pretty(prices, chat_id), reply_markup=kb_back_main(), parse_mode="Markdown")
             set_interactive_screen(chat_id, [query.message.message_id])
         except Exception as e:
@@ -1577,19 +1595,24 @@ async def button_handler(update, context):
     if data.startswith("coin_"):
         code = data.split("_", 1)[1]
         if code not in COIN_CODES: return
-        status = cache.market_status.get(code, {}).get("status")
-        if status != "SWAP OK":
-            error = cache.market_status.get(code, {}).get("error")
+        if code in cache.exchange_symbols:
+            status = cache.market_status.get(code, {}).get("status")
+            warning = ""
             if status == "TICKER ERROR":
-                text = f"{COIN_ICONS.get(code, '🔸')} *{sym(code)}*\n{DIVIDER}\n🟠 وضعیت: *TICKER ERROR*\n⚠️ دریافت قیمت لحظه‌ای ناموفق بود.\nنوع خطا: `{error or '-'}`"
-            else:
-                text = f"{COIN_ICONS.get(code, '🔸')} *{code}*\n{DIVIDER}\n⚪ وضعیت: *NO SWAP*\nدر حال حاضر قرارداد USDT Perpetual فعال برای این ارز در MEXC پیدا نشد."
+                warning = "⚠️ قیمت لحظه‌ای در دسترس نیست، اما تحلیل‌های دیگر کار می‌کنند.\n\n"
+            await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
+            await query.edit_message_text(
+                rtl_lines(f"{COIN_ICONS.get(code, '🔸')} *{sym(code)}*\n{DIVIDER}\n{warning}🟢 وضعیت بازار: *SWAP OK*\n{MENU_PROMPT}"),
+                reply_markup=kb_coin_detail(code),
+                parse_mode="Markdown",
+            )
+            set_interactive_screen(chat_id, [query.message.message_id])
+        else:
+            text = f"{COIN_ICONS.get(code, '🔸')} *{code}*\n{DIVIDER}\n⚪ وضعیت: *NO SWAP*\nدر حال حاضر قرارداد USDT Perpetual فعال برای این ارز در KuCoin Futures پیدا نشد."
             await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
             await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
-            set_interactive_screen(chat_id, [query.message.message_id]); return
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        await query.edit_message_text(rtl_lines(f"{COIN_ICONS.get(code, '🔸')} *{sym(code)}*\n{DIVIDER}\n🟢 وضعیت: *SWAP OK*\n{MENU_PROMPT}"), reply_markup=kb_coin_detail(code), parse_mode="Markdown")
-        set_interactive_screen(chat_id, [query.message.message_id]); return
+            set_interactive_screen(chat_id, [query.message.message_id])
+        return
 
     if data.startswith("suggest_"):
         auto = data.endswith("_auto")
@@ -1597,7 +1620,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در MEXC در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در KuCoin Futures در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         if auto:
             await clear_overlay(context, chat_id)
@@ -1648,7 +1671,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در MEXC در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در KuCoin Futures در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         await query.edit_message_text("⏳ در حال دریافت اطلاعات ۷ روز اخیر...")
@@ -1761,7 +1784,7 @@ async def post_init(app):
     ])
     app.create_task(auto_report_loop(app))
     app.create_task(trailing_monitor_loop(app))
-    logger.info("Signal Bot V14 (MEXC) started")
+    logger.info("Signal Bot V16 (KuCoin Futures) started")
 
 def main():
     if not BOT_TOKEN:
