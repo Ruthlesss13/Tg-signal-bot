@@ -1,8 +1,9 @@
 python-telegram-bot==20.8
 ccxt==4.1.22
-pandas==2.0.3
-numpy==1.24.3
+pandas>=2.1.0
+numpy>=1.24.0
 ta==0.10.2
 requests==2.31.0
 python-dotenv==1.0.0
 jdatetime==3.8.1
+setuptools  # برای اطمینان از نصب setuptools
