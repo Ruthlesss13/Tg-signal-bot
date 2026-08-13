@@ -1,11 +1,10 @@
 """
-Telegram Signal Bot V25 - OKX Futures (Event-Driven Final)
-- صرافی OKX
+Telegram Signal Bot V26 - Bitget Futures (Event-Driven Final)
+- صرافی Bitget
 - چهار حالت معاملاتی با بازه‌ی بررسی اختصاصی
-- ارسال خودکار رویدادمحور (فقط سیگنال جدید، تغییر جهت، بسته‌شدن)
-- Open Interest و Long/Short Ratio
-- تحلیل‌ها، پیشنهاد لحظه‌ای و گزارش‌ها
-- علاقه‌مندی‌ها، راهنما، منوی مرتب
+- ارسال خودکار رویدادمحور
+- Open Interest و Long/Short Ratio (با مدیریت خطا)
+- علاقه‌مندی‌ها، راهنما، گزارش‌ها
 """
 
 import asyncio
@@ -119,7 +118,7 @@ DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
-exchange = ccxt.okx({
+exchange = ccxt.bitget({
     "enableRateLimit": True,
     "options": {
         "defaultType": "swap",
@@ -146,9 +145,8 @@ fear_greed_cache = {"value": None, "ts": 0.0, "classification": ""}
 upcoming_events_cache = {"events": [], "ts": 0.0}
 whale_alert_cache = {"last_id": None, "ts": 0.0}
 
-# Event-driven auto report state
-last_check_time = {}       # chat_id -> timestamp
-last_sent_signals = {}     # chat_id -> {code: {"direction": str, "timestamp": float}}
+last_check_time = {}
+last_sent_signals = {}
 
 MODE_CONFIGS = {
     "fast": {
@@ -161,7 +159,7 @@ MODE_CONFIGS = {
         "max_leverage": 10,
         "min_rr": 1.0,
         "adx_min": 12,
-        "check_interval": 5 * 60,       # 5 دقیقه
+        "check_interval": 5 * 60,
     },
     "semi_fast": {
         "label": "🔥 نیمه‌سریع",
@@ -173,7 +171,7 @@ MODE_CONFIGS = {
         "max_leverage": 7,
         "min_rr": 1.1,
         "adx_min": 13,
-        "check_interval": 10 * 60,      # 10 دقیقه
+        "check_interval": 10 * 60,
     },
     "standard": {
         "label": "📊 استاندارد",
@@ -185,7 +183,7 @@ MODE_CONFIGS = {
         "max_leverage": 5,
         "min_rr": 1.2,
         "adx_min": 15,
-        "check_interval": 30 * 60,      # 30 دقیقه
+        "check_interval": 30 * 60,
     },
     "conservative": {
         "label": "🛡️ محافظه‌کار",
@@ -197,7 +195,7 @@ MODE_CONFIGS = {
         "max_leverage": 3,
         "min_rr": 1.5,
         "adx_min": 20,
-        "check_interval": 60 * 60,      # 60 دقیقه
+        "check_interval": 60 * 60,
     },
 }
 
@@ -305,7 +303,7 @@ class MarketDataCache:
                 self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None}
             self.exchange_symbols = selected
             self.valid_codes = list(selected.keys())
-            logger.info("OKX swap markets: %s/%s selected", len(self.valid_codes), len(COIN_CODES))
+            logger.info("Bitget swap markets: %s/%s selected", len(self.valid_codes), len(COIN_CODES))
         except Exception as e:
             logger.exception("load_markets failed: %s", e)
 
@@ -531,13 +529,14 @@ class MarketDataCache:
             if cached is not None and time.time() - cached["ts"] < LS_RATIO_TTL_SECONDS:
                 return cached["value"]
             try:
+                # Bitget long/short ratio endpoint (public)
                 base = code
-                url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={base}&period=1h"
+                url = f"https://api.bitget.com/api/v2/mix/market/long-short?productType=usdt-futures&symbol={symbol}&period=1h"
                 r = requests.get(url, timeout=10)
                 r.raise_for_status()
                 data = r.json()
-                if data.get("code") == "0" and data.get("data"):
-                    ratio = float(data["data"][-1].get("ratio", 0.0))
+                if data.get("code") == "00000" and data.get("data"):
+                    ratio = float(data["data"][-1].get("longShortRatio", 0.0))
                     self._ls_ratio_cache[code] = {"value": ratio, "ts": time.time()}
                     return ratio
                 else:
@@ -1670,7 +1669,7 @@ async def generate_weekly_summary_async(code, chat_id):
         f"📈 Open Interest تغییر: {oi_change:+.2f}%\n"
         f"⚖️ Long/Short Ratio: {ls_ratio:.2f}\n"
         f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-        f"{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Perpetual در OKX محاسبه شده‌اند."
+        f"{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Perpetual در Bitget محاسبه شده‌اند."
     )
     return rtl_lines(text)
 
@@ -2407,7 +2406,7 @@ async def button_handler(update, context):
             )
             set_interactive_screen(chat_id, [query.message.message_id])
         else:
-            text = f"{COIN_ICONS.get(code, '🔸')} *{code}*\n{DIVIDER}\n⚪ وضعیت: *NO SWAP*\nدر حال حاضر قرارداد USDT Perpetual فعال برای این ارز در OKX پیدا نشد."
+            text = f"{COIN_ICONS.get(code, '🔸')} *{code}*\n{DIVIDER}\n⚪ وضعیت: *NO SWAP*\nدر حال حاضر قرارداد USDT Perpetual فعال برای این ارز در Bitget پیدا نشد."
             await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
             await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
             set_interactive_screen(chat_id, [query.message.message_id])
@@ -2418,7 +2417,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در OKX در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در Bitget در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         mode = user_trading_mode.get(chat_id, "standard")
         await query.edit_message_text("⏳ در حال تحلیل و تولید پیشنهاد لحظه‌ای...")
@@ -2449,7 +2448,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در OKX در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در Bitget در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         mode = user_trading_mode.get(chat_id, "standard")
         if auto:
@@ -2495,7 +2494,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در OKX در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در Bitget در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
             return
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         await query.edit_message_text("⏳ در حال دریافت اطلاعات ۷ روز اخیر...")
@@ -2609,7 +2608,7 @@ async def auto_report_loop(app):
                     for code, direction in current_signals.items():
                         prev = prev_signals.get(code)
                         if prev is None or prev["direction"] != direction:
-                            plan = await generate_trade_plan(code, mode)  # re-generate to get full plan
+                            plan = await generate_trade_plan(code, mode)
                             if plan:
                                 main_text = format_main_signal(plan, code, chat_id)
                                 chart_buf = generate_price_chart(code, MODE_CONFIGS[mode]["main_tf"])
@@ -2632,7 +2631,7 @@ async def auto_report_loop(app):
             raise
         except Exception as e:
             logger.exception("Auto loop failed | error=%s", e)
-        await asyncio.sleep(60)   # base sleep 1 minute, but actual per-user interval controls
+        await asyncio.sleep(60)
 
 async def post_init(app):
     await app.bot.set_my_commands([
@@ -2648,7 +2647,7 @@ async def post_init(app):
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
-    logger.info("Signal Bot V25 (Event-Driven OKX) started")
+    logger.info("Signal Bot V26 (Bitget Event-Driven) started")
 
 def main():
     if not BOT_TOKEN:
