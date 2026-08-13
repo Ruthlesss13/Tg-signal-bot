@@ -1,11 +1,13 @@
 """
-Telegram Signal Bot V18 - KuCoin Futures (Ultimate Edition)
-- گزارش دوره‌ای با نمودارهای عملکرد
-- نمودارهای تحلیلی در وضعیت لحظه‌ای، ۷ روز و گزارش‌ها
-- هشدار نهنگ‌ها (Whale Alerts)
+Telegram Signal Bot V19 - KuCoin Futures (Final Polished)
+- رفع باگ داشبورد (wins/losses)
+- رفع باگ «همه پیشنهادات»
+- منوی جدید ۸ دکمه‌ای مرتب و جذاب
+- ایموجی‌های متحرک/شیک در متن‌ها
+- گزارش دوره‌ای با نمودار
+- هشدار نهنگ‌ها، رویدادها، شاخص ترس و طمع
+- نمودارهای تحلیلی در وضعیت لحظه‌ای و ۷ روز
 - گزارش‌گیری پیشرفته (Sharpe, Drawdown, Expectancy, Risk of Ruin)
-- واگرایی MACD و RSI
-- تمامی امکانات نسخه‌های قبلی
 """
 
 import asyncio
@@ -27,11 +29,11 @@ from ta.momentum import RSIIndicator, StochRSIIndicator, ROCIndicator, WilliamsR
 from ta.trend import EMAIndicator, MACD, ADXIndicator, CCIIndicator
 from ta.volatility import AverageTrueRange, BollingerBands
 from ta.volume import VolumeWeightedAveragePrice
-from telegram import BotCommand, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import BotCommand, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 import matplotlib
-matplotlib.use("Agg")  # Use non-interactive backend
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from io import BytesIO
@@ -63,7 +65,7 @@ ALWAYS_ALLOWED_USER_IDS = {
 }
 WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 
-# ---------- 80 Coins (unchanged) ----------
+# ---------- 80 Coins ----------
 COIN_ICONS = {
     "BTC": "₿", "ETH": "Ξ", "BNB": "🔶", "SOL": "◎", "XRP": "✕",
     "DOGE": "🐕", "ADA": "🔷", "AVAX": "🔺", "DOT": "⚪", "LINK": "🔗",
@@ -111,10 +113,9 @@ AUTO_KEEP_LAST_N = 3
 TRAILING_CHECK_SECONDS = 5 * 60
 FEAR_GREED_TTL = 3600
 EVENTS_CHECK_SECONDS = 6 * 3600
-WHALE_CHECK_SECONDS = 30 * 60   # هر ۳۰ دقیقه
-WHALE_MIN_AMOUNT_BTC = 1000     # حداقل ۱۰۰۰ بیت‌کوین
+WHALE_CHECK_SECONDS = 30 * 60
+WHALE_MIN_AMOUNT_BTC = 1000
 
-# Category weights (sum = 100)
 WEIGHT_TREND = 25
 WEIGHT_MOMENTUM = 25
 WEIGHT_VOLUME = 15
@@ -157,7 +158,6 @@ START_TIME = time.time()
 TOTAL_SIGNALS_GENERATED = 0
 LAST_REPORT_TIME = None
 
-# ---------- Performance Tracking ----------
 signal_history: List[Dict] = []
 fear_greed_cache = {"value": None, "ts": 0.0, "classification": ""}
 upcoming_events_cache = {"events": [], "ts": 0.0}
@@ -195,6 +195,7 @@ class TradePlan:
     timestamp: float = 0.0
     status: str = "open"
 
+# ---------- Cache ----------
 class MarketDataCache:
     _instance = None
 
@@ -240,9 +241,7 @@ class MarketDataCache:
             markets = exchange.load_markets(reload=True)
             selected = {}
             for code in COIN_CODES:
-                self.market_status[code] = {
-                    "status": "NO SWAP", "symbol": None, "error": None,
-                }
+                self.market_status[code] = {"status": "NO SWAP", "symbol": None, "error": None}
                 candidates = []
                 for symbol, market in markets.items():
                     if market.get("base") != code:
@@ -257,23 +256,15 @@ class MarketDataCache:
                         continue
                     candidates.append((symbol, market))
                 if not candidates:
-                    logger.debug("No active USDT swap for %s on KuCoin Futures", code)
                     continue
                 candidates.sort(key=lambda x: x[0])
                 symbol, market = candidates[0]
                 selected[code] = symbol
                 self.market_meta[code] = market
-                self.market_status[code] = {
-                    "status": "SWAP OK",
-                    "symbol": symbol,
-                    "error": None,
-                }
+                self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None}
             self.exchange_symbols = selected
             self.valid_codes = list(selected.keys())
-            logger.info(
-                "KuCoin Futures markets: %s/%s selected (USDT perpetual)",
-                len(self.valid_codes), len(COIN_CODES),
-            )
+            logger.info("KuCoin Futures markets: %s/%s selected", len(self.valid_codes), len(COIN_CODES))
         except Exception as e:
             logger.exception("load_markets failed: %s", e)
 
@@ -289,29 +280,17 @@ class MarketDataCache:
         else:
             if not isinstance(raw, (list, tuple)) or not raw:
                 return None
-            df = pd.DataFrame(
-                raw,
-                columns=["timestamp", "open", "high", "low", "close", "volume"],
-            )
+            df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
         required = ["timestamp", "open", "high", "low", "close", "volume"]
         if any(col not in df.columns for col in required):
             return None
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         if pd.api.types.is_numeric_dtype(df["timestamp"]):
-            df["timestamp"] = pd.to_datetime(
-                df["timestamp"], unit="ms", utc=True, errors="coerce"
-            )
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
         else:
-            df["timestamp"] = pd.to_datetime(
-                df["timestamp"], utc=True, errors="coerce"
-            )
-        df = (
-            df.dropna(subset=required)
-            .drop_duplicates(subset=["timestamp"])
-            .sort_values("timestamp")
-            .reset_index(drop=True)
-        )
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        df = df.dropna(subset=required).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df if not df.empty else None
 
     @staticmethod
@@ -320,10 +299,8 @@ class MarketDataCache:
             return df
         now = pd.Timestamp.now(tz="UTC")
         latest = df["timestamp"].iloc[-1]
-        timeframe_delta = None
-        if len(df) >= 2:
-            timeframe_delta = df["timestamp"].iloc[-1] - df["timestamp"].iloc[-2]
-        if timeframe_delta is not None and timeframe_delta > pd.Timedelta(0):
+        timeframe_delta = df["timestamp"].iloc[-1] - df["timestamp"].iloc[-2] if len(df) >= 2 else None
+        if timeframe_delta and timeframe_delta > pd.Timedelta(0):
             if latest + timeframe_delta > now:
                 return df.iloc[:-1].copy().reset_index(drop=True)
         return df.copy().reset_index(drop=True)
@@ -332,12 +309,7 @@ class MarketDataCache:
         if not self.exchange_symbols:
             self._load_markets()
         now = time.time()
-        if (
-            not force
-            and self.prices
-            and self.last_price_update
-            and now - self.last_price_update < 60
-        ):
+        if not force and self.prices and self.last_price_update and now - self.last_price_update < 60:
             return self.prices
 
         async def fetch_one(code):
@@ -349,31 +321,15 @@ class MarketDataCache:
                     try:
                         await asyncio.sleep(0.1 * (attempt + 1))
                         ticker = await asyncio.to_thread(exchange.fetch_ticker, symbol)
-                        price = (
-                            ticker.get("last") or ticker.get("close")
-                            or ticker.get("bid") or ticker.get("ask")
-                        )
+                        price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
                         if price is None:
                             raise ValueError("ticker has no usable price")
-                        self.market_status[code] = {
-                            **self.market_status.get(code, {}),
-                            "status": "SWAP OK",
-                            "symbol": symbol,
-                            "error": None,
-                        }
+                        self.market_status[code] = {**self.market_status.get(code, {}), "status": "SWAP OK", "symbol": symbol, "error": None}
                         return code, float(price)
                     except Exception as e:
                         if attempt == 2:
-                            self.market_status[code] = {
-                                **self.market_status.get(code, {}),
-                                "status": "TICKER ERROR",
-                                "symbol": symbol,
-                                "error": f"{type(e).__name__}: {e}",
-                            }
-                            logger.warning(
-                                "ticker failed | code=%s | type=%s | symbol=%s | error=%s",
-                                code, type(e).__name__, symbol, e,
-                            )
+                            self.market_status[code] = {**self.market_status.get(code, {}), "status": "TICKER ERROR", "symbol": symbol, "error": f"{type(e).__name__}: {e}"}
+                            logger.warning("ticker failed | code=%s | error=%s", code, e)
                         await asyncio.sleep(0.5)
                 return code, None
 
@@ -390,9 +346,7 @@ class MarketDataCache:
         async with self._sem:
             for attempt in range(3):
                 try:
-                    raw = await asyncio.to_thread(
-                        exchange.fetch_ohlcv, symbol, timeframe, None, limit,
-                    )
+                    raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
                     df = self._to_dataframe(raw)
                     if df is None or len(df) < 10:
                         return None
@@ -401,29 +355,18 @@ class MarketDataCache:
                         return None
                     return closed
                 except Exception as e:
-                    logger.warning(
-                        "OHLCV failed | code=%s | tf=%s | attempt=%s | error=%s",
-                        code, timeframe, attempt, e,
-                    )
+                    logger.warning("OHLCV failed | code=%s | tf=%s | attempt=%s | error=%s", code, timeframe, attempt, e)
                     await asyncio.sleep(1)
             return None
 
     async def ensure_symbol_data(self, code, timeframes=None, force=False):
         if timeframes is None:
             timeframes = TIMEFRAMES
-        missing = [
-            tf for tf in timeframes
-            if force or code not in self.ohlcv[tf]
-            or time.time() - self.ohlcv_updated_at[tf].get(code, 0) > OHLCV_TTL_SECONDS
-        ]
+        missing = [tf for tf in timeframes if force or code not in self.ohlcv[tf] or time.time() - self.ohlcv_updated_at[tf].get(code, 0) > OHLCV_TTL_SECONDS]
         if not missing:
             return True
         async with self._symbol_lock(code):
-            missing = [
-                tf for tf in timeframes
-                if force or code not in self.ohlcv[tf]
-                or time.time() - self.ohlcv_updated_at[tf].get(code, 0) > OHLCV_TTL_SECONDS
-            ]
+            missing = [tf for tf in timeframes if force or code not in self.ohlcv[tf] or time.time() - self.ohlcv_updated_at[tf].get(code, 0) > OHLCV_TTL_SECONDS]
             for tf in missing:
                 df = await self._fetch_ohlcv_symbol(code, tf)
                 if df is not None:
@@ -434,11 +377,7 @@ class MarketDataCache:
     async def update_ohlcv(self, force=False, codes=None):
         async with self._update_lock:
             now = time.time()
-            if (
-                not force
-                and self.last_full_ohlcv_update
-                and now - self.last_full_ohlcv_update < FULL_REFRESH_TTL_SECONDS
-            ):
+            if not force and self.last_full_ohlcv_update and now - self.last_full_ohlcv_update < FULL_REFRESH_TTL_SECONDS:
                 return
             if not self.valid_codes:
                 self._load_markets()
@@ -447,10 +386,7 @@ class MarketDataCache:
             target_codes = list(codes or self.valid_codes)
             await asyncio.gather(*(self.ensure_symbol_data(c, TIMEFRAMES, force=force) for c in target_codes))
             self.last_full_ohlcv_update = time.time()
-            logger.info(
-                "OHLCV refresh complete: 1h=%s 4h=%s 1d=%s",
-                len(self.ohlcv["1h"]), len(self.ohlcv["4h"]), len(self.ohlcv["1d"]),
-            )
+            logger.info("OHLCV refresh complete: 1h=%s 4h=%s 1d=%s", len(self.ohlcv["1h"]), len(self.ohlcv["4h"]), len(self.ohlcv["1d"]))
 
     async def get_open_interest_info(self, code):
         symbol = self.symbol_for_code(code)
@@ -468,11 +404,7 @@ class MarketDataCache:
                 current = float(oi.get("openInterestAmount") or oi.get("openInterestValue") or 0)
                 prev = cached.get("value") if cached else None
                 change_pct = ((current - prev) / prev * 100) if prev else 0.0
-                self._oi_cache[code] = {
-                    "value": current,
-                    "ts": time.time(),
-                    "change_pct": change_pct,
-                }
+                self._oi_cache[code] = {"value": current, "ts": time.time(), "change_pct": change_pct}
                 return current, change_pct
             except Exception as e:
                 logger.debug("Open interest failed | code=%s | error=%s", code, e)
@@ -515,11 +447,9 @@ class MarketDataCache:
 
         try:
             close = df["close"]
-
             ema20 = EMAIndicator(close, window=20).ema_indicator()
             ema50 = EMAIndicator(close, window=50).ema_indicator()
             ema200 = EMAIndicator(close, window=200).ema_indicator()
-
             rsi = RSIIndicator(close, window=14).rsi()
             stoch = StochRSIIndicator(close, window=14, smooth1=3, smooth2=3)
             stoch_k = stoch.stochrsi_k() * 100
@@ -530,24 +460,18 @@ class MarketDataCache:
             roc = ROCIndicator(close, window=12).roc()
             cci = CCIIndicator(df["high"], df["low"], close, window=20).cci()
             williams = WilliamsRIndicator(df["high"], df["low"], close, lbp=14).williams_r()
-
             adx_ind = ADXIndicator(df["high"], df["low"], close, window=14)
             adx = adx_ind.adx()
             plus_di = adx_ind.adx_pos()
             minus_di = adx_ind.adx_neg()
-
             atr = AverageTrueRange(df["high"], df["low"], close, window=14).average_true_range()
             bb = BollingerBands(close, window=20, window_dev=2)
             bb_percent = bb.bollinger_pband()
             bb_width = bb.bollinger_wband()
-
             volume_ratio = df["volume"] / df["volume"].rolling(20).mean()
             volume_ma20 = df["volume"].rolling(20).mean()
             volume_ma50 = df["volume"].rolling(50).mean()
-
-            vwap = VolumeWeightedAveragePrice(
-                high=df["high"], low=df["low"], close=close, volume=df["volume"], window=20
-            ).volume_weighted_average_price()
+            vwap = VolumeWeightedAveragePrice(high=df["high"], low=df["low"], close=close, volume=df["volume"], window=20).volume_weighted_average_price()
 
             price = float(close.iloc[-1])
             price_prev = float(close.iloc[-2])
@@ -592,11 +516,8 @@ class MarketDataCache:
             breakout_up = price > resistance * 1.001
             breakout_down = price < support * 0.999
 
-            # RSI Divergence
             rsi_bullish_div = (price < price_prev and rsi.iloc[-1] > rsi_prev)
             rsi_bearish_div = (price > price_prev and rsi.iloc[-1] < rsi_prev)
-
-            # MACD Divergence (using histogram)
             macd_bullish_div = (price < price_prev and macd_hist.iloc[-1] > macd_hist_prev)
             macd_bearish_div = (price > price_prev and macd_hist.iloc[-1] < macd_hist_prev)
 
@@ -674,7 +595,7 @@ class MarketDataCache:
 
 cache = MarketDataCache()
 
-# ---------- Helper functions (same as before, but including new ones) ----------
+# ---------- Helper functions ----------
 def is_allowed(user_id):
     if user_id in ALWAYS_ALLOWED_USER_IDS or user_id in ADMIN_USER_IDS:
         return True
@@ -795,9 +716,7 @@ def fetch_fear_greed_index():
         r = requests.get("https://api.alternative.me/fng/", timeout=10)
         r.raise_for_status()
         data = r.json()["data"][0]
-        value = int(data["value"])
-        classification = data.get("value_classification", "")
-        return value, classification
+        return int(data["value"]), data.get("value_classification", "")
     except Exception as e:
         logger.warning("Fear&Greed fetch failed: %s", e)
         return None, None
@@ -811,7 +730,7 @@ async def get_fear_greed():
         fear_greed_cache.update(value=value, classification=classification, ts=now)
     return value, classification
 
-# ---------- Events / News ----------
+# ---------- Events ----------
 def fetch_upcoming_events():
     try:
         r = requests.get("https://api.coingecko.com/api/v3/events?upcoming=true", timeout=10)
@@ -865,40 +784,26 @@ async def check_and_notify_events(app):
 
 # ---------- Whale Alerts ----------
 def fetch_whale_alerts():
-    """
-    Fetch large transactions. Uses Whale Alert API if key provided, else Blockchain.com.
-    Returns list of dicts: {amount_btc, symbol, timestamp}
-    """
     try:
         if WHALE_ALERT_API_KEY:
-            # Whale Alert API
             url = f"https://api.whale-alert.io/v1/transactions?api_key={WHALE_ALERT_API_KEY}&min_value={WHALE_MIN_AMOUNT_BTC * 1000000}&limit=10"
             r = requests.get(url, timeout=10)
             r.raise_for_status()
             data = r.json().get("transactions", [])
             alerts = []
             for tx in data:
-                alerts.append({
-                    "amount_btc": float(tx.get("amount", 0)),
-                    "symbol": tx.get("symbol", "BTC"),
-                    "timestamp": time.time()
-                })
+                alerts.append({"amount_btc": float(tx.get("amount", 0)), "symbol": tx.get("symbol", "BTC"), "timestamp": time.time()})
             return alerts
         else:
-            # Fallback: Blockchain.com unconfirmed transactions (large BTC only)
             url = "https://blockchain.info/unconfirmed-transactions?format=json"
             r = requests.get(url, timeout=10)
             r.raise_for_status()
             txs = r.json().get("txs", [])
             alerts = []
             for tx in txs:
-                total_out = sum(out.get("value", 0) for out in tx.get("out", [])) / 1e8  # satoshi to BTC
+                total_out = sum(out.get("value", 0) for out in tx.get("out", [])) / 1e8
                 if total_out >= WHALE_MIN_AMOUNT_BTC:
-                    alerts.append({
-                        "amount_btc": total_out,
-                        "symbol": "BTC",
-                        "timestamp": time.time()
-                    })
+                    alerts.append({"amount_btc": total_out, "symbol": "BTC", "timestamp": time.time()})
             return alerts[:5]
     except Exception as e:
         logger.warning("Whale alert fetch failed: %s", e)
@@ -911,7 +816,6 @@ async def whale_monitor_loop(app):
             if subscribed_chat_ids:
                 alerts = fetch_whale_alerts()
                 if alerts:
-                    # Send once per cycle
                     for chat_id in subscribed_chat_ids:
                         text = "🐋 *هشدار حرکت نهنگ‌ها*\n" + DIVIDER + "\n"
                         for alert in alerts[:5]:
@@ -926,38 +830,41 @@ async def whale_monitor_loop(app):
 
 # ---------- Advanced Reporting ----------
 def compute_advanced_stats(signal_history):
-    """Calculate advanced performance metrics from signal_history."""
     if not signal_history:
         return {
             "sharpe": 0, "max_drawdown": 0, "expectancy": 0,
             "risk_of_ruin": 0, "total_trades": 0, "win_rate": 0,
-            "profit_factor": 0, "avg_confidence": 0
+            "profit_factor": 0, "avg_confidence": 0,
+            "wins": 0, "losses": 0
         }
     returns = []
+    wins = 0
+    losses = 0
     for rec in signal_history:
         if rec["status"] == "tp3_hit":
             returns.append(3 * (rec["tp_prices"][2] - rec["entry_price"]))
+            wins += 1
         elif rec["status"] == "tp2_hit":
             returns.append(2 * (rec["tp_prices"][1] - rec["entry_price"]))
+            wins += 1
         elif rec["status"] == "tp1_hit":
             returns.append(1 * (rec["tp_prices"][0] - rec["entry_price"]))
+            wins += 1
         elif rec["status"] == "sl_hit":
             returns.append(rec["entry_price"] - rec["sl_price"])
-        # open trades ignored for now
+            losses += 1
     if not returns:
         return {
             "sharpe": 0, "max_drawdown": 0, "expectancy": 0,
             "risk_of_ruin": 0, "total_trades": 0, "win_rate": 0,
-            "profit_factor": 0, "avg_confidence": 0
+            "profit_factor": 0, "avg_confidence": 0,
+            "wins": 0, "losses": 0
         }
     returns = np.array(returns)
-    wins = [r for r in returns if r > 0]
-    losses = [r for r in returns if r <= 0]
-    win_rate = len(wins) / len(returns) * 100
+    win_rate = wins / len(returns) * 100
     avg_return = np.mean(returns)
     std_return = np.std(returns) if len(returns) > 1 else 1e-9
     sharpe = (avg_return / std_return) * np.sqrt(365) if std_return != 0 else 0
-    # Max drawdown on cumulative sum
     cumulative = np.cumsum(returns)
     max_dd = 0
     peak = cumulative[0]
@@ -968,11 +875,8 @@ def compute_advanced_stats(signal_history):
         if dd > max_dd:
             max_dd = dd
     expectancy = avg_return
-    # Risk of ruin (simplified)
-    risk_of_ruin = 0
-    if len(losses) > 0:
-        risk_of_ruin = (1 - (len(wins)/len(returns))) ** 10 * 100
-    profit_factor = (sum(wins) / abs(sum(losses))) if losses else 999
+    risk_of_ruin = (1 - (wins / len(returns))) ** 10 * 100
+    profit_factor = (sum(r for r in returns if r > 0) / abs(sum(r for r in returns if r <= 0))) if losses else 999
     avg_confidence = np.mean([rec["confidence"] for rec in signal_history]) if signal_history else 0
     return {
         "sharpe": sharpe,
@@ -983,10 +887,11 @@ def compute_advanced_stats(signal_history):
         "win_rate": win_rate,
         "profit_factor": profit_factor,
         "avg_confidence": avg_confidence,
+        "wins": wins,
+        "losses": losses,
     }
 
 def generate_performance_chart(signal_history):
-    """Generate a performance chart (cumulative returns) and return BytesIO."""
     if not signal_history:
         return None
     returns = []
@@ -1014,7 +919,6 @@ def generate_performance_chart(signal_history):
     buf.seek(0)
     return buf
 
-# ---------- Chart generation for price ----------
 def generate_price_chart(code, timeframe="1h"):
     df = cache.ohlcv.get(timeframe, {}).get(code)
     if df is None or df.empty:
@@ -1027,21 +931,18 @@ def generate_price_chart(code, timeframe="1h"):
     macd_hist = macd.macd_diff()
 
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-    # Price and EMAs
     ax1.plot(df["timestamp"], close, label="Close", color='black')
     ax1.plot(df["timestamp"], ema20, label="EMA20", color='blue')
     ax1.plot(df["timestamp"], ema50, label="EMA50", color='red')
     ax1.legend()
     ax1.set_title(f"{code} Price & EMAs")
     ax1.grid(True)
-    # RSI
     ax2.plot(df["timestamp"], rsi, label="RSI", color='purple')
     ax2.axhline(70, linestyle='--', color='red', alpha=0.5)
     ax2.axhline(30, linestyle='--', color='green', alpha=0.5)
     ax2.legend()
     ax2.set_title("RSI")
     ax2.grid(True)
-    # MACD Histogram
     ax3.bar(df["timestamp"], macd_hist, label="MACD Hist", color='gray')
     ax3.legend()
     ax3.set_title("MACD Histogram")
@@ -1053,7 +954,7 @@ def generate_price_chart(code, timeframe="1h"):
     buf.seek(0)
     return buf
 
-# ---------- Scoring (updated with MACD divergence) ----------
+# ---------- Scoring ----------
 def category_scores(direction, ind):
     long_side = direction == "LONG"
     trend = 0
@@ -1082,7 +983,6 @@ def category_scores(direction, ind):
     if roc_ok: momentum += 5
     if cci_ok: momentum += 4
     if williams_ok: momentum += 4
-    # Divergence bonus
     if long_side and (ind["bullish_div"] or ind["macd_bullish_div"]):
         momentum += 3
     elif not long_side and (ind["bearish_div"] or ind["macd_bearish_div"]):
@@ -1383,11 +1283,7 @@ def update_signal_status(symbol, current_price):
             elif current_price <= rec["tp_prices"][0]:
                 rec["status"] = "tp1_hit"
 
-# ---------- Advanced Dashboard ----------
-def get_dashboard_stats():
-    return compute_advanced_stats(signal_history)
-
-# ---------- Formatting functions ----------
+# ---------- Formatting ----------
 def format_main_signal(plan, code, chat_id):
     direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
     funding = f"\n💰 فاندینگ: {plan.funding_rate:+.3f}%" if plan.funding_rate else ""
@@ -1448,14 +1344,11 @@ def format_technical_details(code, plan, ind, chat_id):
     )
     return rtl_lines(text)
 
-# ---------- Instant status (with chart) ----------
+# ---------- Instant status ----------
 async def generate_status_text_async(code, chat_id):
     ind = await cache.get_indicators(code)
     if not ind:
-        return rtl_lines(
-            f"{COIN_ICONS.get(code, '🔸')} *{code}*\n\n"
-            "⚠️ داده‌ی کافی برای تحلیل این ارز دریافت نشد."
-        )
+        return rtl_lines(f"{COIN_ICONS.get(code, '🔸')} *{code}*\n\n⚠️ داده کافی برای تحلیل این ارز دریافت نشد.")
     plan = await generate_trade_plan(code)
     header = (
         f"🧭 *وضعیت لحظه‌ای* {COIN_ICONS.get(code, '🔸')} *{sym(code)}*\n"
@@ -1510,7 +1403,7 @@ async def generate_status_text_async(code, chat_id):
         )
     return rtl_lines(header + body + footer + f"\n{DIVIDER}\n⚠️ این تحلیل تکنیکال است و تضمین سود یا توصیه مالی نیست.")
 
-# ---------- Weekly summary with chart ----------
+# ---------- Weekly summary ----------
 async def generate_weekly_summary_async(code, chat_id):
     week_df = await cache.get_weekly_data(code)
     if week_df is None or len(week_df) < 2:
@@ -1699,12 +1592,10 @@ def kb_currency():
 def kb_main(user_id):
     rows = [
         [InlineKeyboardButton("💰 قیمت لحظه‌ای", callback_data="menu_prices"), InlineKeyboardButton("🪙 انتخاب ارز", callback_data="menu_coins")],
-        [InlineKeyboardButton("📊 همه پیشنهادات", callback_data="menu_all"), InlineKeyboardButton("🔄 شروع مجدد", callback_data="restart_currency")],
-        [InlineKeyboardButton("📈 داشبورد", callback_data="dashboard"), InlineKeyboardButton("📅 رویدادها", callback_data="events")],
-        [InlineKeyboardButton("🧾 گزارش دوره‌ای", callback_data="periodic_report")],
+        [InlineKeyboardButton("📊 همه پیشنهادات", callback_data="menu_all"), InlineKeyboardButton("🧾 گزارش دوره‌ای", callback_data="periodic_report")],
+        [InlineKeyboardButton("📈 داشبورد تحلیلی", callback_data="dashboard"), InlineKeyboardButton("📅 رویدادها", callback_data="events")],
+        [InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel"), InlineKeyboardButton("🔄 شروع مجدد", callback_data="restart_currency")],
     ]
-    if is_admin(user_id):
-        rows.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel"), InlineKeyboardButton("\u2063", callback_data="noop")])
     return InlineKeyboardMarkup(rows)
 
 def kb_admin_panel():
@@ -1780,7 +1671,7 @@ def kb_periodic_report():
 
 def welcome_text():
     return rtl_lines(
-        "🌟 به سیگنالستان خوش اومدی! 🌟\n"
+        "🌟✨ *به سیگنال‌یار حرفه‌ای خوش اومدی!* ✨🌟\n"
         f"{DIVIDER}\n"
         f"🛰️ در حال رصد {len(cache.valid_codes)} قرارداد Perpetual هستم\n"
         "⏱️ هر ۱۵ دقیقه بهترین سیگنال‌ها بررسی می‌شوند\n"
@@ -1789,7 +1680,7 @@ def welcome_text():
         "⚠️ تحلیل تکنیکال است، نه توصیه مالی."
     )
 
-MAIN_MENU_HEADER = "✨ پنل سیگنال‌یار ✨\n" + DIVIDER + "\n" + MENU_PROMPT
+MAIN_MENU_HEADER = "✨ *سیگنال‌یار حرفه‌ای* ✨\n" + DIVIDER + "\n" + MENU_PROMPT
 
 async def finish_start(context, chat_id, user_id):
     commands = [
@@ -1867,7 +1758,6 @@ async def news_monitor_loop(app):
 async def send_periodic_report(app, period="weekly"):
     stats = get_dashboard_stats()
     fg_value, fg_class = await get_fear_greed()
-    # Generate chart
     chart_buf = generate_performance_chart(signal_history)
     text = (
         f"📊 *گزارش { 'هفتگی' if period == 'weekly' else 'ماهانه' }*\n"
@@ -1883,10 +1773,11 @@ async def send_periodic_report(app, period="weekly"):
         f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
     )
     if chart_buf:
-        try:
-            await app.bot.send_photo(chat_id=subscribed_chat_ids[0] if subscribed_chat_ids else None, photo=chart_buf, caption=text, parse_mode="Markdown")
-        except Exception as e:
-            logger.error("Periodic report photo failed: %s", e)
+        for chat_id in subscribed_chat_ids:
+            try:
+                await app.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=text, parse_mode="Markdown")
+            except Exception as e:
+                logger.error("Periodic report photo failed: %s", e)
     else:
         for chat_id in subscribed_chat_ids:
             try:
@@ -1956,7 +1847,7 @@ async def status(update, context):
 
 async def dashboard(update, context):
     if not await guard(update): return
-    stats = get_dashboard_stats()
+    stats = compute_advanced_stats(signal_history)
     fg_value, fg_class = await get_fear_greed()
     text = (
         f"📈 *داشبورد تحلیلی*\n🕒 {shamsi_now()}\n{DIVIDER}\n"
@@ -2048,7 +1939,7 @@ async def button_handler(update, context):
 
     if data == "dashboard":
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        stats = get_dashboard_stats()
+        stats = compute_advanced_stats(signal_history)
         fg_value, fg_class = await get_fear_greed()
         text = (
             f"📈 *داشبورد تحلیلی*\n🕒 {shamsi_now()}\n{DIVIDER}\n"
@@ -2094,9 +1985,9 @@ async def button_handler(update, context):
         set_interactive_screen(chat_id, [query.message.message_id])
         return
 
-    if data == "report_weekly" or data == "report_monthly":
+    if data in ("report_weekly", "report_monthly"):
         period = "weekly" if data == "report_weekly" else "monthly"
-        stats = get_dashboard_stats()
+        stats = compute_advanced_stats(signal_history)
         fg_value, fg_class = await get_fear_greed()
         chart_buf = generate_performance_chart(signal_history)
         text = (
@@ -2183,7 +2074,6 @@ async def button_handler(update, context):
                     await query.edit_message_text(f"💤 فعلاً سیگنال نهایی برای {code} وجود ندارد.\nدلایل احتمالی: ADX پایین، عدم تأیید تایم‌فریم بالا، نسبت R/R کمتر از حد مجاز.", reply_markup=kb_back_main(), parse_mode="Markdown")
                     return
                 main_text = format_main_signal(plan, code, chat_id)
-                # Send chart if available
                 chart_buf = generate_price_chart(code, "1h")
                 if chart_buf:
                     msg = await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=main_text, parse_mode="Markdown")
@@ -2197,7 +2087,6 @@ async def button_handler(update, context):
                 chart_buf = generate_price_chart(code, "1h")
                 if chart_buf:
                     await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
-                    # Send chart as separate photo
                     await context.bot.send_photo(chat_id=chat_id, photo=chart_buf)
                 else:
                     await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
@@ -2353,7 +2242,7 @@ async def post_init(app):
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
-    logger.info("Signal Bot V18 (Ultimate) started")
+    logger.info("Signal Bot V19 (Final Polished) started")
 
 def main():
     if not BOT_TOKEN:
