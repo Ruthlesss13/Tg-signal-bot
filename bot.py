@@ -2,12 +2,13 @@
 Telegram Signal Bot V31 - KuCoin Futures (Final)
 - 100 ارز
 - صرافی تحلیل: KuCoin Futures
-- قیمت‌گیری: بیت‌پین، ولکس، کوکوین، مکس + اسپات در صورت نبود فیوچرز
+- قیمت‌گیری: بیت‌پین، ولکس، کوکوین، مکس + CoinGecko در صورت نبود
 - منوی جداگانه ادمین و کاربر عادی
 - ادمین: بدون حالت پیش‌فرض، انتخاب حالت در هر تحلیل
 - کاربر عادی: حالت معاملاتی در شروع انتخاب می‌شود و ثابت می‌ماند
 - رفع مشکل دوبار پرسیدن حالت برای ادمین در نقش کاربر
 - متن خوش‌آمدگویی زیباتر بدون دستور /stop
+- دکمه‌های بازگشت کامل در هر دو حالت
 """
 
 import asyncio
@@ -119,30 +120,24 @@ DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
-# صرافی اصلی تحلیل: KuCoin Futures
 exchange = ccxt.kucoinfutures({
     "enableRateLimit": True,
     "options": {"defaultType": "swap", "adjustForTimeDifference": True},
 })
 
-# صرافی‌های قیمت
 exchange_mexc = ccxt.mexc({
     "enableRateLimit": True,
     "options": {"defaultType": "swap", "adjustForTimeDifference": True},
 })
-exchange_spot_kucoin = ccxt.kucoin({
-    "enableRateLimit": True,
-})
-exchange_spot_mexc = ccxt.mexc({
-    "enableRateLimit": True,
-})
+exchange_spot_kucoin = ccxt.kucoin({"enableRateLimit": True})
+exchange_spot_mexc = ccxt.mexc({"enableRateLimit": True})
 
 last_plans = {}
 subscribed_chat_ids = set()
 user_currency = {}
 user_trading_mode = {}
 user_favorites = {}
-user_role = {}  # chat_id -> 'admin' or 'user'
+user_role = {}
 auto_message_history = {}
 overlay_messages = {}
 interactive_screen_messages = {}
@@ -361,7 +356,7 @@ class MarketDataCache:
         new_prices = {}
         price_sources.clear()
 
-        # 1) بیت‌پین (placeholder - در صورت نیاز API واقعی)
+        # 1) بیت‌پین (placeholder)
         try:
             bitpin_prices = await asyncio.to_thread(self._get_bitpin_prices)
             for code, price in bitpin_prices.items():
@@ -400,25 +395,37 @@ class MarketDataCache:
         except Exception as e:
             logger.warning("MEXC fetch failed: %s", e)
 
-        # 5) کوکوین اسپات (جایگزین)
+        # 5) کوکوین اسپات
         try:
             spot_kucoin_prices = await asyncio.to_thread(self._get_spot_kucoin_prices)
             for code, price in spot_kucoin_prices.items():
                 if code not in new_prices and price > 0:
                     new_prices[code] = price
-                    price_sources[code] = "K"  # کوکوین
+                    price_sources[code] = "K"
         except Exception as e:
             logger.warning("KuCoin spot fetch failed: %s", e)
 
-        # 6) مکس اسپات (جایگزین)
+        # 6) مکس اسپات
         try:
             spot_mexc_prices = await asyncio.to_thread(self._get_spot_mexc_prices)
             for code, price in spot_mexc_prices.items():
                 if code not in new_prices and price > 0:
                     new_prices[code] = price
-                    price_sources[code] = "M"  # مکس
+                    price_sources[code] = "M"
         except Exception as e:
             logger.warning("MEXC spot fetch failed: %s", e)
+
+        # 7) CoinGecko (آخرین راه‌حل)
+        try:
+            missing_codes = [code for code in COIN_CODES if code not in new_prices]
+            if missing_codes:
+                gecko_prices = await asyncio.to_thread(self._get_coingecko_prices, missing_codes)
+                for code, price in gecko_prices.items():
+                    if code not in new_prices and price > 0:
+                        new_prices[code] = price
+                        price_sources[code] = "C"   # CoinGecko
+        except Exception as e:
+            logger.warning("CoinGecko fetch failed: %s", e)
 
         # fallback به آخرین کندل کوکوین
         for code in COIN_CODES:
@@ -523,6 +530,68 @@ class MarketDataCache:
         except Exception as e:
             logger.warning("MEXC spot tickers failed: %s", e)
             return {}
+
+    def _get_coingecko_prices(self, codes):
+        """
+        دریافت قیمت از CoinGecko برای ارزهایی که در صرافی‌ها موجود نیستند.
+        """
+        prices = {}
+        try:
+            # CoinGecko رایگان است اما نرخ محدود دارد؛ درخواست ساده
+            ids_map = {
+                "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "BNB": "binancecoin",
+                "XRP": "ripple", "ADA": "cardano", "DOGE": "dogecoin", "AVAX": "avalanche-2",
+                "DOT": "polkadot", "LINK": "chainlink", "LTC": "litecoin", "BCH": "bitcoin-cash",
+                "ETC": "ethereum-classic", "XLM": "stellar", "ATOM": "cosmos", "FIL": "filecoin",
+                "UNI": "uniswap", "AAVE": "aave", "TRX": "tron", "NEAR": "near",
+                "ARB": "arbitrum", "APT": "aptos", "SUI": "sui", "PEPE": "pepe",
+                "WIF": "dogwifcoin", "FLOKI": "floki", "SHIB": "shiba-inu", "TIA": "celestia",
+                "SEI": "sei-network", "INJ": "injective-protocol", "KAS": "kaspa", "OP": "optimism",
+                "RUNE": "thorchain", "JUP": "jupiter-exchange-solana", "PYTH": "pyth-network",
+                "STX": "blockstack", "GRT": "the-graph", "SAND": "the-sandbox", "MANA": "decentraland",
+                "GALA": "gala", "APE": "apecoin", "MINA": "mina-protocol", "LUNC": "terra-luna-classic",
+                "COMP": "compound-governance-token", "AXL": "axelar", "BLUR": "blur", "AR": "arweave",
+                "FLOW": "flow", "XTZ": "tezos", "THETA": "theta-token", "CHZ": "chiliz",
+                "ZEC": "zcash", "DASH": "dash", "SUSHI": "sushi", "CRV": "curve-dao-token",
+                "1INCH": "1inch", "ENJ": "enjincoin", "GMT": "stepn", "IMX": "immutable-x",
+                "LDO": "lido-dao", "DYDX": "dydx-chain", "API3": "api3", "SNX": "havven",
+                "VET": "vechain", "CAKE": "pancakeswap-token", "PENDLE": "pendle", "TAO": "bittensor",
+                "RENDER": "render-token", "POL": "polygon-ecosystem-token", "MAGIC": "magic",
+                "CFX": "conflux-token", "WLD": "worldcoin-wld", "ENS": "ethereum-name-service",
+                "ONE": "harmony", "ZRX": "0x", "AXS": "axie-infinity", "HBAR": "hedera-hashgraph",
+                "CRO": "crypto-com-chain", "HMSTR": "hamster-kombat", "NOT": "notcoin",
+                "DOGS": "dogs", "PUMP": "pump", "S": "sonic", "SKY": "sky",
+                "HYPE": "hyperliquid", "ONDO": "ondo-finance", "XAUT": "tether-gold",
+                "ENA": "ethena", "STORJ": "storj", "TON": "the-open-network", "XMR": "monero",
+                "NEO": "neo", "QTUM": "qtum", "ZIL": "zilliqa", "BAT": "basic-attention-token",
+                "ALGO": "algorand", "ICP": "internet-computer", "EGLD": "elrond-erd-2",
+                "KSM": "kusama", "KAVA": "kava", "BAND": "band-protocol", "OCEAN": "ocean-protocol",
+                "FET": "fetch-ai", "AGIX": "singularitynet", "LRC": "loopring", "JASMY": "jasmycoin",
+                "ORDI": "ordinals", "1000SATS": "sats", "AI": "sleepless-ai", "MKR": "maker",
+                "RAY": "raydium", "HNT": "helium", "CORE": "core-dao",
+            }
+            ids = [ids_map[code] for code in codes if code in ids_map]
+            if not ids:
+                return prices
+            # CoinGecko سقف تعداد درخواست دارد؛ ساده‌سازی
+            url = "https://api.coingecko.com/api/v3/simple/price"
+            params = {
+                "ids": ",".join(ids),
+                "vs_currencies": "usd",
+            }
+            r = requests.get(url, params=params, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            reverse_map = {v: k for k, v in ids_map.items()}
+            for cg_id, info in data.items():
+                if cg_id in reverse_map:
+                    code = reverse_map[cg_id]
+                    price = info.get("usd")
+                    if price:
+                        prices[code] = float(price)
+        except Exception as e:
+            logger.warning("CoinGecko fetch failed: %s", e)
+        return prices
 
     async def _fetch_ohlcv_symbol(self, code, timeframe, limit=1000):
         symbol = self.symbol_for_code(code)
@@ -1598,7 +1667,7 @@ def format_prices_pretty(prices, chat_id):
         if status == "SWAP OK" and code in prices and prices[code] is not None:
             source_symbol = price_sources.get(code, "K")
             source_emoji = {
-                "B": "🅑", "W": "🅦", "K": "🅚", "M": "🅜"
+                "B": "🅑", "W": "🅦", "K": "🅚", "M": "🅜", "C": "🅒"
             }.get(source_symbol, "🅚")
             lines.append(f"{COIN_ICONS.get(code, '🔸')} {code}  →  {fmt_amount(prices[code], chat_id)}  {source_emoji}")
         elif status == "SWAP OK":
@@ -1735,7 +1804,7 @@ def kb_coins():
         else: label = f"{COIN_ICONS.get(code, '🔸')} {code} ⚪"
         buttons.append(InlineKeyboardButton(label, callback_data=f"coin_{code}"))
     rows = build_grid_keyboard(buttons, COINS_GRID_COLUMNS)
-    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")])   # دکمه کشیده
     return InlineKeyboardMarkup(rows)
 
 def kb_coin_detail(code, is_fav, is_admin_role=False):
