@@ -1,13 +1,11 @@
 """
-Telegram Signal Bot V17 - KuCoin Futures (Pro Edition)
-- صرافی KuCoin Futures
-- فیلترهای پیشرفته: ADX، حداقل R/R، تأیید چند تایم‌فریمی، حمایت/مقاومت
-- مدیریت ریسک: اهرم محدود، قیمت لیکوئیدیشن
-- شاخص ترس و طمع (Fear & Greed Index)
-- تقویم رویدادهای کریپتو (CoinGecko) + اطلاع‌رسانی خودکار
-- داشبورد تحلیلی: آمار عملکرد، سیگنال‌های باز، برد/باخت
-- ثبت و پیگیری سیگنال‌ها برای ارزیابی (Backtest/Forward Test)
-- رفع خطاهای قبلی، بهینه‌سازی Rate Limit
+Telegram Signal Bot V18 - KuCoin Futures (Ultimate Edition)
+- گزارش دوره‌ای با نمودارهای عملکرد
+- نمودارهای تحلیلی در وضعیت لحظه‌ای، ۷ روز و گزارش‌ها
+- هشدار نهنگ‌ها (Whale Alerts)
+- گزارش‌گیری پیشرفته (Sharpe, Drawdown, Expectancy, Risk of Ruin)
+- واگرایی MACD و RSI
+- تمامی امکانات نسخه‌های قبلی
 """
 
 import asyncio
@@ -21,6 +19,7 @@ from typing import Optional, List, Dict
 
 import ccxt
 import jdatetime
+import numpy as np
 import pandas as pd
 import requests
 from dotenv import load_dotenv
@@ -28,8 +27,14 @@ from ta.momentum import RSIIndicator, StochRSIIndicator, ROCIndicator, WilliamsR
 from ta.trend import EMAIndicator, MACD, ADXIndicator, CCIIndicator
 from ta.volatility import AverageTrueRange, BollingerBands
 from ta.volume import VolumeWeightedAveragePrice
-from telegram import BotCommand, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import BotCommand, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+
+import matplotlib
+matplotlib.use("Agg")  # Use non-interactive backend
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from io import BytesIO
 
 try:
     from zoneinfo import ZoneInfo
@@ -56,8 +61,9 @@ ADMIN_USER_IDS = {
 ALWAYS_ALLOWED_USER_IDS = {
     int(x) for x in os.getenv("ALWAYS_ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()
 }
+WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 
-# ---------- 80 Coins for KuCoin Futures ----------
+# ---------- 80 Coins (unchanged) ----------
 COIN_ICONS = {
     "BTC": "₿", "ETH": "Ξ", "BNB": "🔶", "SOL": "◎", "XRP": "✕",
     "DOGE": "🐕", "ADA": "🔷", "AVAX": "🔺", "DOT": "⚪", "LINK": "🔗",
@@ -86,16 +92,16 @@ TIMEFRAME = "1h"
 TIMEFRAMES = ("1h", "4h", "1d")
 CHECK_INTERVAL_SECONDS = 15 * 60
 TOP_SIGNALS_COUNT = 5
-ADX_TREND_THRESHOLD = 16       # آستانه قبلی، جدید از ADX_MIN_TREND استفاده می‌کنیم
-ADX_MIN_TREND = 20              # حداقل ADX برای سیگنال
+ADX_TREND_THRESHOLD = 16
+ADX_MIN_TREND = 20
 MIN_SIGNAL_CONFIDENCE = 60
 MIN_DIRECTION_GAP = 5
-MIN_RR = 1.5                   # حداقل نسبت ریسک به بازده
+MIN_RR = 1.5
 ENTRY_LADDER_ATR = [0.0, 0.6, 1.2]
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 SL_ATR_MULT = 2.0
 TP_ATR_MULT = 4.0
-MAX_LEVERAGE_HIGH = 4          # اهرم برای اطمینان‌های بالا
+MAX_LEVERAGE_HIGH = 4
 MAX_LEVERAGE_MED = 3
 MAX_LEVERAGE_LOW = 2
 TELEGRAM_MSG_LIMIT = 3500
@@ -104,7 +110,9 @@ COINS_GRID_COLUMNS = 4
 AUTO_KEEP_LAST_N = 3
 TRAILING_CHECK_SECONDS = 5 * 60
 FEAR_GREED_TTL = 3600
-EVENTS_CHECK_SECONDS = 6 * 3600   # هر 6 ساعت
+EVENTS_CHECK_SECONDS = 6 * 3600
+WHALE_CHECK_SECONDS = 30 * 60   # هر ۳۰ دقیقه
+WHALE_MIN_AMOUNT_BTC = 1000     # حداقل ۱۰۰۰ بیت‌کوین
 
 # Category weights (sum = 100)
 WEIGHT_TREND = 25
@@ -144,27 +152,28 @@ auto_message_history = {}
 overlay_messages = {}
 interactive_screen_messages = {}
 _irt_rate_cache = {"value": None, "ts": 0.0, "source": None}
-active_signals = {}   # chat_id -> { code: {"plan": TradePlan, "stage": int, "last_notified": int} }
+active_signals = {}
 START_TIME = time.time()
 TOTAL_SIGNALS_GENERATED = 0
 LAST_REPORT_TIME = None
 
 # ---------- Performance Tracking ----------
-signal_history: List[Dict] = []   # list of dicts with details
+signal_history: List[Dict] = []
 fear_greed_cache = {"value": None, "ts": 0.0, "classification": ""}
 upcoming_events_cache = {"events": [], "ts": 0.0}
+whale_alert_cache = {"last_id": None, "ts": 0.0}
 
 @dataclass
 class TradePlan:
     symbol: str
-    direction: str          # "LONG" or "SHORT"
+    direction: str
     trend: str
     rsi: float
     current_price: float = 0.0
     confidence: float = 0.0
     entries: list = field(default_factory=list)
-    stop_losses: list = field(default_factory=list)  # initial SL
-    take_profits: list = field(default_factory=list)  # TP1, TP2, TP3
+    stop_losses: list = field(default_factory=list)
+    take_profits: list = field(default_factory=list)
     funding_rate: float = 0.0
     leverage: int = 1
     liquidation_price: float = 0.0
@@ -178,12 +187,13 @@ class TradePlan:
     breakout_down: bool = False
     bullish_div: bool = False
     bearish_div: bool = False
-    # For tracking
+    macd_bullish_div: bool = False
+    macd_bearish_div: bool = False
     entry_price: float = 0.0
     sl_price: float = 0.0
     tp_prices: list = field(default_factory=list)
     timestamp: float = 0.0
-    status: str = "open"   # open, tp1_hit, tp2_hit, tp3_hit, sl_hit, closed
+    status: str = "open"
 
 class MarketDataCache:
     _instance = None
@@ -582,8 +592,13 @@ class MarketDataCache:
             breakout_up = price > resistance * 1.001
             breakout_down = price < support * 0.999
 
-            bullish_div = (price < price_prev and rsi.iloc[-1] > rsi_prev)
-            bearish_div = (price > price_prev and rsi.iloc[-1] < rsi_prev)
+            # RSI Divergence
+            rsi_bullish_div = (price < price_prev and rsi.iloc[-1] > rsi_prev)
+            rsi_bearish_div = (price > price_prev and rsi.iloc[-1] < rsi_prev)
+
+            # MACD Divergence (using histogram)
+            macd_bullish_div = (price < price_prev and macd_hist.iloc[-1] > macd_hist_prev)
+            macd_bearish_div = (price > price_prev and macd_hist.iloc[-1] < macd_hist_prev)
 
             values = {
                 "price": price,
@@ -631,8 +646,10 @@ class MarketDataCache:
                 "resistance": resistance,
                 "breakout_up": breakout_up,
                 "breakout_down": breakout_down,
-                "bullish_div": bullish_div,
-                "bearish_div": bearish_div,
+                "bullish_div": rsi_bullish_div,
+                "bearish_div": rsi_bearish_div,
+                "macd_bullish_div": macd_bullish_div,
+                "macd_bearish_div": macd_bearish_div,
             }
             if any(pd.isna(v) for v in values.values() if isinstance(v, (int, float))):
                 return None
@@ -657,7 +674,7 @@ class MarketDataCache:
 
 cache = MarketDataCache()
 
-# ---------- Helper functions ----------
+# ---------- Helper functions (same as before, but including new ones) ----------
 def is_allowed(user_id):
     if user_id in ALWAYS_ALLOWED_USER_IDS or user_id in ADMIN_USER_IDS:
         return True
@@ -831,7 +848,6 @@ async def check_and_notify_events(app):
     upcoming = []
     for ev in events:
         event_time = ev["time"]
-        # if event within next 24h
         if event_time.tzinfo is None:
             event_time = event_time.replace(tzinfo=TEHRAN_TZ)
         delta = event_time - now_utc
@@ -847,7 +863,197 @@ async def check_and_notify_events(app):
             except Exception as e:
                 logger.warning("Event notify failed: %s", e)
 
-# ---------- Scoring ----------
+# ---------- Whale Alerts ----------
+def fetch_whale_alerts():
+    """
+    Fetch large transactions. Uses Whale Alert API if key provided, else Blockchain.com.
+    Returns list of dicts: {amount_btc, symbol, timestamp}
+    """
+    try:
+        if WHALE_ALERT_API_KEY:
+            # Whale Alert API
+            url = f"https://api.whale-alert.io/v1/transactions?api_key={WHALE_ALERT_API_KEY}&min_value={WHALE_MIN_AMOUNT_BTC * 1000000}&limit=10"
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            data = r.json().get("transactions", [])
+            alerts = []
+            for tx in data:
+                alerts.append({
+                    "amount_btc": float(tx.get("amount", 0)),
+                    "symbol": tx.get("symbol", "BTC"),
+                    "timestamp": time.time()
+                })
+            return alerts
+        else:
+            # Fallback: Blockchain.com unconfirmed transactions (large BTC only)
+            url = "https://blockchain.info/unconfirmed-transactions?format=json"
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            txs = r.json().get("txs", [])
+            alerts = []
+            for tx in txs:
+                total_out = sum(out.get("value", 0) for out in tx.get("out", [])) / 1e8  # satoshi to BTC
+                if total_out >= WHALE_MIN_AMOUNT_BTC:
+                    alerts.append({
+                        "amount_btc": total_out,
+                        "symbol": "BTC",
+                        "timestamp": time.time()
+                    })
+            return alerts[:5]
+    except Exception as e:
+        logger.warning("Whale alert fetch failed: %s", e)
+        return []
+
+async def whale_monitor_loop(app):
+    await asyncio.sleep(60)
+    while True:
+        try:
+            if subscribed_chat_ids:
+                alerts = fetch_whale_alerts()
+                if alerts:
+                    # Send once per cycle
+                    for chat_id in subscribed_chat_ids:
+                        text = "🐋 *هشدار حرکت نهنگ‌ها*\n" + DIVIDER + "\n"
+                        for alert in alerts[:5]:
+                            text += f"• {alert['amount_btc']:.0f} {alert['symbol']} جابه‌جا شد\n"
+                        try:
+                            await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
+                        except Exception as e:
+                            logger.warning("Whale notify failed: %s", e)
+        except Exception as e:
+            logger.exception("Whale monitor error: %s", e)
+        await asyncio.sleep(WHALE_CHECK_SECONDS)
+
+# ---------- Advanced Reporting ----------
+def compute_advanced_stats(signal_history):
+    """Calculate advanced performance metrics from signal_history."""
+    if not signal_history:
+        return {
+            "sharpe": 0, "max_drawdown": 0, "expectancy": 0,
+            "risk_of_ruin": 0, "total_trades": 0, "win_rate": 0,
+            "profit_factor": 0, "avg_confidence": 0
+        }
+    returns = []
+    for rec in signal_history:
+        if rec["status"] == "tp3_hit":
+            returns.append(3 * (rec["tp_prices"][2] - rec["entry_price"]))
+        elif rec["status"] == "tp2_hit":
+            returns.append(2 * (rec["tp_prices"][1] - rec["entry_price"]))
+        elif rec["status"] == "tp1_hit":
+            returns.append(1 * (rec["tp_prices"][0] - rec["entry_price"]))
+        elif rec["status"] == "sl_hit":
+            returns.append(rec["entry_price"] - rec["sl_price"])
+        # open trades ignored for now
+    if not returns:
+        return {
+            "sharpe": 0, "max_drawdown": 0, "expectancy": 0,
+            "risk_of_ruin": 0, "total_trades": 0, "win_rate": 0,
+            "profit_factor": 0, "avg_confidence": 0
+        }
+    returns = np.array(returns)
+    wins = [r for r in returns if r > 0]
+    losses = [r for r in returns if r <= 0]
+    win_rate = len(wins) / len(returns) * 100
+    avg_return = np.mean(returns)
+    std_return = np.std(returns) if len(returns) > 1 else 1e-9
+    sharpe = (avg_return / std_return) * np.sqrt(365) if std_return != 0 else 0
+    # Max drawdown on cumulative sum
+    cumulative = np.cumsum(returns)
+    max_dd = 0
+    peak = cumulative[0]
+    for val in cumulative:
+        if val > peak:
+            peak = val
+        dd = peak - val
+        if dd > max_dd:
+            max_dd = dd
+    expectancy = avg_return
+    # Risk of ruin (simplified)
+    risk_of_ruin = 0
+    if len(losses) > 0:
+        risk_of_ruin = (1 - (len(wins)/len(returns))) ** 10 * 100
+    profit_factor = (sum(wins) / abs(sum(losses))) if losses else 999
+    avg_confidence = np.mean([rec["confidence"] for rec in signal_history]) if signal_history else 0
+    return {
+        "sharpe": sharpe,
+        "max_drawdown": max_dd,
+        "expectancy": expectancy,
+        "risk_of_ruin": risk_of_ruin,
+        "total_trades": len(returns),
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "avg_confidence": avg_confidence,
+    }
+
+def generate_performance_chart(signal_history):
+    """Generate a performance chart (cumulative returns) and return BytesIO."""
+    if not signal_history:
+        return None
+    returns = []
+    for rec in signal_history:
+        if rec["status"] == "tp3_hit":
+            returns.append(3 * (rec["tp_prices"][2] - rec["entry_price"]))
+        elif rec["status"] == "tp2_hit":
+            returns.append(2 * (rec["tp_prices"][1] - rec["entry_price"]))
+        elif rec["status"] == "tp1_hit":
+            returns.append(1 * (rec["tp_prices"][0] - rec["entry_price"]))
+        elif rec["status"] == "sl_hit":
+            returns.append(rec["entry_price"] - rec["sl_price"])
+    if not returns:
+        return None
+    cum_returns = np.cumsum(returns)
+    plt.figure(figsize=(10, 5))
+    plt.plot(cum_returns, marker='o', linestyle='-', color='blue')
+    plt.title("Cumulative PnL")
+    plt.xlabel("Trade Number")
+    plt.ylabel("Profit / Loss (USDT)")
+    plt.grid(True)
+    buf = BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close()
+    buf.seek(0)
+    return buf
+
+# ---------- Chart generation for price ----------
+def generate_price_chart(code, timeframe="1h"):
+    df = cache.ohlcv.get(timeframe, {}).get(code)
+    if df is None or df.empty:
+        return None
+    close = df["close"]
+    ema20 = EMAIndicator(close, window=20).ema_indicator()
+    ema50 = EMAIndicator(close, window=50).ema_indicator()
+    rsi = RSIIndicator(close, window=14).rsi()
+    macd = MACD(close, window_slow=26, window_fast=12, window_sign=9)
+    macd_hist = macd.macd_diff()
+
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    # Price and EMAs
+    ax1.plot(df["timestamp"], close, label="Close", color='black')
+    ax1.plot(df["timestamp"], ema20, label="EMA20", color='blue')
+    ax1.plot(df["timestamp"], ema50, label="EMA50", color='red')
+    ax1.legend()
+    ax1.set_title(f"{code} Price & EMAs")
+    ax1.grid(True)
+    # RSI
+    ax2.plot(df["timestamp"], rsi, label="RSI", color='purple')
+    ax2.axhline(70, linestyle='--', color='red', alpha=0.5)
+    ax2.axhline(30, linestyle='--', color='green', alpha=0.5)
+    ax2.legend()
+    ax2.set_title("RSI")
+    ax2.grid(True)
+    # MACD Histogram
+    ax3.bar(df["timestamp"], macd_hist, label="MACD Hist", color='gray')
+    ax3.legend()
+    ax3.set_title("MACD Histogram")
+    ax3.grid(True)
+    plt.tight_layout()
+    buf = BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close()
+    buf.seek(0)
+    return buf
+
+# ---------- Scoring (updated with MACD divergence) ----------
 def category_scores(direction, ind):
     long_side = direction == "LONG"
     trend = 0
@@ -876,6 +1082,11 @@ def category_scores(direction, ind):
     if roc_ok: momentum += 5
     if cci_ok: momentum += 4
     if williams_ok: momentum += 4
+    # Divergence bonus
+    if long_side and (ind["bullish_div"] or ind["macd_bullish_div"]):
+        momentum += 3
+    elif not long_side and (ind["bearish_div"] or ind["macd_bearish_div"]):
+        momentum += 3
     momentum = min(momentum, 25)
 
     volume = 0
@@ -898,7 +1109,6 @@ def category_scores(direction, ind):
     volatility = min(volatility, 15)
 
     htf = 0
-    # Stronger HTF requirement: both 4h and daily must align
     if ind["higher_tf_trend_up"] is not None and ind["daily_trend_up"] is not None:
         if long_side:
             if ind["higher_tf_trend_up"] and ind["daily_trend_up"]:
@@ -924,14 +1134,11 @@ def decide_direction(ind):
     long_base = ind["macd_hist"] > 0 and ind["plus_di"] >= ind["minus_di"]
     short_base = ind["macd_hist"] < 0 and ind["minus_di"] >= ind["plus_di"]
 
-    # Additional filters
     adx_ok = ind["adx"] >= ADX_MIN_TREND
     if not adx_ok:
         return None, max(long_score, short_score), None
 
-    # Strong HTF alignment required: if opposite, block
     if long_base and long_score >= MIN_SIGNAL_CONFIDENCE and long_score >= short_score + MIN_DIRECTION_GAP:
-        # Check HTF
         if ind["higher_tf_trend_up"] is False or ind["daily_trend_up"] is False:
             return None, long_score, long_scores
         return "LONG", long_score, long_scores
@@ -959,6 +1166,7 @@ def signal_reasons(direction, ind):
         if ind["cci"] > 0: reasons.append("CCI مثبت")
         if ind["breakout_up"]: reasons.append("شکست مقاومت (Breakout)")
         if ind["bullish_div"]: reasons.append("واگرایی مثبت RSI")
+        if ind["macd_bullish_div"]: reasons.append("واگرایی مثبت MACD")
         if ind["rsi"] >= 68: warnings.append(f"RSI = {ind['rsi']:.1f} — نزدیک اشباع خرید")
         if ind["williams_r"] > -20: warnings.append(f"Williams %R = {ind['williams_r']:.1f} — اشباع خرید")
     else:
@@ -977,6 +1185,7 @@ def signal_reasons(direction, ind):
         if ind["cci"] < 0: reasons.append("CCI منفی")
         if ind["breakout_down"]: reasons.append("شکست حمایت (Breakdown)")
         if ind["bearish_div"]: reasons.append("واگرایی منفی RSI")
+        if ind["macd_bearish_div"]: reasons.append("واگرایی منفی MACD")
         if ind["rsi"] <= 32: warnings.append(f"RSI = {ind['rsi']:.1f} — نزدیک اشباع فروش")
         if ind["williams_r"] < -80: warnings.append(f"Williams %R = {ind['williams_r']:.1f} — اشباع فروش")
 
@@ -1005,7 +1214,6 @@ def build_ladder_weighted(ind, direction):
     tp_multipliers = [2.0, 3.0, 4.0]
     take_profits = [avg_entry + atr * m if direction == "LONG" else avg_entry - atr * m for m in tp_multipliers]
 
-    # Use support/resistance for stop loss
     if direction == "LONG":
         initial_stop = min(avg_entry - SL_ATR_MULT * atr, ind["support"] * 0.995)
     else:
@@ -1064,13 +1272,11 @@ async def generate_trade_plan(code):
     if not direction:
         return None
     levels = build_ladder_weighted(ind, direction)
-    # Check RR
     if levels["rr"] < MIN_RR:
         return None
     funding = await cache.get_funding_rate(code)
     oi, oi_change = await cache.get_open_interest_info(code)
 
-    # Fear & Greed adjustment
     fg_value, _ = await get_fear_greed()
     if fg_value is not None:
         if direction == "LONG" and fg_value > 80:
@@ -1078,7 +1284,6 @@ async def generate_trade_plan(code):
         elif direction == "SHORT" and fg_value < 20:
             confidence -= 5
 
-    # Funding penalty
     if direction == "LONG" and funding > 0.05:
         confidence -= 5
     elif direction == "LONG" and funding > 0.1:
@@ -1127,12 +1332,13 @@ async def generate_trade_plan(code):
         breakout_down=ind["breakout_down"],
         bullish_div=ind["bullish_div"],
         bearish_div=ind["bearish_div"],
+        macd_bullish_div=ind["macd_bullish_div"],
+        macd_bearish_div=ind["macd_bearish_div"],
         entry_price=entry_avg,
         sl_price=levels["stop_losses"][0],
         tp_prices=levels["take_profits"],
         timestamp=time.time(),
     )
-    # Record signal
     record_signal(plan)
     return plan
 
@@ -1148,7 +1354,6 @@ def record_signal(plan):
         "status": "open",
     }
     signal_history.append(record)
-    # Keep only last 100 records to avoid memory issues
     if len(signal_history) > 100:
         signal_history.pop(0)
 
@@ -1178,30 +1383,9 @@ def update_signal_status(symbol, current_price):
             elif current_price <= rec["tp_prices"][0]:
                 rec["status"] = "tp1_hit"
 
-# ---------- Dashboard ----------
+# ---------- Advanced Dashboard ----------
 def get_dashboard_stats():
-    total = len(signal_history)
-    open_signals = sum(1 for r in signal_history if r["status"] == "open")
-    wins = sum(1 for r in signal_history if r["status"].startswith("tp"))
-    losses = sum(1 for r in signal_history if r["status"] == "sl_hit")
-    win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
-    avg_confidence = sum(r["confidence"] for r in signal_history) / total if total > 0 else 0
-    # Profit factor approximation: sum of winners reward / losers risk (using TP3 as winner target)
-    profit_factor = 0
-    if losses > 0:
-        gross_profit = sum(3 * (r["tp_prices"][2] - r["entry_price"]) for r in signal_history if r["status"].startswith("tp"))
-        gross_loss = sum(abs(r["entry_price"] - r["sl_price"]) for r in signal_history if r["status"] == "sl_hit")
-        if gross_loss > 0:
-            profit_factor = gross_profit / gross_loss
-    return {
-        "total": total,
-        "open": open_signals,
-        "wins": wins,
-        "losses": losses,
-        "win_rate": win_rate,
-        "profit_factor": profit_factor,
-        "avg_confidence": avg_confidence,
-    }
+    return compute_advanced_stats(signal_history)
 
 # ---------- Formatting functions ----------
 def format_main_signal(plan, code, chat_id):
@@ -1264,7 +1448,7 @@ def format_technical_details(code, plan, ind, chat_id):
     )
     return rtl_lines(text)
 
-# ---------- Instant status ----------
+# ---------- Instant status (with chart) ----------
 async def generate_status_text_async(code, chat_id):
     ind = await cache.get_indicators(code)
     if not ind:
@@ -1326,7 +1510,7 @@ async def generate_status_text_async(code, chat_id):
         )
     return rtl_lines(header + body + footer + f"\n{DIVIDER}\n⚠️ این تحلیل تکنیکال است و تضمین سود یا توصیه مالی نیست.")
 
-# ---------- Weekly summary ----------
+# ---------- Weekly summary with chart ----------
 async def generate_weekly_summary_async(code, chat_id):
     week_df = await cache.get_weekly_data(code)
     if week_df is None or len(week_df) < 2:
@@ -1517,6 +1701,7 @@ def kb_main(user_id):
         [InlineKeyboardButton("💰 قیمت لحظه‌ای", callback_data="menu_prices"), InlineKeyboardButton("🪙 انتخاب ارز", callback_data="menu_coins")],
         [InlineKeyboardButton("📊 همه پیشنهادات", callback_data="menu_all"), InlineKeyboardButton("🔄 شروع مجدد", callback_data="restart_currency")],
         [InlineKeyboardButton("📈 داشبورد", callback_data="dashboard"), InlineKeyboardButton("📅 رویدادها", callback_data="events")],
+        [InlineKeyboardButton("🧾 گزارش دوره‌ای", callback_data="periodic_report")],
     ]
     if is_admin(user_id):
         rows.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel"), InlineKeyboardButton("\u2063", callback_data="noop")])
@@ -1587,6 +1772,12 @@ def kb_auto_report(top_plans):
     rows.append([InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
+def kb_periodic_report():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 هفتگی", callback_data="report_weekly"), InlineKeyboardButton("📅 ماهانه", callback_data="report_monthly")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")],
+    ])
+
 def welcome_text():
     return rtl_lines(
         "🌟 به سیگنالستان خوش اومدی! 🌟\n"
@@ -1607,6 +1798,7 @@ async def finish_start(context, chat_id, user_id):
         BotCommand("status", "وضعیت سیستم"),
         BotCommand("dashboard", "داشبورد تحلیلی"),
         BotCommand("news", "رویدادهای پیش رو"),
+        BotCommand("report", "گزارش دوره‌ای"),
         BotCommand("stop", "لغو اشتراک"),
     ] if is_admin(user_id) else [BotCommand("menu", "منوی اصلی")]
     await context.bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=chat_id))
@@ -1670,6 +1862,37 @@ async def news_monitor_loop(app):
         except Exception as e:
             logger.exception("News monitor error: %s", e)
         await asyncio.sleep(EVENTS_CHECK_SECONDS)
+
+# ---------- Periodic report generation ----------
+async def send_periodic_report(app, period="weekly"):
+    stats = get_dashboard_stats()
+    fg_value, fg_class = await get_fear_greed()
+    # Generate chart
+    chart_buf = generate_performance_chart(signal_history)
+    text = (
+        f"📊 *گزارش { 'هفتگی' if period == 'weekly' else 'ماهانه' }*\n"
+        f"🕒 {shamsi_now()}\n{DIVIDER}\n"
+        f"🔢 تعداد کل سیگنال‌ها: {stats['total_trades']}\n"
+        f"✅ نرخ برد: {stats['win_rate']:.1f}%\n"
+        f"💰 فاکتور سود: {stats['profit_factor']:.2f}\n"
+        f"📈 میانگین سود هر معامله (Expectancy): {stats['expectancy']:.2f} USDT\n"
+        f"📉 بیشترین افت سرمایه (Max Drawdown): {stats['max_drawdown']:.2f} USDT\n"
+        f"📊 نسبت شارپ: {stats['sharpe']:.2f}\n"
+        f"⚠️ ریسک ورشکستگی: {stats['risk_of_ruin']:.1f}%\n"
+        f"🎯 میانگین اطمینان سیگنال‌ها: {stats['avg_confidence']:.1f}%\n"
+        f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
+    )
+    if chart_buf:
+        try:
+            await app.bot.send_photo(chat_id=subscribed_chat_ids[0] if subscribed_chat_ids else None, photo=chart_buf, caption=text, parse_mode="Markdown")
+        except Exception as e:
+            logger.error("Periodic report photo failed: %s", e)
+    else:
+        for chat_id in subscribed_chat_ids:
+            try:
+                await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
+            except Exception as e:
+                logger.warning("Periodic report send failed: %s", e)
 
 # ---------- Command handlers ----------
 async def start(update, context):
@@ -1737,12 +1960,15 @@ async def dashboard(update, context):
     fg_value, fg_class = await get_fear_greed()
     text = (
         f"📈 *داشبورد تحلیلی*\n🕒 {shamsi_now()}\n{DIVIDER}\n"
-        f"🔢 کل سیگنال‌ها: {stats['total']}\n"
-        f"⏳ سیگنال‌های باز: {stats['open']}\n"
+        f"🔢 کل سیگنال‌ها: {stats['total_trades']}\n"
         f"✅ بردها: {stats['wins']}\n"
         f"❌ باخت‌ها: {stats['losses']}\n"
         f"📊 نرخ برد: {stats['win_rate']:.1f}%\n"
         f"💰 فاکتور سود: {stats['profit_factor']:.2f}\n"
+        f"📈 Expectancy: {stats['expectancy']:.2f} USDT\n"
+        f"📉 Max Drawdown: {stats['max_drawdown']:.2f} USDT\n"
+        f"📊 Sharpe Ratio: {stats['sharpe']:.2f}\n"
+        f"⚠️ Risk of Ruin: {stats['risk_of_ruin']:.1f}%\n"
         f"🎯 میانگین اطمینان: {stats['avg_confidence']:.1f}%\n"
         f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
         f"{DIVIDER}\n"
@@ -1765,6 +1991,10 @@ async def news(update, context):
     for ev in upcoming[:10]:
         text += f"• {ev['name']} — {shamsi_date(ev['time'])} {ev['time'].strftime('%H:%M')}\n"
     await update.message.reply_text(rtl_lines(text), parse_mode="Markdown")
+
+async def periodic_report_command(update, context):
+    if not await guard(update): return
+    await update.message.reply_text("📊 لطفاً دوره‌ی گزارش را انتخاب کنید:", reply_markup=kb_periodic_report())
 
 def save_state():
     try:
@@ -1822,12 +2052,15 @@ async def button_handler(update, context):
         fg_value, fg_class = await get_fear_greed()
         text = (
             f"📈 *داشبورد تحلیلی*\n🕒 {shamsi_now()}\n{DIVIDER}\n"
-            f"🔢 کل سیگنال‌ها: {stats['total']}\n"
-            f"⏳ سیگنال‌های باز: {stats['open']}\n"
+            f"🔢 کل سیگنال‌ها: {stats['total_trades']}\n"
             f"✅ بردها: {stats['wins']}\n"
             f"❌ باخت‌ها: {stats['losses']}\n"
             f"📊 نرخ برد: {stats['win_rate']:.1f}%\n"
             f"💰 فاکتور سود: {stats['profit_factor']:.2f}\n"
+            f"📈 Expectancy: {stats['expectancy']:.2f} USDT\n"
+            f"📉 Max Drawdown: {stats['max_drawdown']:.2f} USDT\n"
+            f"📊 Sharpe Ratio: {stats['sharpe']:.2f}\n"
+            f"⚠️ Risk of Ruin: {stats['risk_of_ruin']:.1f}%\n"
             f"🎯 میانگین اطمینان: {stats['avg_confidence']:.1f}%\n"
             f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
             f"{DIVIDER}\n"
@@ -1853,6 +2086,41 @@ async def button_handler(update, context):
                 text += f"• {ev['name']} — {shamsi_date(ev['time'])} {ev['time'].strftime('%H:%M')}\n"
         await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
         set_interactive_screen(chat_id, [query.message.message_id])
+        return
+
+    if data == "periodic_report":
+        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
+        await query.edit_message_text("📊 لطفاً دوره‌ی گزارش را انتخاب کنید:", reply_markup=kb_periodic_report())
+        set_interactive_screen(chat_id, [query.message.message_id])
+        return
+
+    if data == "report_weekly" or data == "report_monthly":
+        period = "weekly" if data == "report_weekly" else "monthly"
+        stats = get_dashboard_stats()
+        fg_value, fg_class = await get_fear_greed()
+        chart_buf = generate_performance_chart(signal_history)
+        text = (
+            f"📊 *گزارش { 'هفتگی' if period == 'weekly' else 'ماهانه' }*\n"
+            f"🕒 {shamsi_now()}\n{DIVIDER}\n"
+            f"🔢 تعداد کل سیگنال‌ها: {stats['total_trades']}\n"
+            f"✅ نرخ برد: {stats['win_rate']:.1f}%\n"
+            f"💰 فاکتور سود: {stats['profit_factor']:.2f}\n"
+            f"📈 میانگین سود هر معامله (Expectancy): {stats['expectancy']:.2f} USDT\n"
+            f"📉 بیشترین افت سرمایه (Max Drawdown): {stats['max_drawdown']:.2f} USDT\n"
+            f"📊 نسبت شارپ: {stats['sharpe']:.2f}\n"
+            f"⚠️ ریسک ورشکستگی: {stats['risk_of_ruin']:.1f}%\n"
+            f"🎯 میانگین اطمینان سیگنال‌ها: {stats['avg_confidence']:.1f}%\n"
+            f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
+        )
+        if chart_buf:
+            try:
+                await query.message.reply_photo(photo=chart_buf, caption=text, parse_mode="Markdown")
+                await query.message.delete()
+            except Exception as e:
+                logger.exception("Failed to send report photo: %s", e)
+                await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
+        else:
+            await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
         return
 
     if data == "menu_prices":
@@ -1915,13 +2183,24 @@ async def button_handler(update, context):
                     await query.edit_message_text(f"💤 فعلاً سیگنال نهایی برای {code} وجود ندارد.\nدلایل احتمالی: ADX پایین، عدم تأیید تایم‌فریم بالا، نسبت R/R کمتر از حد مجاز.", reply_markup=kb_back_main(), parse_mode="Markdown")
                     return
                 main_text = format_main_signal(plan, code, chat_id)
-                msg = await context.bot.send_message(chat_id=chat_id, text=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
+                # Send chart if available
+                chart_buf = generate_price_chart(code, "1h")
+                if chart_buf:
+                    msg = await context.bot.send_photo(chat_id=chat_id, photo=chart_buf, caption=main_text, parse_mode="Markdown")
+                else:
+                    msg = await context.bot.send_message(chat_id=chat_id, text=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
                 overlay_messages[chat_id] = [msg.message_id]
                 if chat_id not in active_signals: active_signals[chat_id] = {}
                 active_signals[chat_id][code] = {"plan": plan, "stage": 0, "last_notified": 0}
             else:
                 text = await asyncio.wait_for(generate_status_text_async(code, chat_id), timeout=30)
-                await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
+                chart_buf = generate_price_chart(code, "1h")
+                if chart_buf:
+                    await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
+                    # Send chart as separate photo
+                    await context.bot.send_photo(chat_id=chat_id, photo=chart_buf)
+                else:
+                    await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
                 set_interactive_screen(chat_id, [query.message.message_id])
         except asyncio.TimeoutError:
             await query.edit_message_text("⏰ دریافت اطلاعات بیش از حد طول کشید.", reply_markup=kb_back_main())
@@ -1958,7 +2237,12 @@ async def button_handler(update, context):
         try:
             await asyncio.wait_for(cache.ensure_symbol_data(code, ("1d",)), timeout=90)
             summary = await asyncio.wait_for(generate_weekly_summary_async(code, chat_id), timeout=30)
-            await query.edit_message_text(split_long_message(summary)[0], reply_markup=kb_weekly(code), parse_mode="Markdown")
+            chart_buf = generate_price_chart(code, "1d")
+            if chart_buf:
+                await query.edit_message_text(split_long_message(summary)[0], reply_markup=kb_weekly(code), parse_mode="Markdown")
+                await context.bot.send_photo(chat_id=chat_id, photo=chart_buf)
+            else:
+                await query.edit_message_text(split_long_message(summary)[0], reply_markup=kb_weekly(code), parse_mode="Markdown")
             set_interactive_screen(chat_id, [query.message.message_id])
         except asyncio.TimeoutError:
             await query.edit_message_text("⏰ دریافت داده‌های هفتگی طول کشید.", reply_markup=kb_back_main())
@@ -2063,11 +2347,13 @@ async def post_init(app):
         BotCommand("status", "وضعیت سیستم"),
         BotCommand("dashboard", "داشبورد تحلیلی"),
         BotCommand("news", "رویدادهای پیش رو"),
+        BotCommand("report", "گزارش دوره‌ای"),
     ])
     app.create_task(auto_report_loop(app))
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
-    logger.info("Signal Bot V17 (KuCoin Futures Pro) started")
+    app.create_task(whale_monitor_loop(app))
+    logger.info("Signal Bot V18 (Ultimate) started")
 
 def main():
     if not BOT_TOKEN:
@@ -2082,6 +2368,7 @@ def main():
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("dashboard", dashboard))
     app.add_handler(CommandHandler("news", news))
+    app.add_handler(CommandHandler("report", periodic_report_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     logger.info("Bot is running...")
     app.run_polling()
