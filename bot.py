@@ -1,11 +1,11 @@
 """
-Telegram Signal Bot V58 - Institutional Grade with Intelligence Center
+Telegram Signal Bot V59 - Institutional Grade with Intelligence Center
+- کاهش شدید سخت‌گیری برای تولید سیگنال در بازار رنج
+- مرکز هوشمندسازی با دو بخش مجزا (پیشنهادات فعال + تاریخچه)
+- بهبود دکمه‌های بازگشت
 - سیستم یادگیری خودکار و بهینه‌سازی تنظیمات
-- مرکز هوشمندسازی با پیشنهادات و تاریخچه
 - اخبار مهم بازار (نهنگ‌ها + اخبار کریپتو)
 - داده‌های کلان بازار (سلطه BTC، حجم کل)
-- بهینه‌سازی داده‌های تکراری
-- بهبود دکمه‌های بازگشت
 """
 
 import asyncio
@@ -148,9 +148,9 @@ GATEIO_SYMBOL_MAP = {
     "XMR": "XMR_USDT", "XRP": "XRP_USDT",
 }
 
-# ---------- تنظیمات سخت‌گیری کاهش‌یافته ----------
-MIN_SIGNAL_CONFIDENCE = 20
-MIN_DIRECTION_GAP = 2
+# ========== تنظیمات سخت‌گیری بسیار کاهش‌یافته ==========
+MIN_SIGNAL_CONFIDENCE = 10
+MIN_DIRECTION_GAP = 1
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 
 MODE_CONFIGS = {
@@ -162,9 +162,9 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.4, 0.8, 1.2],
         "sl_atr_mult": 0.8,
         "max_leverage": 10,
-        "min_rr": 0.1,
-        "adx_min": 8,
-        "min_confirmations": 2,
+        "min_rr": 0.05,
+        "adx_min": 5,
+        "min_confirmations": 1,
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -175,9 +175,9 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.6, 1.2, 1.8],
         "sl_atr_mult": 1.0,
         "max_leverage": 7,
-        "min_rr": 0.15,
-        "adx_min": 10,
-        "min_confirmations": 3,
+        "min_rr": 0.08,
+        "adx_min": 7,
+        "min_confirmations": 2,
         "check_interval": 10 * 60,
     },
     "standard": {
@@ -188,8 +188,8 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.8, 1.5, 2.5],
         "sl_atr_mult": 1.2,
         "max_leverage": 5,
-        "min_rr": 0.2,
-        "adx_min": 10,
+        "min_rr": 0.10,
+        "adx_min": 8,
         "min_confirmations": 2,
         "check_interval": 30 * 60,
     },
@@ -201,8 +201,8 @@ MODE_CONFIGS = {
         "tp_multipliers": [1.5, 2.5, 4.0],
         "sl_atr_mult": 2.0,
         "max_leverage": 3,
-        "min_rr": 0.3,
-        "adx_min": 12,
+        "min_rr": 0.15,
+        "adx_min": 10,
         "min_confirmations": 3,
         "check_interval": 60 * 60,
     },
@@ -268,7 +268,6 @@ class TradePlan:
     mode: str = "standard"
     layer_results: dict = field(default_factory=dict)
     signal_grade: str = ""
-    # داده‌های اضافی برای یادگیری
     adx_at_time: float = 0.0
     rsi_at_time: float = 0.0
     market_condition: str = ""
@@ -380,9 +379,7 @@ class MarketDataCache:
         df = df.dropna(subset=required).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df if not df.empty else None
 
-    # ---------- داده‌های کلان بازار ----------
     async def update_macro_data(self):
-        """دریافت داده‌های کلان بازار (سلطه BTC، حجم کل)"""
         try:
             url = "https://api.coingecko.com/api/v3/global"
             r = requests.get(url, timeout=10)
@@ -403,7 +400,6 @@ class MarketDataCache:
     def get_macro_data(self):
         return self._macro_cache["data"] if self._macro_cache["data"] else None
 
-    # ---------- قیمت از CoinGecko (پشتیبان) ----------
     def _get_coingecko_prices(self, codes):
         prices = {}
         try:
@@ -451,7 +447,6 @@ class MarketDataCache:
         new_prices = {}
         price_sources.clear()
 
-        # ۱. Gate.io
         gateio_codes = [code for code in target_codes if GATEIO_SYMBOL_MAP.get(code)]
         if gateio_codes:
             try:
@@ -468,7 +463,6 @@ class MarketDataCache:
             except Exception as e:
                 logger.warning(f"Gate.io fetch_tickers failed: {e}")
 
-        # ۲. کوکوین اسپات
         missing = [code for code in target_codes if code not in new_prices]
         if missing:
             try:
@@ -485,7 +479,6 @@ class MarketDataCache:
             except Exception as e:
                 logger.warning(f"KuCoin fetch_tickers failed: {e}")
 
-        # ۳. CoinGecko (پشتیبان نهایی)
         still_missing = [code for code in target_codes if code not in new_prices]
         if still_missing:
             try:
@@ -832,8 +825,7 @@ upcoming_events_cache = {"events": [], "ts": 0.0}
 whale_alert_cache = {"last_id": None, "ts": 0.0}
 news_history: List[Dict] = []
 news_message_ids: Dict[int, List[int]] = {}
-suggestion_history: List[Dict] = []  # تاریخچه پیشنهادات هوشمند
-learning_results: Dict = {}  # نتایج یادگیری
+suggestion_history: List[Dict] = []
 
 last_check_time = {}
 last_sent_signals = {}
@@ -989,9 +981,8 @@ async def get_fear_greed():
         fear_greed_cache.update(value=value, classification=classification, ts=now)
     return value, classification
 
-# ---------- اخبار مهم کریپتو (CryptoPanic) ----------
+# ---------- اخبار مهم کریپتو ----------
 async def fetch_cryptopanic_news():
-    """دریافت اخبار مهم کریپتو از CryptoPanic (فقط تأثیر بالا)"""
     if not CRYPTOPANIC_API_KEY:
         return []
     try:
@@ -1004,14 +995,12 @@ async def fetch_cryptopanic_news():
             title = item.get("title", "")
             if not title:
                 continue
-            # تعیین تأثیر بر اساس برچسب‌ها
             tags = [tag.get("title", "") for tag in item.get("tags", [])]
             impact = "خنثی"
             if "bullish" in str(tags).lower() or "positive" in str(tags).lower():
                 impact = "صعودی 📈"
             elif "bearish" in str(tags).lower() or "negative" in str(tags).lower():
                 impact = "نزولی 📉"
-            # فیلتر فقط اخبار با تأثیر بالا
             if "important" in str(tags).lower() or "high" in str(tags).lower():
                 news_list.append({
                     "title": title[:100],
@@ -1099,12 +1088,8 @@ def fetch_whale_alerts():
         logger.warning("Whale alert fetch failed: %s", e)
         return []
 
-# ---------- اخبار ترکیبی مهم بازار ----------
 async def fetch_important_news():
-    """ترکیب اخبار از همه منابع (فقط تأثیر بالا)"""
     all_news = []
-    
-    # ۱. اخبار نهنگ‌ها
     whale_alerts = fetch_whale_alerts()
     for alert in whale_alerts:
         if "نزولی" in alert["impact"] or "صعودی" in alert["impact"]:
@@ -1121,8 +1106,6 @@ async def fetch_important_news():
                 "source": "whale",
                 "timestamp": alert["timestamp"]
             })
-    
-    # ۲. اخبار کریپتو (CryptoPanic)
     crypto_news = await fetch_cryptopanic_news()
     for item in crypto_news:
         text = f"📰 *{item['title']}*\n📈 تأثیر: {item['impact']}\n📌 منبع: {item['source']}"
@@ -1133,24 +1116,18 @@ async def fetch_important_news():
             "source": "crypto",
             "timestamp": item["timestamp"]
         })
-    
     return all_news
 
 # ---------- سیستم یادگیری و بهینه‌سازی ----------
 def analyze_performance():
-    """تحلیل عملکرد سیگنال‌ها و استخراج تنظیمات بهینه"""
     if len(signal_history) < 10:
         return None
-    
     closed = [s for s in signal_history if s["status"] in ["tp1_hit", "tp2_hit", "tp3_hit", "sl_hit"]]
     if len(closed) < 5:
         return None
-    
     wins = [s for s in closed if s["status"].startswith("tp")]
     losses = [s for s in closed if s["status"] == "sl_hit"]
     win_rate = len(wins) / len(closed) * 100 if closed else 0
-    
-    # تحلیل هر حالت
     mode_performance = {}
     for mode in MODE_CONFIGS.keys():
         mode_signals = [s for s in closed if s.get("mode") == mode]
@@ -1160,17 +1137,9 @@ def analyze_performance():
                 "count": len(mode_signals),
                 "win_rate": len(mode_wins) / len(mode_signals) * 100 if mode_signals else 0
             }
-    
     best_mode = max(mode_performance, key=lambda x: mode_performance[x]["win_rate"]) if mode_performance else "standard"
-    
-    # تحلیل RR
-    rr_values = []
-    for s in closed:
-        if "rr" in s:
-            rr_values.append(s["rr"])
-    
+    rr_values = [s.get("rr", 0) for s in closed if "rr" in s]
     avg_rr = sum(rr_values) / len(rr_values) if rr_values else 0
-    
     return {
         "win_rate": win_rate,
         "best_mode": best_mode,
@@ -1180,19 +1149,15 @@ def analyze_performance():
     }
 
 def generate_optimization_suggestions(analysis):
-    """تولید پیشنهادات بهینه‌سازی بر اساس تحلیل"""
     if not analysis or analysis["total_signals"] < 10:
         return []
-    
     suggestions = []
-    
-    # پیشنهاد بر اساس نرخ برد
     if analysis["win_rate"] < 40:
         suggestions.append({
             "parameter": "min_rr",
             "mode": "standard",
             "current": MODE_CONFIGS["standard"]["min_rr"],
-            "suggested": MODE_CONFIGS["standard"]["min_rr"] - 0.05,
+            "suggested": MODE_CONFIGS["standard"]["min_rr"] - 0.02,
             "reason": f"نرخ برد پایین است ({analysis['win_rate']:.1f}%)، کاهش RR می‌تواند سیگنال‌های بیشتری تولید کند."
         })
     elif analysis["win_rate"] > 70:
@@ -1200,11 +1165,9 @@ def generate_optimization_suggestions(analysis):
             "parameter": "min_rr",
             "mode": "standard",
             "current": MODE_CONFIGS["standard"]["min_rr"],
-            "suggested": MODE_CONFIGS["standard"]["min_rr"] + 0.05,
+            "suggested": MODE_CONFIGS["standard"]["min_rr"] + 0.02,
             "reason": f"نرخ برد بالا است ({analysis['win_rate']:.1f}%)، افزایش RR می‌تواند کیفیت سیگنال‌ها را بهبود بخشد."
         })
-    
-    # پیشنهاد بر اساس بهترین حالت
     if analysis["best_mode"] != "standard":
         suggestions.append({
             "parameter": "mode",
@@ -1213,11 +1176,9 @@ def generate_optimization_suggestions(analysis):
             "suggested": analysis["best_mode"],
             "reason": f"حالت {MODE_CONFIGS[analysis['best_mode']]['label']} عملکرد بهتری دارد (نرخ برد {analysis['mode_performance'][analysis['best_mode']]['win_rate']:.1f}%)."
         })
-    
     return suggestions
 
 async def optimization_loop(app):
-    """حلقه بهینه‌سازی (هر ۶ ساعت)"""
     await asyncio.sleep(60)
     while True:
         try:
@@ -1225,21 +1186,18 @@ async def optimization_loop(app):
             if analysis:
                 suggestions = generate_optimization_suggestions(analysis)
                 if suggestions:
-                    # ذخیره پیشنهاد
                     entry = {
                         "id": f"sug_{int(time.time())}",
                         "timestamp": time.time(),
                         "analysis": analysis,
                         "suggestions": suggestions,
                         "status": "pending",
-                        "expires_at": time.time() + 86400  # ۲۴ ساعت
+                        "expires_at": time.time() + 86400
                     }
                     suggestion_history.append(entry)
                     if len(suggestion_history) > 20:
                         suggestion_history.pop(0)
                     save_state()
-                    
-                    # ارسال پیشنهاد به ادمین‌ها
                     for admin_id in ADMIN_USER_IDS:
                         try:
                             text = (
@@ -1279,63 +1237,51 @@ def kb_suggestion_actions(suggestion_id):
     ])
 
 async def handle_suggestion_action(update, context):
-    """مدیریت تایید/رد پیشنهادات"""
     query = update.callback_query
     await query.answer()
     data = query.data
     suggestion_id = data.split("_", 2)[2]
-    
-    # پیدا کردن پیشنهاد
     target = None
     for sug in suggestion_history:
         if sug["id"] == suggestion_id:
             target = sug
             break
-    
     if not target:
         await query.edit_message_text("❌ پیشنهاد مورد نظر یافت نشد.", reply_markup=kb_back_main())
         return
-    
     if target["status"] != "pending":
         await query.edit_message_text(f"⏳ این پیشنهاد قبلاً {target['status']} شده است.", reply_markup=kb_back_main())
         return
-    
     if data.startswith("apply_suggestion_"):
-        # اعمال تنظیمات
         for sug in target["suggestions"]:
             if sug["parameter"] == "mode":
-                # تغییر حالت پیش‌فرض
                 pass
             elif sug["parameter"] == "min_rr":
                 MODE_CONFIGS[sug["mode"]]["min_rr"] = sug["suggested"]
             elif sug["parameter"] == "min_confirmations":
                 MODE_CONFIGS[sug["mode"]]["min_confirmations"] = sug["suggested"]
-        
         target["status"] = "applied"
         target["applied_at"] = time.time()
         target["result"] = "تنظیمات با موفقیت اعمال شد."
         save_state()
-        
         await query.edit_message_text(
             "✅ *تنظیمات با موفقیت به‌روزرسانی شد.*\n\n"
             f"پیشنهادات اعمال‌شده:\n" + "\n".join([
                 f"• {sug['parameter']}: {sug['current']} → {sug['suggested']}"
                 for sug in target["suggestions"]
             ]),
-            reply_markup=kb_back_main(),
+            reply_markup=kb_back_to_optimization(),
             parse_mode="Markdown"
         )
-    
     elif data.startswith("reject_suggestion_"):
         target["status"] = "rejected"
         target["rejected_at"] = time.time()
         save_state()
         await query.edit_message_text(
             "❌ *پیشنهادات رد شد.*\n\nتنظیمات فعلی حفظ شد.",
-            reply_markup=kb_back_main(),
+            reply_markup=kb_back_to_optimization(),
             parse_mode="Markdown"
         )
-    
     elif data.startswith("details_suggestion_"):
         text = f"📊 *جزئیات پیشنهاد*\n{DIVIDER}\n"
         text += f"📅 تاریخ: {shamsi_date(datetime.fromtimestamp(target['timestamp']))}\n"
@@ -1352,7 +1298,7 @@ async def handle_suggestion_action(update, context):
                 text += f"• {sug['parameter']}: {sug['current']} → {sug['suggested']}\n"
             text += f"  📌 {sug['reason']}\n"
         text += f"\n⏳ وضعیت: {target['status']}"
-        await query.edit_message_text(text, reply_markup=kb_back_main(), parse_mode="Markdown")
+        await query.edit_message_text(text, reply_markup=kb_back_to_optimization(), parse_mode="Markdown")
 
 # ---------- رویدادها ----------
 def fetch_upcoming_events():
@@ -1399,10 +1345,7 @@ async def get_upcoming_events(force=False):
 async def analyze_layers(code, direction, ind, mode, cache_obj):
     config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
     df = cache_obj.ohlcv.get(config["main_tf"], {}).get(code)
-
     results = {}
-
-    # ۱. ساختار بازار
     if df is not None and len(df) > 30:
         high = df["high"].iloc[-20:]
         low = df["low"].iloc[-20:]
@@ -1422,8 +1365,6 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
         results["structure"] = structure_ok
     else:
         results["structure"] = False
-
-    # ۲. هم‌گرایی تایم‌فریم
     main_tf = config["main_tf"]
     confirm_tfs = config["confirm_tfs"]
     mtf_count = 0
@@ -1445,8 +1386,6 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
             elif direction == "SHORT" and price < ema200:
                 mtf_count += 1
     results["mtf"] = mtf_count >= 2
-
-    # ۳. مومنتوم
     momentum_score = 0
     if direction == "LONG":
         if ind["macd_hist"] > 0: momentum_score += 1
@@ -1459,21 +1398,13 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
         if ind["roc"] < 0: momentum_score += 1
         if ind["bearish_div"] or ind["macd_bearish_div"]: momentum_score += 1
     results["momentum"] = momentum_score >= 2
-
-    # ۴. حجم
     results["volume"] = ind["volume_ratio"] >= 1.5 or ind["volume_spike"]
-
-    # ۵. احساسات بازار (جایگزین فاندینگ)
     sentiment_score = await cache_obj._calculate_sentiment_score(code, ind)
     if direction == "LONG":
         results["sentiment"] = sentiment_score > 0.2
     else:
         results["sentiment"] = sentiment_score < -0.2
-
-    # ۶. روند
     results["trend"] = ind["adx"] >= config["adx_min"] and (0.5 <= ind["atr_pct"] <= 8)
-
-    # ۷. جریان سفارشات
     order_flow = await cache_obj._get_order_flow(code)
     if order_flow > 0:
         if direction == "LONG":
@@ -1482,28 +1413,21 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
             results["order_flow"] = order_flow < 0.9
     else:
         results["order_flow"] = False
-
-    # ۸. تنوع بازار
     breadth = cache_obj._get_market_breadth()
     if direction == "LONG":
         results["breadth"] = breadth > 55
     else:
         results["breadth"] = breadth < 45
-
-    # ۹. نوسان‌پذیری هوشمند
     smart_vol = cache_obj._get_smart_volatility(ind)
     if direction == "LONG":
         results["smart_vol"] = smart_vol < -0.2
     else:
         results["smart_vol"] = smart_vol > 0.2
-
-    # ۱۰. قدرت روند مکمل
     comp_trend = cache_obj._get_complementary_trend(ind)
     if direction == "LONG":
         results["comp_trend"] = comp_trend > 0.2
     else:
         results["comp_trend"] = comp_trend < -0.2
-
     return results
 
 # ---------- تولید سیگنال جدید ----------
@@ -1514,17 +1438,13 @@ async def generate_trade_plan_v2(code, mode="standard"):
         if not ind:
             logger.info(f"No indicators for {code}")
             return None
-
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
-
         long_layers = await analyze_layers(code, "LONG", ind, mode, cache)
         short_layers = await analyze_layers(code, "SHORT", ind, mode, cache)
-
         long_score = 0
         short_score = 0
         long_confirmed = 0
         short_confirmed = 0
-
         for layer, weight in LAYER_WEIGHTS.items():
             if long_layers.get(layer, False):
                 long_score += weight
@@ -1532,15 +1452,12 @@ async def generate_trade_plan_v2(code, mode="standard"):
             if short_layers.get(layer, False):
                 short_score += weight
                 short_confirmed += 1
-
         direction = None
         confidence = 0
         layers = {}
-
         if ind["adx"] < config["adx_min"]:
             logger.info(f"Market regime: ADX {ind['adx']:.1f} < {config['adx_min']} for {code}")
             return None
-
         if long_confirmed >= config["min_confirmations"] and long_score >= short_score + MIN_DIRECTION_GAP:
             direction = "LONG"
             confidence = long_score
@@ -1552,16 +1469,13 @@ async def generate_trade_plan_v2(code, mode="standard"):
         else:
             logger.info(f"No direction for {code}: long_conf={long_confirmed}, short_conf={short_confirmed}, gap={abs(long_score-short_score)}")
             return None
-
         if confidence < MIN_SIGNAL_CONFIDENCE:
             logger.info(f"Confidence too low for {code}: {confidence:.1f} < {MIN_SIGNAL_CONFIDENCE}")
             return None
-
         levels = build_ladder_weighted(ind, direction, mode)
         if levels["rr"] < config["min_rr"]:
             logger.info(f"RR too low for {code}: {levels['rr']:.2f} < {config['min_rr']}")
             return None
-
         funding = 0.0
         fg_value, _ = await get_fear_greed()
         if fg_value is not None:
@@ -1569,10 +1483,8 @@ async def generate_trade_plan_v2(code, mode="standard"):
                 confidence -= 5
             elif direction == "SHORT" and fg_value < 20:
                 confidence -= 5
-
         confidence = max(0, min(100, confidence))
         confidence = float(confidence)
-
         max_lev = config["max_leverage"]
         if confidence >= 90:
             leverage = max_lev
@@ -1584,13 +1496,11 @@ async def generate_trade_plan_v2(code, mode="standard"):
             leverage = max(1, max_lev - 3)
         else:
             leverage = 1
-
         win_rate_est = get_win_rate_estimate()
         entry_avg = levels["avg_entry"]
         liq = calc_liquidation_price(direction, entry_avg, leverage)
         reasons, warnings = signal_reasons(direction, ind, mode)
         grade = signal_grade(confidence)
-
         plan = TradePlan(
             symbol=code,
             direction=direction,
@@ -1760,14 +1670,11 @@ def update_signal_status(symbol, current_price):
 def format_main_signal_v2(plan, code, chat_id):
     direction = "لانگ 🟢" if plan.direction == "LONG" else "شورت 🔴"
     mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
-
     layers_text = ""
     for layer, ok in plan.layer_results.items():
         emoji = "✅" if ok else "❌"
         layers_text += f"{emoji} {LAYER_NAMES.get(layer, layer)}\n"
-
     grade_emoji = {"A": "🔥", "B": "⚡", "C": "📊", "D": "💤"}.get(plan.signal_grade[:1], "📊")
-
     text = (
         f"{grade_emoji} *سیگنال نهادی* | {code}/USDT | {direction}\n"
         f"🕒 {shamsi_now()}\n"
@@ -1799,7 +1706,6 @@ def format_main_signal_v2(plan, code, chat_id):
 def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, short_layers=None):
     mode_label = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])["label"]
     config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
-
     price = ind['price']
     df_daily = cache.ohlcv.get("1d", {}).get(code)
     change_24h = 0
@@ -1811,16 +1717,13 @@ def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, sh
             change_24h = ((price - close_prev) / close_prev) * 100
         high_24h = float(df_daily["high"].iloc[-1]) if pd.notna(df_daily["high"].iloc[-1]) else price
         low_24h = float(df_daily["low"].iloc[-1]) if pd.notna(df_daily["low"].iloc[-1]) else price
-
     ema20_pos = "بالای 📈" if ind['price_above_ema20'] else "زیر 📉"
     ema50_pos = "بالای 📈" if ind['price_above_ema50'] else "زیر 📉"
     macd_status = "مثبت 📈" if ind['macd_hist'] > 0 else "منفی 📉"
-
     support = ind['support']
     resistance = ind['resistance']
     support_2 = ind['support'] * 0.99
     resistance_2 = ind['resistance'] * 1.01
-
     if plan and plan.layer_results:
         confirmed = sum(1 for v in plan.layer_results.values() if v)
         total_weight = sum(LAYER_WEIGHTS.get(layer, 0) for layer, ok in plan.layer_results.items() if ok)
@@ -1855,7 +1758,6 @@ def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, sh
                 layers_summary += f"\n💡 *وضعیت:* شرایط برای سیگنال‌دهی مناسب نیست"
         else:
             layers_summary = "📋 در حال تحلیل لایه‌ها..."
-
     header = f"🧭 *وضعیت لحظه‌ای* {code}/USDT\n🕒 {shamsi_now()}\n🛠️ حالت: {mode_label}\n{DIVIDER}\n"
     price_text = (
         f"💰 قیمت: {fmt_amount(price, chat_id)}\n"
@@ -1871,7 +1773,6 @@ def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, sh
         f"{DIVIDER}\n"
         f"📊 حمایت: {fmt_amount(support, chat_id)} | مقاومت: {fmt_amount(resistance, chat_id)}\n"
     )
-
     if plan and plan.confidence >= MIN_SIGNAL_CONFIDENCE:
         footer = (
             f"\n{DIVIDER}\n"
@@ -1884,7 +1785,6 @@ def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, sh
         )
     else:
         footer = f"\n{DIVIDER}\n💤 در حال حاضر سیگنال نهایی وجود ندارد."
-
     return rtl_lines(header + price_text + layers_summary + footer + f"\n{DIVIDER}\n⚠️ تحلیل تکنیکال است و تضمین سود نیست.")
 
 # ---------- توابع اصلی ----------
@@ -1896,10 +1796,8 @@ async def generate_status_text_async(code, chat_id, mode="standard"):
     ind = await cache.get_indicators(code, mode)
     if not ind:
         return rtl_lines(f"{code}\n\n⚠️ داده کافی برای تحلیل این ارز دریافت نشد.")
-
     long_layers = await analyze_layers(code, "LONG", ind, mode, cache)
     short_layers = await analyze_layers(code, "SHORT", ind, mode, cache)
-
     plan = await generate_trade_plan_v2(code, mode)
     return format_status_dashboard(code, ind, plan, chat_id, mode, long_layers, short_layers)
 
@@ -2035,182 +1933,6 @@ def format_prices_pretty(prices, chat_id):
             lines.append(f"{code} ⚠️ قیمت در دسترس نیست")
     return rtl_lines("\n".join(lines))
 
-# ---------- دکمه «مرکز هوشمندسازی» برای ادمین ----------
-async def optimization_center(update, context):
-    """نمایش مرکز هوشمندسازی با آخرین پیشنهاد و تاریخچه"""
-    query = update.callback_query
-    chat_id = update.effective_chat.id
-
-    if not is_admin_role(chat_id):
-        await query.answer("⛔️ فقط ادمین.", show_alert=True)
-        return
-
-    # پیدا کردن آخرین پیشنهاد pending
-    last_pending = None
-    for sug in reversed(suggestion_history):
-        if sug["status"] == "pending":
-            last_pending = sug
-            break
-
-    if not last_pending and not suggestion_history:
-        await query.edit_message_text(
-            "🧠 *مرکز هوشمندسازی*\n\n"
-            "هیچ پیشنهادی ثبت نشده است.\n"
-            "پس از جمع‌آوری حداقل ۱۰ سیگنال، پیشنهادات در اینجا نمایش داده می‌شوند.",
-            reply_markup=kb_back_main(),
-            parse_mode="Markdown"
-        )
-        return
-
-    text = "🧠 *مرکز هوشمندسازی*\n\n"
-
-    # بخش آخرین پیشنهاد
-    if last_pending:
-        text += "🔄 *آخرین پیشنهاد فعال*\n"
-        text += f"{DIVIDER}\n"
-        text += f"📅 تاریخ: {shamsi_date(datetime.fromtimestamp(last_pending['timestamp']))}\n"
-        text += f"📊 تحلیل {last_pending['analysis']['total_signals']} سیگنال اخیر:\n"
-        text += f"• نرخ برد: {last_pending['analysis']['win_rate']:.1f}%\n"
-        text += f"• میانگین RR: {last_pending['analysis']['avg_rr']:.2f}\n"
-        text += f"• بهترین حالت: {MODE_CONFIGS[last_pending['analysis']['best_mode']]['label']}\n"
-        text += f"{DIVIDER}\n"
-        text += f"💡 *پیشنهادات:*\n"
-        for sug in last_pending["suggestions"][:3]:
-            if sug["parameter"] == "mode":
-                text += f"• تغییر حالت به {MODE_CONFIGS[sug['suggested']]['label']}\n"
-            else:
-                text += f"• {sug['parameter']}: {sug['current']} → {sug['suggested']}\n"
-            text += f"  📌 {sug['reason']}\n"
-        text += f"\n{DIVIDER}\n"
-        text += f"⏳ وضعیت: در انتظار پاسخ\n"
-        text += f"📌 *یادآوری:* در صورت عدم پاسخ، پس از ۲۴ ساعت منقضی می‌شود.\n\n"
-
-        await query.edit_message_text(
-            text,
-            reply_markup=kb_suggestion_actions(last_pending["id"]),
-            parse_mode="Markdown"
-        )
-        return
-
-    # بخش تاریخچه
-    text += "📋 *تاریخچه پیشنهادات*\n"
-    text += f"{DIVIDER}\n"
-    for sug in reversed(suggestion_history[-10:]):
-        status_emoji = {
-            "applied": "✅",
-            "rejected": "❌",
-            "pending": "⏳",
-            "expired": "⌛"
-        }.get(sug["status"], "❓")
-        date_str = shamsi_date(datetime.fromtimestamp(sug["timestamp"]))
-        text += f"{status_emoji} {date_str} - {len(sug['suggestions'])} پیشنهاد\n"
-        if sug["status"] == "applied" and "result" in sug:
-            text += f"   📌 {sug['result']}\n"
-        elif sug["status"] == "rejected":
-            text += f"   📌 تنظیمات قبلی حفظ شد\n"
-        elif sug["status"] == "expired":
-            text += f"   📌 عدم پاسخ تا ۲۴ ساعت\n"
-
-    await query.edit_message_text(
-        text,
-        reply_markup=kb_back_main(),
-        parse_mode="Markdown"
-    )
-
-# ---------- دکمه «تحلیل جامع» برای ادمین ----------
-async def comprehensive_analysis(update, context):
-    """تحلیل همه ارزها و نمایش سیگنال‌های فعال"""
-    query = update.callback_query
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not is_admin_role(chat_id):
-        await query.answer("⛔️ فقط ادمین.", show_alert=True)
-        return
-
-    await query.edit_message_text("⏳ در حال تحلیل همه ارزها...")
-
-    try:
-        await cache.update_prices(force=True)
-        await cache.update_ohlcv(force=True)
-
-        active_signals_list = []
-        mode = "standard"
-
-        for code in COIN_CODES:
-            try:
-                ind = await cache.get_indicators(code, mode)
-                if not ind:
-                    continue
-
-                plan = await generate_trade_plan_v2(code, mode)
-                if plan and plan.confidence >= MIN_SIGNAL_CONFIDENCE:
-                    active_signals_list.append({
-                        "code": code,
-                        "direction": plan.direction,
-                        "confidence": plan.confidence,
-                        "rr": plan.rr,
-                        "mode": plan.mode,
-                        "entry": plan.entry_price,
-                        "sl": plan.sl_price,
-                        "tp1": plan.take_profits[0] if plan.take_profits else 0,
-                    })
-                await asyncio.sleep(0.2)
-            except Exception as e:
-                logger.debug(f"Comprehensive analysis error for {code}: {e}")
-                continue
-
-        if not active_signals_list:
-            await query.edit_message_text(
-                "📊 *تحلیل جامع ارزها*\n"
-                f"{DIVIDER}\n"
-                "💤 هیچ سیگنال فعالی یافت نشد.\n\n"
-                "دلایل احتمالی:\n"
-                "• ADX پایین (بازار رنج)\n"
-                "• تعداد لایه‌های تأییدشده کمتر از حد نیاز\n"
-                "• نسبت ریسک به بازده پایین",
-                reply_markup=kb_back_main(),
-                parse_mode="Markdown"
-            )
-            return
-
-        text = "📊 *تحلیل جامع ارزها*\n"
-        text += f"🕒 {shamsi_now()}\n{DIVIDER}\n"
-
-        long_count = 0
-        short_count = 0
-
-        for signal in active_signals_list:
-            direction_emoji = "🟢" if signal["direction"] == "LONG" else "🔴"
-            direction_text = "لانگ" if signal["direction"] == "LONG" else "شورت"
-            mode_label = MODE_CONFIGS.get(signal["mode"], MODE_CONFIGS["standard"])["label"]
-
-            if signal["direction"] == "LONG":
-                long_count += 1
-            else:
-                short_count += 1
-
-            text += (
-                f"{direction_emoji} {signal['code']} | {direction_text}\n"
-                f"   اطمینان: {signal['confidence']:.0f}% | RR: {signal['rr']:.2f} | {mode_label}\n"
-                f"   📥 ورود: {fmt_amount(signal['entry'], chat_id)}\n"
-                f"   🛑 حد ضرر: {fmt_amount(signal['sl'], chat_id)}\n"
-                f"   🎯 TP1: {fmt_amount(signal['tp1'], chat_id)}\n"
-                f"{DIVIDER}\n"
-            )
-
-        text += f"📊 جمع‌بندی: {len(active_signals_list)} سیگنال فعال\n"
-        text += f"🟢 لانگ: {long_count} | 🔴 شورت: {short_count}"
-
-        chunks = split_long_message(text)
-        await query.edit_message_text(chunks[0], reply_markup=kb_back_main(), parse_mode="Markdown")
-        for chunk in chunks[1:]:
-            await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
-
-    except Exception as e:
-        logger.exception(f"Comprehensive analysis error: {e}")
-        await query.edit_message_text(f"❌ خطا در تحلیل جامع:\n{str(e)}", reply_markup=kb_back_main())
-
 def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
     if len(text) <= limit:
         return [text]
@@ -2230,6 +1952,198 @@ def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
     if current:
         parts.append(current.strip())
     return parts
+
+# ---------- مرکز هوشمندسازی ----------
+async def optimization_center(update, context):
+    """صفحه اصلی مرکز هوشمندسازی با دو بخش"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    if not is_admin_role(chat_id):
+        await query.answer("⛔️ فقط ادمین.", show_alert=True)
+        return
+    text = "🧠 *مرکز هوشمندسازی*\n\n"
+    text += "از بخش‌های زیر انتخاب کنید:\n"
+    text += "• 📋 پیشنهادات فعال - آخرین پیشنهاد با تایید/رد\n"
+    text += "• 📜 تاریخچه پیشنهادات - لیست کامل پیشنهادات قبلی"
+    await query.edit_message_text(
+        text,
+        reply_markup=kb_optimization_center(),
+        parse_mode="Markdown"
+    )
+
+async def optimization_active(update, context):
+    """نمایش آخرین پیشنهاد فعال"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    if not is_admin_role(chat_id):
+        await query.answer("⛔️ فقط ادمین.", show_alert=True)
+        return
+    last_pending = None
+    for sug in reversed(suggestion_history):
+        if sug["status"] == "pending":
+            last_pending = sug
+            break
+    if not last_pending:
+        total_closed = len([s for s in signal_history if s["status"] in ["tp1_hit", "tp2_hit", "tp3_hit", "sl_hit"]])
+        text = (
+            "📋 *پیشنهادات فعال*\n\n"
+            f"📊 *وضعیت جمع‌آوری داده*\n"
+            f"{DIVIDER}\n"
+            f"• تعداد سیگنال‌های بسته‌شده: {total_closed}\n"
+            f"• حداقل نیاز برای تحلیل: ۱۰\n\n"
+            f"⏳ در حال جمع‌آوری داده‌های کافی برای ارائه پیشنهادات هوشمند...\n\n"
+            f"💡 *نکته:* پس از بسته شدن حداقل ۱۰ سیگنال (TP یا SL)، اولین پیشنهادات در اینجا نمایش داده می‌شوند."
+        )
+        await query.edit_message_text(
+            text,
+            reply_markup=kb_back_to_optimization(),
+            parse_mode="Markdown"
+        )
+        return
+    text = "📋 *پیشنهادات فعال*\n\n"
+    text += "🔄 *آخرین پیشنهاد فعال*\n"
+    text += f"{DIVIDER}\n"
+    text += f"📅 تاریخ: {shamsi_date(datetime.fromtimestamp(last_pending['timestamp']))}\n"
+    text += f"📊 تحلیل {last_pending['analysis']['total_signals']} سیگنال اخیر:\n"
+    text += f"• نرخ برد: {last_pending['analysis']['win_rate']:.1f}%\n"
+    text += f"• میانگین RR: {last_pending['analysis']['avg_rr']:.2f}\n"
+    text += f"• بهترین حالت: {MODE_CONFIGS[last_pending['analysis']['best_mode']]['label']}\n"
+    text += f"{DIVIDER}\n"
+    text += f"💡 *پیشنهادات:*\n"
+    for sug in last_pending["suggestions"][:3]:
+        if sug["parameter"] == "mode":
+            text += f"• تغییر حالت به {MODE_CONFIGS[sug['suggested']]['label']}\n"
+        else:
+            text += f"• {sug['parameter']}: {sug['current']} → {sug['suggested']}\n"
+        text += f"  📌 {sug['reason']}\n"
+    text += f"\n{DIVIDER}\n"
+    text += f"⏳ وضعیت: در انتظار پاسخ\n"
+    text += f"📌 *یادآوری:* در صورت عدم پاسخ، پس از ۲۴ ساعت منقضی می‌شود."
+    await query.edit_message_text(
+        text,
+        reply_markup=kb_suggestion_actions(last_pending["id"]),
+        parse_mode="Markdown"
+    )
+
+async def optimization_history(update, context):
+    """نمایش تاریخچه کامل پیشنهادات"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    if not is_admin_role(chat_id):
+        await query.answer("⛔️ فقط ادمین.", show_alert=True)
+        return
+    if not suggestion_history:
+        text = (
+            "📜 *تاریخچه پیشنهادات*\n\n"
+            "هیچ پیشنهادی ثبت نشده است.\n"
+            "پس از جمع‌آوری داده‌های کافی، اولین پیشنهادات در اینجا نمایش داده می‌شوند."
+        )
+        await query.edit_message_text(
+            text,
+            reply_markup=kb_back_to_optimization(),
+            parse_mode="Markdown"
+        )
+        return
+    text = "📜 *تاریخچه پیشنهادات*\n\n"
+    text += f"{DIVIDER}\n"
+    for sug in reversed(suggestion_history[-10:]):
+        status_emoji = {
+            "applied": "✅",
+            "rejected": "❌",
+            "pending": "⏳",
+            "expired": "⌛"
+        }.get(sug["status"], "❓")
+        date_str = shamsi_date(datetime.fromtimestamp(sug["timestamp"]))
+        text += f"{status_emoji} {date_str} - {len(sug['suggestions'])} پیشنهاد\n"
+        if sug["status"] == "applied" and "result" in sug:
+            text += f"   📌 {sug['result']}\n"
+        elif sug["status"] == "rejected":
+            text += f"   📌 تنظیمات قبلی حفظ شد\n"
+        elif sug["status"] == "expired":
+            text += f"   📌 عدم پاسخ تا ۲۴ ساعت\n"
+        text += "\n"
+    await query.edit_message_text(
+        text,
+        reply_markup=kb_back_to_optimization(),
+        parse_mode="Markdown"
+    )
+
+# ---------- دکمه تحلیل جامع ----------
+async def comprehensive_analysis(update, context):
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    if not is_admin_role(chat_id):
+        await query.answer("⛔️ فقط ادمین.", show_alert=True)
+        return
+    await query.edit_message_text("⏳ در حال تحلیل همه ارزها...")
+    try:
+        await cache.update_prices(force=True)
+        await cache.update_ohlcv(force=True)
+        active_signals_list = []
+        mode = "standard"
+        for code in COIN_CODES:
+            try:
+                ind = await cache.get_indicators(code, mode)
+                if not ind:
+                    continue
+                plan = await generate_trade_plan_v2(code, mode)
+                if plan and plan.confidence >= MIN_SIGNAL_CONFIDENCE:
+                    active_signals_list.append({
+                        "code": code,
+                        "direction": plan.direction,
+                        "confidence": plan.confidence,
+                        "rr": plan.rr,
+                        "mode": plan.mode,
+                        "entry": plan.entry_price,
+                        "sl": plan.sl_price,
+                        "tp1": plan.take_profits[0] if plan.take_profits else 0,
+                    })
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                logger.debug(f"Comprehensive analysis error for {code}: {e}")
+                continue
+        if not active_signals_list:
+            await query.edit_message_text(
+                "📊 *تحلیل جامع ارزها*\n"
+                f"{DIVIDER}\n"
+                "💤 هیچ سیگنال فعالی یافت نشد.\n\n"
+                "دلایل احتمالی:\n"
+                "• ADX پایین (بازار رنج)\n"
+                "• تعداد لایه‌های تأییدشده کمتر از حد نیاز\n"
+                "• نسبت ریسک به بازده پایین",
+                reply_markup=kb_back_main(),
+                parse_mode="Markdown"
+            )
+            return
+        text = "📊 *تحلیل جامع ارزها*\n"
+        text += f"🕒 {shamsi_now()}\n{DIVIDER}\n"
+        long_count = 0
+        short_count = 0
+        for signal in active_signals_list:
+            direction_emoji = "🟢" if signal["direction"] == "LONG" else "🔴"
+            direction_text = "لانگ" if signal["direction"] == "LONG" else "شورت"
+            mode_label = MODE_CONFIGS.get(signal["mode"], MODE_CONFIGS["standard"])["label"]
+            if signal["direction"] == "LONG":
+                long_count += 1
+            else:
+                short_count += 1
+            text += (
+                f"{direction_emoji} {signal['code']} | {direction_text}\n"
+                f"   اطمینان: {signal['confidence']:.0f}% | RR: {signal['rr']:.2f} | {mode_label}\n"
+                f"   📥 ورود: {fmt_amount(signal['entry'], chat_id)}\n"
+                f"   🛑 حد ضرر: {fmt_amount(signal['sl'], chat_id)}\n"
+                f"   🎯 TP1: {fmt_amount(signal['tp1'], chat_id)}\n"
+                f"{DIVIDER}\n"
+            )
+        text += f"📊 جمع‌بندی: {len(active_signals_list)} سیگنال فعال\n"
+        text += f"🟢 لانگ: {long_count} | 🔴 شورت: {short_count}"
+        chunks = split_long_message(text)
+        await query.edit_message_text(chunks[0], reply_markup=kb_back_main(), parse_mode="Markdown")
+        for chunk in chunks[1:]:
+            await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
+    except Exception as e:
+        logger.exception(f"Comprehensive analysis error: {e}")
+        await query.edit_message_text(f"❌ خطا در تحلیل جامع:\n{str(e)}", reply_markup=kb_back_main())
 
 # ---------- مدیریت صفحه نمایش ----------
 async def clear_interactive_screen(context, chat_id, keep_id=None):
@@ -2309,6 +2223,18 @@ def kb_admin_panel():
         [InlineKeyboardButton("🔄 بروزرسانی کامل", callback_data="menu_all")],
         [InlineKeyboardButton("🧠 مرکز هوشمندسازی", callback_data="optimization_center")],
         [InlineKeyboardButton("🔙 بازگشت به منو اصلی", callback_data="menu_main")],
+    ])
+
+def kb_optimization_center():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 پیشنهادات فعال", callback_data="optimization_active")],
+        [InlineKeyboardButton("📜 تاریخچه پیشنهادات", callback_data="optimization_history")],
+        [InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", callback_data="admin_panel")],
+    ])
+
+def kb_back_to_optimization():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="optimization_center")]
     ])
 
 def kb_back_main():
@@ -2597,12 +2523,9 @@ async def news_monitor_loop(app):
     while True:
         try:
             if subscribed_chat_ids:
-                # اخبار مهم
                 important_news = await fetch_important_news()
                 for news in important_news:
                     add_news_alert(news["text"], importance="high", impact=news["impact"], details={"source": news.get("source", "")})
-                
-                # رویدادها
                 await check_and_notify_events(app)
         except Exception as e:
             logger.exception("News monitor error: %s", e)
@@ -2670,7 +2593,6 @@ async def whale_monitor_loop(app):
                                 f"🕒 {shamsi_now()}"
                             )
                             add_news_alert(text, importance="high", impact=impact, details=alert)
-
                     for chat_id in subscribed_chat_ids:
                         latest = news_history[-1] if news_history else None
                         if latest and latest.get("importance") == "high":
@@ -2709,7 +2631,6 @@ async def macro_event_monitor_loop(app):
 
 # ---------- Macro data loop ----------
 async def macro_data_loop(app):
-    """حلقه به‌روزرسانی داده‌های کلان بازار"""
     await asyncio.sleep(30)
     while True:
         try:
@@ -2718,7 +2639,7 @@ async def macro_data_loop(app):
             logger.exception(f"Macro data loop error: {e}")
         await asyncio.sleep(MACRO_CHECK_SECONDS)
 
-# ---------- Periodic report generation ----------
+# ---------- Periodic report ----------
 async def send_periodic_report(app, period="weekly"):
     stats = compute_advanced_stats(signal_history)
     fg_value, fg_class = await get_fear_greed()
@@ -2821,20 +2742,16 @@ async def auto_report_loop(app):
                     last_ts = last_check_time.get(chat_id, 0)
                     if now - last_ts < interval:
                         continue
-
                     favs = user_favorites.get(chat_id, set())
                     if not favs:
                         continue
-
                     current_signals = {}
                     for code in favs:
                         plan = await generate_trade_plan_v2(code, mode)
                         if plan:
                             current_signals[code] = plan.direction
                         await asyncio.sleep(0.5)
-
                     prev_signals = last_sent_signals.get(chat_id, {})
-
                     for code, direction in current_signals.items():
                         prev = prev_signals.get(code)
                         if prev is None or prev["direction"] != direction:
@@ -2844,12 +2761,10 @@ async def auto_report_loop(app):
                                 msg = await app.bot.send_message(chat_id=chat_id, text=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
                                 active_signals.setdefault(chat_id, {})[code] = {"plan": plan, "stage": 0, "last_notified": 0}
                                 prev_signals[code] = {"direction": direction, "timestamp": time.time()}
-
                     for code in list(prev_signals.keys()):
                         if code not in current_signals:
                             await app.bot.send_message(chat_id=chat_id, text=f"🔴 سیگنال {code} بسته شد.")
                             del prev_signals[code]
-
                     last_sent_signals[chat_id] = prev_signals
                     last_check_time[chat_id] = now
         except asyncio.CancelledError:
@@ -3041,14 +2956,20 @@ async def button_handler(update, context):
     data = query.data; chat_id = update.effective_chat.id; user_id = update.effective_user.id
     if data == "noop": return
 
+    # دکمه‌های مرکز هوشمندسازی
+    if data == "optimization_center":
+        await optimization_center(update, context)
+        return
+    if data == "optimization_active":
+        await optimization_active(update, context)
+        return
+    if data == "optimization_history":
+        await optimization_history(update, context)
+        return
+
     # دکمه‌های پیشنهادات
     if data.startswith("apply_suggestion_") or data.startswith("reject_suggestion_") or data.startswith("details_suggestion_"):
         await handle_suggestion_action(update, context)
-        return
-
-    # دکمه مرکز هوشمندسازی
-    if data == "optimization_center":
-        await optimization_center(update, context)
         return
 
     # دکمه تحلیل جامع
@@ -3595,7 +3516,7 @@ async def post_init(app):
     app.create_task(macro_event_monitor_loop(app))
     app.create_task(macro_data_loop(app))
     app.create_task(optimization_loop(app))
-    logger.info("Signal Bot V58 (Intelligence Center) started")
+    logger.info("Signal Bot V59 (Intelligence Center with 2 sections) started")
 
 def main():
     if not BOT_TOKEN:
