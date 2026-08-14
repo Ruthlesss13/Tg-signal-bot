@@ -39,7 +39,7 @@ load_dotenv()
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    level=logging.DEBUG,  # ← تغییر از INFO به DEBUG
 )
 logger = logging.getLogger("signal_bot")
 
