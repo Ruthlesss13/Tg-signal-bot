@@ -1,9 +1,11 @@
 """
-Telegram Signal Bot V45 - Institutional Grade (Stable & Beautiful UI)
-- سریالی‌سازی کامل درخواست‌های OHLCV با Semaphore در fetch
-- لیست ارزها با ۴ ستون و بدون دکمه noop
-- قیمت‌ها از اسپات کوکوین + پشتیبان مکس (Max)
-- کش طولانی‌تر و مکث افزایشی برای جلوگیری از خطای ۴۲۹
+Telegram Signal Bot V50 - Institutional Grade (10 Layers, Spot Only)
+- حذف کامل فیوچرز و استفاده فقط از اسپات (رفع خطای ۴۲۹)
+- جایگزینی فاندینگ با شاخص احساسات ترکیبی (Sentiment Score)
+- افزایش لایه‌های تحلیل به ۱۰ لایه برای دقت بالاتر
+- پشتیبان قیمت از مکس (Max) به‌جای بایننس
+- چیدمان ۴ ستونه بدون دکمه noop
+- کش طولانی‌تر و بهینه‌سازی سرعت
 """
 
 import asyncio
@@ -86,16 +88,21 @@ WHALE_MIN_AMOUNT_BTC = 1000
 NEWS_AUTO_DELETE_SECONDS = 3600
 
 PER_PAGE = 12                     # ۳ ردیف × ۴ ستون
-WEIGHT_TREND = 25
-WEIGHT_MOMENTUM = 25
-WEIGHT_VOLUME = 15
-WEIGHT_VOLATILITY = 15
-WEIGHT_HTF = 20
+WEIGHT_TREND = 15
+WEIGHT_MOMENTUM = 15
+WEIGHT_VOLUME = 10
+WEIGHT_VOLATILITY = 10
+WEIGHT_HTF = 10
+WEIGHT_SENTIMENT = 10
+WEIGHT_ORDER_FLOW = 10
+WEIGHT_BREADTH = 5
+WEIGHT_SMART_VOL = 5
+WEIGHT_COMP_TREND = 10
 
-OHLCV_TTL_SECONDS = 120
+OHLCV_TTL_SECONDS = 300          # افزایش کش
+PRICE_TTL_SECONDS = 60           # کش قیمت
 FULL_REFRESH_TTL_SECONDS = 300
-FUNDING_TTL_SECONDS = 30
-MAX_OHLCV_CONCURRENCY = 1
+MAX_OHLCV_CONCURRENCY = 1        # سریال‌سازی درخواست‌ها
 MAX_SIGNAL_CONCURRENCY = 2
 MAX_PRICE_CONCURRENCY = 2
 RLM = "\u200f"
@@ -107,12 +114,7 @@ DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
-# ---------- صرافی‌ها ----------
-exchange = ccxt.kucoinfutures({
-    "enableRateLimit": True,
-    "options": {"defaultType": "swap", "adjustForTimeDifference": True},
-})
-
+# ---------- صرافی اسپات (فقط کوکوین اسپات) ----------
 exchange_spot_kucoin = ccxt.kucoin({
     "enableRateLimit": True,
 })
@@ -155,7 +157,7 @@ MODE_CONFIGS = {
         "max_leverage": 10,
         "min_rr": 0.8,
         "adx_min": 10,
-        "min_confirmations": 3,
+        "min_confirmations": 4,   # از ۱۰ لایه حداقل ۴ لایه
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -168,7 +170,7 @@ MODE_CONFIGS = {
         "max_leverage": 7,
         "min_rr": 1.0,
         "adx_min": 13,
-        "min_confirmations": 4,
+        "min_confirmations": 5,
         "check_interval": 10 * 60,
     },
     "standard": {
@@ -181,7 +183,7 @@ MODE_CONFIGS = {
         "max_leverage": 5,
         "min_rr": 1.2,
         "adx_min": 16,
-        "min_confirmations": 4,
+        "min_confirmations": 6,
         "check_interval": 30 * 60,
     },
     "conservative": {
@@ -194,7 +196,7 @@ MODE_CONFIGS = {
         "max_leverage": 3,
         "min_rr": 1.5,
         "adx_min": 20,
-        "min_confirmations": 5,
+        "min_confirmations": 7,
         "check_interval": 60 * 60,
     },
 }
@@ -202,6 +204,33 @@ MODE_CONFIGS = {
 MIN_SIGNAL_CONFIDENCE = 50
 MIN_DIRECTION_GAP = 8
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
+
+# وزن‌های لایه‌های ۱۰گانه (جمعاً ۱۰۰)
+LAYER_WEIGHTS = {
+    "structure": 15,
+    "mtf": 15,
+    "momentum": 15,
+    "volume": 10,
+    "sentiment": 10,
+    "trend": 10,
+    "order_flow": 10,
+    "breadth": 5,
+    "smart_vol": 5,
+    "comp_trend": 5,
+}
+
+LAYER_NAMES = {
+    "structure": "ساختار بازار",
+    "mtf": "هم‌گرایی تایم‌فریم",
+    "momentum": "مومنتوم",
+    "volume": "حجم معاملات",
+    "sentiment": "احساسات بازار",
+    "trend": "روند",
+    "order_flow": "جریان سفارشات",
+    "breadth": "تنوع بازار",
+    "smart_vol": "نوسان‌پذیری هوشمند",
+    "comp_trend": "قدرت روند مکمل",
+}
 
 @dataclass
 class TradePlan:
@@ -215,7 +244,7 @@ class TradePlan:
     entries: list = field(default_factory=list)
     stop_losses: list = field(default_factory=list)
     take_profits: list = field(default_factory=list)
-    funding_rate: float = 0.0
+    funding_rate: float = 0.0  # برای سازگاری با کد قدیمی (همیشه ۰)
     leverage: int = 1
     liquidation_price: float = 0.0
     scores: dict = field(default_factory=dict)
@@ -267,8 +296,8 @@ class MarketDataCache:
         self._price_sem = asyncio.Semaphore(MAX_PRICE_CONCURRENCY)
         self._update_lock = asyncio.Lock()
         self._symbol_locks = {}
-        self._funding_cache = {}
-        self._funding_lock = asyncio.Lock()
+        self._breadth_cache = {"value": None, "ts": 0.0}
+        self._sentiment_cache = {}
         self._load_markets()
 
     def _symbol_lock(self, code):
@@ -278,55 +307,27 @@ class MarketDataCache:
 
     def _load_markets(self):
         try:
-            markets = exchange.load_markets(reload=True)
+            markets = exchange_spot_kucoin.load_markets(reload=True)
             selected = {}
             for code in COIN_CODES:
                 self.market_status[code] = {"status": "NO SWAP", "symbol": None, "error": None, "source": None}
-                candidates = []
                 for symbol, market in markets.items():
                     if market.get("base") != code:
                         continue
                     if market.get("quote") != "USDT":
                         continue
-                    if market.get("type") != "swap":
-                        continue
-                    if not market.get("swap", False):
-                        continue
                     if market.get("active") is False:
                         continue
-                    candidates.append((symbol, market))
-                if not candidates:
-                    for symbol, market in markets.items():
-                        if symbol == f"{code}/USDT:USDT" and market.get("type") == "swap":
-                            candidates.append((symbol, market))
-                        elif symbol == f"{code}USDT" and market.get("type") == "swap":
-                            candidates.append((symbol, market))
-                        elif symbol == f"{code}USDTM" and market.get("type") == "swap":
-                            candidates.append((symbol, market))
-                        elif symbol == f"{code}/USDT" and market.get("type") == "swap":
-                            candidates.append((symbol, market))
-                if not candidates:
-                    try:
-                        spot_markets = exchange_spot_kucoin.load_markets()
-                        for symbol, market in spot_markets.items():
-                            if market.get("base") == code and market.get("quote") == "USDT":
-                                if market.get("active") is not False:
-                                    candidates.append((symbol, market))
-                                    break
-                    except Exception as e:
-                        logger.debug(f"Spot market check failed for {code}: {e}")
-                if not candidates:
-                    continue
-                candidates.sort(key=lambda x: x[0])
-                symbol, market = candidates[0]
-                selected[code] = symbol
-                self.market_meta[code] = market
-                is_futures = market.get("type") == "swap" or market.get("swap") is True
-                source = "futures" if is_futures else "spot"
-                self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None, "source": source}
+                    # فقط اسپات
+                    if market.get("type") != "spot":
+                        continue
+                    selected[code] = symbol
+                    self.market_meta[code] = market
+                    self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None, "source": "spot"}
+                    break
             self.exchange_symbols = selected
             self.valid_codes = list(selected.keys())
-            logger.info("KuCoin markets: %s/%s selected", len(self.valid_codes), len(COIN_CODES))
+            logger.info("KuCoin spot markets: %s/%s selected", len(self.valid_codes), len(COIN_CODES))
         except Exception as e:
             logger.exception("load_markets failed: %s", e)
 
@@ -355,45 +356,29 @@ class MarketDataCache:
         df = df.dropna(subset=required).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df if not df.empty else None
 
-    @staticmethod
-    def _drop_forming_candle(df):
-        return df.copy().reset_index(drop=True)
-
     # ---------- دریافت قیمت از مکس (Max) ----------
     def _get_max_prices(self, codes):
         prices = {}
         try:
-            # مپ نام ارزها در مکس (بیشتر ارزهای اصلی را دارد)
             max_symbol_map = {
                 "BTC": "BTCUSDT", "ETH": "ETHUSDT", "XRP": "XRPUSDT", "LTC": "LTCUSDT",
                 "BCH": "BCHUSDT", "ADA": "ADAUSDT", "DOT": "DOTUSDT", "LINK": "LINKUSDT",
-                "DOGE": "DOGEUSDT", "SOL": "SOLUSDT", "MATIC": "MATICUSDT", "AVAX": "AVAXUSDT",
+                "DOGE": "DOGEUSDT", "SOL": "SOLUSDT", "AVAX": "AVAXUSDT",
                 "UNI": "UNIUSDT", "ATOM": "ATOMUSDT", "ETC": "ETCUSDT", "XLM": "XLMUSDT",
                 "ALGO": "ALGOUSDT", "VET": "VETUSDT", "FIL": "FILUSDT", "TRX": "TRXUSDT",
-                "EOS": "EOSUSDT", "AAVE": "AAVEUSDT", "MKR": "MKRUSDT", "SNX": "SNXUSDT",
-                "COMP": "COMPUSDT", "ZEC": "ZECUSDT", "XTZ": "XTZUSDT", "NEO": "NEOUSDT",
-                "KSM": "KSMUSDT", "DASH": "DASHUSDT", "YFI": "YFIUSDT", "SUSHI": "SUSHIUSDT",
-                "UMA": "UMAUSDT", "CRV": "CRVUSDT", "1INCH": "1INCHUSDT", "AAVE": "AAVEUSDT",
-                "GRT": "GRTUSDT", "REN": "RENUSDT", "BAL": "BALUSDT", "LRC": "LRCUSDT",
-                "ZRX": "ZRXUSDT", "BAT": "BATUSDT", "ENJ": "ENJUSDT", "MANA": "MANAUSDT",
-                "SAND": "SANDUSDT", "CHZ": "CHZUSDT", "OCEAN": "OCEANUSDT", "ANKR": "ANKRUSDT",
-                "API3": "API3USDT", "BAND": "BANDUSDT", "STORJ": "STORJUSDT", "SKL": "SKLUSDT",
-                "NU": "NUUSDT", "CVC": "CVCUSDT", "KAVA": "KAVAUSDT", "ICP": "ICPUSDT",
-                "AR": "ARUSDT", "NEAR": "NEARUSDT", "FTM": "FTMUSDT", "HNT": "HNTUSDT",
-                "FLOW": "FLOWUSDT", "MINA": "MINAUSDT", "APE": "APEUSDT", "APT": "APTUSDT",
-                "ARB": "ARBUSDT", "OP": "OPUSDT", "SUI": "SUIUSDT", "BLUR": "BLURUSDT",
-                "LUNC": "LUNCUSDT", "STX": "STXUSDT", "EGLD": "EGLDUSDT", "INJ": "INJUSDT",
-                "FET": "FETUSDT", "GALA": "GALAUSDT", "POL": "POLUSDT", "RUNE": "RUNEUSDT",
-                "SHIB": "SHIBUSDT", "KAS": "KASUSDT", "XMR": "XMRUSDT",
+                "AAVE": "AAVEUSDT", "COMP": "COMPUSDT", "NEO": "NEOUSDT",
+                "KSM": "KSMUSDT", "KAVA": "KAVAUSDT", "ICP": "ICPUSDT",
+                "AR": "ARUSDT", "NEAR": "NEARUSDT", "FLOW": "FLOWUSDT", "MINA": "MINAUSDT",
+                "APE": "APEUSDT", "APT": "APTUSDT", "ARB": "ARBUSDT", "OP": "OPUSDT",
+                "SUI": "SUIUSDT", "BLUR": "BLURUSDT", "LUNC": "LUNCUSDT", "STX": "STXUSDT",
+                "EGLD": "EGLDUSDT", "INJ": "INJUSDT", "FET": "FETUSDT", "GALA": "GALAUSDT",
+                "POL": "POLUSDT", "RUNE": "RUNEUSDT", "SHIB": "SHIBUSDT", "KAS": "KASUSDT",
+                "XMR": "XMRUSDT", "MANA": "MANAUSDT", "SAND": "SANDUSDT",
             }
-            symbols = []
-            for code in codes:
-                if code in max_symbol_map:
-                    symbols.append(max_symbol_map[code])
+            symbols = [max_symbol_map[code] for code in codes if code in max_symbol_map]
             if not symbols:
                 return prices
             
-            # دریافت تیکرها از مکس
             url = "https://api.max-api.com/api/v2/markets/tickers"
             r = requests.get(url, timeout=8)
             r.raise_for_status()
@@ -404,7 +389,6 @@ class MarketDataCache:
                     if symbol in symbols:
                         price = item.get("last")
                         if price and float(price) > 0:
-                            # پیدا کردن کد ارز
                             for code, sym in max_symbol_map.items():
                                 if sym == symbol and code in codes:
                                     prices[code] = float(price)
@@ -413,75 +397,6 @@ class MarketDataCache:
         except Exception as e:
             logger.warning("Max price fetch failed: %s", e)
         return prices
-
-    async def update_prices(self, force=False, codes=None):
-        target_codes = codes if codes is not None else COIN_CODES
-        now = time.time()
-        if not force and self.prices and self.last_price_update and now - self.last_price_update < 30:
-            return self.prices
-
-        new_prices = {}
-        price_sources.clear()
-
-        # ۱. کوکوین اسپات (اولویت اول)
-        try:
-            symbols = [f"{code}/USDT" for code in target_codes]
-            tickers = await asyncio.to_thread(exchange_spot_kucoin.fetch_tickers, symbols)
-            for code in target_codes:
-                sym = f"{code}/USDT"
-                if sym in tickers:
-                    ticker = tickers[sym]
-                    price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
-                    if price and price > 0:
-                        new_prices[code] = float(price)
-                        price_sources[code] = "K"
-        except Exception as e:
-            logger.warning("KuCoin spot fetch_tickers failed: %s", e)
-
-        # ۲. درخواست تکی برای ارزهای missing از کوکوین اسپات
-        missing = [code for code in target_codes if code not in new_prices]
-        for code in missing:
-            try:
-                sym = f"{code}/USDT"
-                ticker = await asyncio.to_thread(exchange_spot_kucoin.fetch_ticker, sym)
-                price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
-                if price and price > 0:
-                    new_prices[code] = float(price)
-                    price_sources[code] = "K"
-                await asyncio.sleep(0.3)
-            except Exception as e:
-                logger.debug(f"Individual ticker failed for {code}: {e}")
-
-        # ۳. پشتیبان مکس (Max) برای ارزهای باقی‌مانده
-        still_missing = [code for code in target_codes if code not in new_prices]
-        if still_missing:
-            try:
-                max_prices = await asyncio.to_thread(self._get_max_prices, still_missing)
-                for code, price in max_prices.items():
-                    if price and price > 0:
-                        new_prices[code] = price
-                        price_sources[code] = "M"  # Max
-            except Exception as e:
-                logger.warning("Max fallback failed: %s", e)
-
-        # ۴. پشتیبان نهایی CoinGecko (در صورت نیاز)
-        final_missing = [code for code in target_codes if code not in new_prices]
-        if final_missing:
-            try:
-                gecko_prices = await asyncio.to_thread(self._get_coingecko_prices, final_missing)
-                for code, price in gecko_prices.items():
-                    if price and price > 0:
-                        new_prices[code] = price
-                        price_sources[code] = "C"
-            except Exception as e:
-                logger.warning("CoinGecko fallback failed: %s", e)
-
-        for code in target_codes:
-            if code in new_prices:
-                self.prices[code] = new_prices[code]
-        self.last_price_update = time.time()
-        logger.info("Prices loaded: %s/%s (sources: %s)", len(self.prices), len(COIN_CODES), set(price_sources.values()))
-        return self.prices
 
     def _get_coingecko_prices(self, codes):
         prices = {}
@@ -521,19 +436,190 @@ class MarketDataCache:
             logger.warning("CoinGecko fetch failed: %s", e)
         return prices
 
+    async def update_prices(self, force=False, codes=None):
+        target_codes = codes if codes is not None else COIN_CODES
+        now = time.time()
+        if not force and self.prices and self.last_price_update and now - self.last_price_update < PRICE_TTL_SECONDS:
+            return self.prices
+
+        new_prices = {}
+        price_sources.clear()
+
+        # ۱. کوکوین اسپات
+        try:
+            symbols = [f"{code}/USDT" for code in target_codes]
+            tickers = await asyncio.to_thread(exchange_spot_kucoin.fetch_tickers, symbols)
+            for code in target_codes:
+                sym = f"{code}/USDT"
+                if sym in tickers:
+                    ticker = tickers[sym]
+                    price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
+                    if price and price > 0:
+                        new_prices[code] = float(price)
+                        price_sources[code] = "K"
+        except Exception as e:
+            logger.warning("KuCoin spot fetch_tickers failed: %s", e)
+
+        # ۲. درخواست تکی برای ارزهای missing
+        missing = [code for code in target_codes if code not in new_prices]
+        for code in missing:
+            try:
+                sym = f"{code}/USDT"
+                ticker = await asyncio.to_thread(exchange_spot_kucoin.fetch_ticker, sym)
+                price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
+                if price and price > 0:
+                    new_prices[code] = float(price)
+                    price_sources[code] = "K"
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.debug(f"Individual ticker failed for {code}: {e}")
+
+        # ۳. پشتیبان مکس
+        still_missing = [code for code in target_codes if code not in new_prices]
+        if still_missing:
+            try:
+                max_prices = await asyncio.to_thread(self._get_max_prices, still_missing)
+                for code, price in max_prices.items():
+                    if price and price > 0:
+                        new_prices[code] = price
+                        price_sources[code] = "M"
+            except Exception as e:
+                logger.warning("Max fallback failed: %s", e)
+
+        # ۴. پشتیبان CoinGecko
+        final_missing = [code for code in target_codes if code not in new_prices]
+        if final_missing:
+            try:
+                gecko_prices = await asyncio.to_thread(self._get_coingecko_prices, final_missing)
+                for code, price in gecko_prices.items():
+                    if price and price > 0:
+                        new_prices[code] = price
+                        price_sources[code] = "C"
+            except Exception as e:
+                logger.warning("CoinGecko fallback failed: %s", e)
+
+        for code in target_codes:
+            if code in new_prices:
+                self.prices[code] = new_prices[code]
+        self.last_price_update = time.time()
+        logger.info("Prices loaded: %s/%s", len(self.prices), len(COIN_CODES))
+        return self.prices
+
+    # ---------- لایه‌های جدید ----------
+    def _get_market_breadth(self):
+        """محاسبه تنوع بازار: درصد ارزهای بالای EMA20"""
+        now = time.time()
+        if self._breadth_cache["value"] is not None and now - self._breadth_cache["ts"] < 60:
+            return self._breadth_cache["value"]
+        
+        count_above = 0
+        total = 0
+        for code in self.valid_codes:
+            df = self.ohlcv.get("1h", {}).get(code)
+            if df is not None and len(df) > 20:
+                close = df["close"]
+                ema20 = EMAIndicator(close, window=20).ema_indicator()
+                if len(ema20) > 0 and pd.notna(ema20.iloc[-1]):
+                    if close.iloc[-1] > ema20.iloc[-1]:
+                        count_above += 1
+                    total += 1
+        
+        breadth = count_above / total * 100 if total > 0 else 50
+        self._breadth_cache = {"value": breadth, "ts": now}
+        return breadth
+
+    async def _get_order_flow(self, code):
+        """جریان سفارشات: نسبت سفارشات خرید به فروش از Order Book"""
+        try:
+            symbol = self.symbol_for_code(code)
+            if not symbol:
+                return 0.0
+            order_book = await asyncio.to_thread(exchange_spot_kucoin.fetch_order_book, symbol, limit=5)
+            bids_volume = sum(bid[1] for bid in order_book["bids"][:5])
+            asks_volume = sum(ask[1] for ask in order_book["asks"][:5])
+            if asks_volume == 0:
+                return 0.0
+            ratio = bids_volume / asks_volume
+            return min(2.0, ratio)  # محدود کردن بین ۰ تا ۲
+        except Exception as e:
+            logger.debug(f"Order flow failed for {code}: {e}")
+            return 0.0
+
+    def _calculate_sentiment_score(self, code, ind):
+        """محاسبه نمره احساسات ترکیبی (جایگزین فاندینگ)"""
+        # ۱. تغییر قیمت وزنی
+        price_change_1h = 0
+        price_change_4h = 0
+        price_change_24h = 0
+        
+        df_1h = self.ohlcv.get("1h", {}).get(code)
+        df_4h = self.ohlcv.get("4h", {}).get(code)
+        df_1d = self.ohlcv.get("1d", {}).get(code)
+        
+        if df_1h is not None and len(df_1h) > 2:
+            price_change_1h = (df_1h["close"].iloc[-1] / df_1h["close"].iloc[-2] - 1) * 100
+        if df_4h is not None and len(df_4h) > 2:
+            price_change_4h = (df_4h["close"].iloc[-1] / df_4h["close"].iloc[-2] - 1) * 100
+        if df_1d is not None and len(df_1d) > 2:
+            price_change_24h = (df_1d["close"].iloc[-1] / df_1d["close"].iloc[-2] - 1) * 100
+        
+        weighted_price_change = (price_change_1h * 0.5) + (price_change_4h * 0.3) + (price_change_24h * 0.2)
+        price_score = max(-1, min(1, weighted_price_change / 5))  # نرمال‌سازی بین -۱ تا +۱
+        
+        # ۲. نسبت جهش حجم
+        volume_ratio = ind.get("volume_ratio", 1.0)
+        if volume_ratio > 2.0:
+            volume_score = 1.0
+        elif volume_ratio > 1.5:
+            volume_score = 0.5
+        elif volume_ratio < 0.5:
+            volume_score = -0.5
+        else:
+            volume_score = 0.0
+        
+        # ۳. شاخص ترس و طمع
+        fg_value, _ = get_fear_greed()
+        if fg_value is not None:
+            fg_score = (fg_value - 50) / 50  # نرمال‌سازی بین -۱ تا +۱
+            fg_score = max(-1, min(1, fg_score))
+        else:
+            fg_score = 0.0
+        
+        # نمره نهایی
+        sentiment_score = (price_score * 0.4) + (volume_score * 0.4) + (fg_score * 0.2)
+        return max(-1, min(1, sentiment_score))
+
+    def _get_smart_volatility(self, ind):
+        """نوسان‌پذیری هوشمند: موقعیت قیمت در باند بولینگر"""
+        bb_percent = ind.get("bb_percent", 0.5)
+        if bb_percent > 0.8:
+            return 0.7   # نزدیک به بالای باند (اشباع خرید)
+        elif bb_percent < 0.2:
+            return -0.7  # نزدیک به پایین باند (اشباع فروش)
+        else:
+            return 0.0   # خنثی
+
+    def _get_complementary_trend(self, ind):
+        """قدرت روند مکمل: اختلاف +DI و -DI"""
+        plus_di = ind.get("plus_di", 0)
+        minus_di = ind.get("minus_di", 0)
+        diff = plus_di - minus_di
+        if diff > 15:
+            return 0.7
+        elif diff < -15:
+            return -0.7
+        else:
+            return 0.0
+
+    # ---------- دریافت OHLCV از اسپات ----------
     async def _fetch_ohlcv_symbol(self, code, timeframe, limit=500):
         symbol = self.symbol_for_code(code)
         if not symbol:
             return None
-        source = self.market_status.get(code, {}).get("source", "futures")
-        use_futures = source == "futures"
         async with self._sem:
             for attempt in range(5):
                 try:
-                    if use_futures:
-                        raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
-                    else:
-                        raw = await asyncio.to_thread(exchange_spot_kucoin.fetch_ohlcv, symbol, timeframe, None, limit)
+                    raw = await asyncio.to_thread(exchange_spot_kucoin.fetch_ohlcv, symbol, timeframe, None, limit)
                     df = self._to_dataframe(raw)
                     if df is None or len(df) < 10:
                         logger.debug(f"OHLCV {code} {timeframe}: insufficient rows {len(df) if df is not None else 0}")
@@ -576,122 +662,7 @@ class MarketDataCache:
             self.last_full_ohlcv_update = time.time()
             logger.info("OHLCV refresh complete: %s", {tf: len(self.ohlcv.get(tf, {})) for tf in TIMEFRAMES})
 
-    async def get_funding_rate(self, code):
-        symbol = self.symbol_for_code(code)
-        if not symbol:
-            return 0.0
-        source = self.market_status.get(code, {}).get("source", "futures")
-        if source == "spot":
-            return 0.0
-        cached = self._funding_cache.get(code)
-        if cached is not None and time.time() - cached["ts"] < FUNDING_TTL_SECONDS:
-            return cached["value"]
-        async with self._funding_lock:
-            cached = self._funding_cache.get(code)
-            if cached is not None and time.time() - cached["ts"] < FUNDING_TTL_SECONDS:
-                return cached["value"]
-            try:
-                funding = await asyncio.to_thread(exchange.fetch_funding_rate, symbol)
-                value = float(funding.get("fundingRate") or 0) * 100
-                self._funding_cache[code] = {"value": value, "ts": time.time()}
-                return value
-            except Exception as e:
-                logger.debug("Funding failed | code=%s | error=%s", code, e)
-                if cached is not None:
-                    return cached["value"]
-                return 0.0
-
-    def _check_structure(self, df, direction):
-        if df is None or len(df) < 30:
-            return False
-        high = df["high"].iloc[-20:]
-        low = df["low"].iloc[-20:]
-        price = float(df["close"].iloc[-1])
-        prev_high = float(high.max())
-        prev_low = float(low.min())
-        if direction == "LONG":
-            if price > prev_high * 1.001:
-                return True
-            last_candle = df.iloc[-1]
-            if last_candle["close"] > last_candle["open"] and (last_candle["close"] - last_candle["low"]) > 2 * (last_candle["high"] - last_candle["close"]):
-                return True
-            return False
-        else:
-            if price < prev_low * 0.999:
-                return True
-            last_candle = df.iloc[-1]
-            if last_candle["close"] < last_candle["open"] and (last_candle["high"] - last_candle["close"]) > 2 * (last_candle["close"] - last_candle["low"]):
-                return True
-            return False
-
-    def _check_mtf(self, code, direction, mode):
-        config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
-        main_tf = config["main_tf"]
-        confirm_tfs = config["confirm_tfs"]
-        confirm_count = 0
-        df_main = self.ohlcv.get(main_tf, {}).get(code)
-        if df_main is not None and len(df_main) > 50:
-            price = float(df_main["close"].iloc[-1])
-            ema200 = EMAIndicator(df_main["close"], window=200).ema_indicator().iloc[-1]
-            if direction == "LONG" and price > ema200:
-                confirm_count += 1
-            elif direction == "SHORT" and price < ema200:
-                confirm_count += 1
-        for tf in confirm_tfs:
-            df = self.ohlcv.get(tf, {}).get(code)
-            if df is not None and len(df) > 50:
-                price = float(df["close"].iloc[-1])
-                ema200 = EMAIndicator(df["close"], window=200).ema_indicator().iloc[-1]
-                if direction == "LONG" and price > ema200:
-                    confirm_count += 1
-                elif direction == "SHORT" and price < ema200:
-                    confirm_count += 1
-        return confirm_count >= 2
-
-    def _check_momentum(self, ind, direction):
-        score = 0
-        if direction == "LONG":
-            if ind["macd_hist"] > 0:
-                score += 1
-            if ind["rsi"] > 50:
-                score += 1
-            if ind["roc"] > 0:
-                score += 1
-            if ind["bullish_div"] or ind["macd_bullish_div"]:
-                score += 1
-        else:
-            if ind["macd_hist"] < 0:
-                score += 1
-            if ind["rsi"] < 50:
-                score += 1
-            if ind["roc"] < 0:
-                score += 1
-            if ind["bearish_div"] or ind["macd_bearish_div"]:
-                score += 1
-        return score >= 2
-
-    def _check_volume(self, ind):
-        if ind["volume_ratio"] >= 1.5:
-            return True
-        if ind["volume_spike"]:
-            return True
-        return False
-
-    def _check_sentiment(self, code, direction):
-        funding = self._funding_cache.get(code, {}).get("value", 0)
-        if direction == "LONG":
-            return funding < 0.05
-        else:
-            return funding > -0.05
-
-    def _check_trend(self, ind, mode):
-        config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
-        if ind["adx"] < config["adx_min"]:
-            return False
-        if ind["atr_pct"] < 0.5 or ind["atr_pct"] > 8:
-            return False
-        return True
-
+    # ---------- شاخص‌های اصلی ----------
     async def get_indicators(self, code, mode="standard"):
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
         main_tf = config["main_tf"]
@@ -890,7 +861,7 @@ def get_win_rate_estimate():
     total = len(signal_history)
     return (wins / total * 100) if total > 0 else 50.0
 
-# ---------- نرخ تومان از ولکس ----------
+# ---------- نرخ تومان ----------
 def fetch_irt_rate_wallex():
     try:
         r = requests.get("https://api.wallex.ir/v1/markets", timeout=8)
@@ -938,9 +909,6 @@ def fmt_amount(usdt_value, chat_id):
         return irt_txt
     return f"{usdt_txt}\n {irt_txt}"
 
-def sym(code):
-    return f"{RLM}{code}/USDT{RLM}"
-
 def shamsi_now():
     dt = datetime.now(TEHRAN_TZ) if TEHRAN_TZ else datetime.now()
     return jdatetime.datetime.fromgregorian(datetime=dt).strftime("%Y/%m/%d - %H:%M")
@@ -968,23 +936,11 @@ def confidence_badge(confidence):
     if confidence >= 60: return "🌥 قابل بررسی"
     return "💤 ضعیف"
 
-def mood_emoji(plan):
-    if plan.direction == "LONG":
-        return "🚀" if plan.confidence >= 85 else "🔥" if plan.confidence >= 70 else "📈"
-    return "🔻" if plan.confidence >= 85 else "⚠️" if plan.confidence >= 70 else "📉"
-
 def signal_grade(confidence):
     if confidence >= 85: return "A (بسیار قوی)"
     if confidence >= 75: return "B (قوی)"
     if confidence >= 65: return "C (متوسط)"
     return "D (ضعیف)"
-
-async def delete_news_messages_after_delay(app, chat_id, message_id, delay=NEWS_AUTO_DELETE_SECONDS):
-    await asyncio.sleep(delay)
-    try:
-        await app.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
 
 # ---------- Fear & Greed ----------
 def fetch_fear_greed_index():
@@ -1006,284 +962,14 @@ async def get_fear_greed():
         fear_greed_cache.update(value=value, classification=classification, ts=now)
     return value, classification
 
-# ---------- Events ----------
-def fetch_upcoming_events():
-    try:
-        r = requests.get("https://api.coingecko.com/api/v3/events?upcoming=true", timeout=10)
-        r.raise_for_status()
-        data = r.json().get("data", [])
-        events = []
-        for ev in data:
-            name = ev.get("title") or ev.get("name", "رویداد")
-            date_str = ev.get("date", "")
-            if not date_str:
-                continue
-            try:
-                event_time = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-            except:
-                continue
-            importance = "medium"
-            if "hard fork" in name.lower() or "upgrade" in name.lower() or "ethereum" in name.lower():
-                importance = "high"
-            description = ev.get("description", "")[:200]
-            events.append({
-                "name": name,
-                "time": event_time,
-                "importance": importance,
-                "description": description,
-                "impact": "مشخص نیست"
-            })
-        return events
-    except Exception as e:
-        logger.warning("Events fetch failed: %s", e)
-        return []
-
-async def get_upcoming_events(force=False):
-    now = time.time()
-    if not force and upcoming_events_cache["events"] and now - upcoming_events_cache["ts"] < EVENTS_CHECK_SECONDS:
-        return upcoming_events_cache["events"]
-    events = fetch_upcoming_events()
-    if events:
-        upcoming_events_cache.update(events=events, ts=now)
-    return events
-
-async def check_and_notify_events(app):
-    events = await get_upcoming_events(force=True)
-    now_utc = datetime.now(tz=TEHRAN_TZ) if TEHRAN_TZ else datetime.now()
-    upcoming = []
-    for ev in events:
-        event_time = ev["time"]
-        if event_time.tzinfo is None:
-            event_time = event_time.replace(tzinfo=TEHRAN_TZ)
-        delta = event_time - now_utc
-        if timedelta(0) <= delta <= timedelta(hours=24):
-            upcoming.append(ev)
-    if upcoming:
-        for chat_id in subscribed_chat_ids:
-            text = "📅 *رویدادهای مهم کریپتو در ۲۴ ساعت آینده:*\n" + DIVIDER + "\n"
-            for ev in upcoming[:5]:
-                importance_emoji = "🔴" if ev.get("importance") == "high" else "🟡" if ev.get("importance") == "medium" else "🟢"
-                text += f"{importance_emoji} *{ev['name']}*\n"
-                text += f"🕒 {shamsi_date(ev['time'])} {ev['time'].strftime('%H:%M')}\n"
-                if ev.get("description"):
-                    text += f"📝 {ev['description'][:100]}...\n"
-                if ev.get("impact"):
-                    text += f"📊 تأثیر مورد انتظار: {ev['impact']}\n"
-                text += "\n"
-            try:
-                msg = await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
-                asyncio.create_task(delete_news_messages_after_delay(app, chat_id, msg.message_id))
-            except Exception as e:
-                logger.warning("Event notify failed: %s", e)
-
-# ---------- Whale Alerts ----------
-def fetch_whale_alerts():
-    try:
-        if WHALE_ALERT_API_KEY:
-            url = f"https://api.whale-alert.io/v1/transactions?api_key={WHALE_ALERT_API_KEY}&min_value={WHALE_MIN_AMOUNT_BTC * 1000000}&limit=10"
-            r = requests.get(url, timeout=10)
-            r.raise_for_status()
-            data = r.json().get("transactions", [])
-            alerts = []
-            for tx in data:
-                amount_btc = float(tx.get("amount", 0))
-                symbol = tx.get("symbol", "BTC")
-                from_address = tx.get("from", {}).get("address", "")
-                to_address = tx.get("to", {}).get("address", "")
-                from_owner = tx.get("from", {}).get("owner_type", "")
-                to_owner = tx.get("to", {}).get("owner_type", "")
-                exchange_keywords = ["exchange", "wallet", "binance", "coinbase", "kraken", "okx", "bybit"]
-                from_is_exchange = any(kw in from_owner.lower() for kw in exchange_keywords) if from_owner else False
-                to_is_exchange = any(kw in to_owner.lower() for kw in exchange_keywords) if to_owner else False
-                flow_type = "unknown"
-                if from_is_exchange and not to_is_exchange:
-                    flow_type = "خروج از صرافی (احتمال فروش)"
-                elif not from_is_exchange and to_is_exchange:
-                    flow_type = "ورود به صرافی (احتمال فروش)"
-                elif from_is_exchange and to_is_exchange:
-                    flow_type = "انتقال بین صرافی‌ها"
-                else:
-                    flow_type = "انتقال بین کیف‌پول‌ها"
-                impact = "خنثی"
-                if flow_type == "خروج از صرافی" and amount_btc > 2000:
-                    impact = "نزولی 📉 (احتمال فروش)"
-                elif flow_type == "ورود به صرافی" and amount_btc > 2000:
-                    impact = "نزولی 📉 (احتمال فروش)"
-                elif amount_btc > 5000:
-                    impact = "صعودی 📈 (انباشت نهنگ)"
-                alerts.append({
-                    "amount_btc": amount_btc,
-                    "symbol": symbol,
-                    "timestamp": time.time(),
-                    "from_address": from_address[:10] + "...",
-                    "to_address": to_address[:10] + "...",
-                    "from_owner": from_owner or "ناشناس",
-                    "to_owner": to_owner or "ناشناس",
-                    "flow_type": flow_type,
-                    "impact": impact,
-                    "value_usd": amount_btc * cache.prices.get("BTC", 0)
-                })
-            return alerts
-        else:
-            url = "https://blockchain.info/unconfirmed-transactions?format=json"
-            r = requests.get(url, timeout=10)
-            r.raise_for_status()
-            txs = r.json().get("txs", [])
-            alerts = []
-            for tx in txs:
-                total_out = sum(out.get("value", 0) for out in tx.get("out", [])) / 1e8
-                if total_out >= WHALE_MIN_AMOUNT_BTC:
-                    alerts.append({
-                        "amount_btc": total_out,
-                        "symbol": "BTC",
-                        "timestamp": time.time(),
-                        "from_address": "مشخص نیست",
-                        "to_address": "مشخص نیست",
-                        "from_owner": "ناشناس",
-                        "to_owner": "ناشناس",
-                        "flow_type": "نامشخص",
-                        "impact": "مشخص نیست",
-                        "value_usd": total_out * cache.prices.get("BTC", 0)
-                    })
-            return alerts[:5]
-    except Exception as e:
-        logger.warning("Whale alert fetch failed: %s", e)
-        return []
-
-async def whale_monitor_loop(app):
-    await asyncio.sleep(60)
-    while True:
-        try:
-            if subscribed_chat_ids:
-                alerts = fetch_whale_alerts()
-                if alerts:
-                    for alert in alerts[:5]:
-                        amount = alert["amount_btc"]
-                        symbol = alert["symbol"]
-                        flow = alert["flow_type"]
-                        impact = alert["impact"]
-                        value_usd = alert.get("value_usd", 0)
-                        from_addr = alert.get("from_address", "نامشخص")
-                        to_addr = alert.get("to_address", "نامشخص")
-                        from_owner = alert.get("from_owner", "ناشناس")
-                        to_owner = alert.get("to_owner", "ناشناس")
-                        whale_emoji = "🐋" if amount > 5000 else "🐳"
-                        text = (
-                            f"{whale_emoji} *حرکت نهنگ بزرگ*\n"
-                            f"💰 مقدار: **{amount:,.0f} {symbol}** (~{value_usd:,.0f} دلار)\n"
-                            f"🔗 شبکه: {symbol}\n"
-                            f"📌 از آدرس: `{from_addr}`\n"
-                            f"📌 به آدرس: `{to_addr}`\n"
-                            f"🏷️ برچسب مبدأ: {from_owner}\n"
-                            f"🏷️ برچسب مقصد: {to_owner}\n"
-                            f"📊 نوع تراکنش: {flow}\n"
-                            f"📈 تأثیر احتمالی: {impact}\n"
-                            f"🕒 {shamsi_now()}"
-                        )
-                        add_news_alert(text, importance="high", impact=impact, details=alert)
-                    
-                    for chat_id in subscribed_chat_ids:
-                        latest = news_history[-1] if news_history else None
-                        if latest and latest.get("importance") == "high":
-                            msg = await app.bot.send_message(chat_id=chat_id, text=rtl_lines(latest["text"]), parse_mode="Markdown")
-                            asyncio.create_task(delete_news_messages_after_delay(app, chat_id, msg.message_id))
-        except Exception as e:
-            logger.exception("Whale monitor error: %s", e)
-        await asyncio.sleep(WHALE_CHECK_SECONDS)
-
-# ---------- Macro event monitor ----------
-async def fetch_macro_events():
-    return []
-
-async def macro_event_monitor_loop(app):
-    await asyncio.sleep(120)
-    while True:
-        try:
-            if subscribed_chat_ids:
-                events = await fetch_macro_events()
-                for ev in events:
-                    text = (
-                        f"📰 *رویداد کلان اقتصادی*\n"
-                        f"{ev.get('title', 'رویداد')}\n"
-                        f"🕒 {shamsi_now()}\n"
-                        f"📊 سطح اهمیت: {ev.get('importance', 'medium')}\n"
-                        f"📈 تأثیر مورد انتظار: {ev.get('impact', 'نامشخص')}\n"
-                        f"📝 {ev.get('description', '')[:200]}"
-                    )
-                    add_news_alert(text, importance=ev.get('importance', 'medium'), impact=ev.get('impact', ''))
-                    for chat_id in subscribed_chat_ids:
-                        msg = await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
-                        asyncio.create_task(delete_news_messages_after_delay(app, chat_id, msg.message_id))
-        except Exception as e:
-            logger.exception("Macro event monitor error: %s", e)
-        await asyncio.sleep(6 * 3600)
-
-# ---------- Advanced Reporting ----------
-def compute_advanced_stats(signal_history, mode=None):
-    filtered = [r for r in signal_history if mode is None or r.get("mode") == mode]
-    if not filtered:
-        return {
-            "sharpe": 0, "max_drawdown": 0, "expectancy": 0,
-            "risk_of_ruin": 0, "total_trades": 0, "win_rate": 0,
-            "profit_factor": 0, "avg_confidence": 0,
-            "wins": 0, "losses": 0
-        }
-    returns = []
-    wins = 0
-    losses = 0
-    for rec in filtered:
-        if rec["status"] == "tp3_hit":
-            returns.append(3 * (rec["tp_prices"][2] - rec["entry_price"]))
-            wins += 1
-        elif rec["status"] == "tp2_hit":
-            returns.append(2 * (rec["tp_prices"][1] - rec["entry_price"]))
-            wins += 1
-        elif rec["status"] == "tp1_hit":
-            returns.append(1 * (rec["tp_prices"][0] - rec["entry_price"]))
-            wins += 1
-        elif rec["status"] == "sl_hit":
-            returns.append(rec["entry_price"] - rec["sl_price"])
-            losses += 1
-    if not returns:
-        return {
-            "sharpe": 0, "max_drawdown": 0, "expectancy": 0,
-            "risk_of_ruin": 0, "total_trades": 0, "win_rate": 0,
-            "profit_factor": 0, "avg_confidence": 0,
-            "wins": 0, "losses": 0
-        }
-    returns = np.array(returns)
-    win_rate = wins / len(returns) * 100
-    avg_return = np.mean(returns)
-    std_return = np.std(returns) if len(returns) > 1 else 1e-9
-    sharpe = (avg_return / std_return) * np.sqrt(365) if std_return != 0 else 0
-    cumulative = np.cumsum(returns)
-    max_dd = 0
-    peak = cumulative[0]
-    for val in cumulative:
-        if val > peak:
-            peak = val
-        dd = peak - val
-        if dd > max_dd:
-            max_dd = dd
-    expectancy = avg_return
-    risk_of_ruin = (1 - (wins / len(returns))) ** 10 * 100
-    profit_factor = (sum(r for r in returns if r > 0) / abs(sum(r for r in returns if r <= 0))) if losses else 999
-    avg_confidence = np.mean([rec["confidence"] for rec in filtered]) if filtered else 0
-    return {
-        "sharpe": sharpe, "max_drawdown": max_dd, "expectancy": expectancy,
-        "risk_of_ruin": risk_of_ruin, "total_trades": len(returns),
-        "win_rate": win_rate, "profit_factor": profit_factor,
-        "avg_confidence": avg_confidence, "wins": wins, "losses": losses,
-    }
-
-# ---------- توابع تحلیل لایه‌ها ----------
+# ---------- توابع تحلیل لایه‌ها (۱۰ لایه) ----------
 async def analyze_layers(code, direction, ind, mode, cache_obj):
     config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
     df = cache_obj.ohlcv.get(config["main_tf"], {}).get(code)
     
     results = {}
     
-    # لایه ۱: ساختار بازار
+    # ۱. ساختار بازار
     if df is not None and len(df) > 30:
         high = df["high"].iloc[-20:]
         low = df["low"].iloc[-20:]
@@ -1304,7 +990,7 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
     else:
         results["structure"] = False
     
-    # لایه ۲: هم‌گرایی تایم‌فریم
+    # ۲. هم‌گرایی تایم‌فریم
     main_tf = config["main_tf"]
     confirm_tfs = config["confirm_tfs"]
     mtf_count = 0
@@ -1327,7 +1013,7 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
                 mtf_count += 1
     results["mtf"] = mtf_count >= 2
     
-    # لایه ۳: مومنتوم
+    # ۳. مومنتوم
     momentum_score = 0
     if direction == "LONG":
         if ind["macd_hist"] > 0: momentum_score += 1
@@ -1341,22 +1027,53 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
         if ind["bearish_div"] or ind["macd_bearish_div"]: momentum_score += 1
     results["momentum"] = momentum_score >= 2
     
-    # لایه ۴: حجم
+    # ۴. حجم
     results["volume"] = ind["volume_ratio"] >= 1.5 or ind["volume_spike"]
     
-    # لایه ۵: احساسات (فاندینگ)
-    funding = cache_obj._funding_cache.get(code, {}).get("value", 0)
+    # ۵. احساسات بازار (جایگزین فاندینگ)
+    sentiment_score = cache_obj._calculate_sentiment_score(code, ind)
     if direction == "LONG":
-        results["sentiment"] = funding < 0.05
+        results["sentiment"] = sentiment_score > 0.3
     else:
-        results["sentiment"] = funding > -0.05
+        results["sentiment"] = sentiment_score < -0.3
     
-    # لایه ۶: روند
+    # ۶. روند
     results["trend"] = ind["adx"] >= config["adx_min"] and (0.5 <= ind["atr_pct"] <= 8)
+    
+    # ۷. جریان سفارشات
+    order_flow = await cache_obj._get_order_flow(code)
+    if order_flow > 0:
+        if direction == "LONG":
+            results["order_flow"] = order_flow > 1.2
+        else:
+            results["order_flow"] = order_flow < 0.8
+    else:
+        results["order_flow"] = False
+    
+    # ۸. تنوع بازار
+    breadth = cache_obj._get_market_breadth()
+    if direction == "LONG":
+        results["breadth"] = breadth > 60
+    else:
+        results["breadth"] = breadth < 40
+    
+    # ۹. نوسان‌پذیری هوشمند
+    smart_vol = cache_obj._get_smart_volatility(ind)
+    if direction == "LONG":
+        results["smart_vol"] = smart_vol < -0.3  # نزدیک به پایین باند (فرصت خرید)
+    else:
+        results["smart_vol"] = smart_vol > 0.3   # نزدیک به بالای باند (فرصت فروش)
+    
+    # ۱۰. قدرت روند مکمل
+    comp_trend = cache_obj._get_complementary_trend(ind)
+    if direction == "LONG":
+        results["comp_trend"] = comp_trend > 0.3
+    else:
+        results["comp_trend"] = comp_trend < -0.3
     
     return results
 
-# ---------- تولید سیگنال جدید ----------
+# ---------- تولید سیگنال جدید (۱۰ لایه) ----------
 async def generate_trade_plan_v2(code, mode="standard"):
     try:
         await cache.update_prices(force=True, codes=[code])
@@ -1370,11 +1087,19 @@ async def generate_trade_plan_v2(code, mode="standard"):
         long_layers = await analyze_layers(code, "LONG", ind, mode, cache)
         short_layers = await analyze_layers(code, "SHORT", ind, mode, cache)
         
-        long_confirmed = sum(1 for v in long_layers.values() if v)
-        short_confirmed = sum(1 for v in short_layers.values() if v)
+        # محاسبه امتیاز وزنی برای هر جهت
+        long_score = 0
+        short_score = 0
+        long_confirmed = 0
+        short_confirmed = 0
         
-        long_score = long_confirmed / 6 * 100
-        short_score = short_confirmed / 6 * 100
+        for layer, weight in LAYER_WEIGHTS.items():
+            if long_layers.get(layer, False):
+                long_score += weight
+                long_confirmed += 1
+            if short_layers.get(layer, False):
+                short_score += weight
+                short_confirmed += 1
         
         direction = None
         confidence = 0
@@ -1405,7 +1130,8 @@ async def generate_trade_plan_v2(code, mode="standard"):
             logger.info(f"RR too low for {code}: {levels['rr']:.2f} < {config['min_rr']}")
             return None
         
-        funding = await cache.get_funding_rate(code)
+        # فاندینگ حذف شده - از sentiment_score استفاده می‌شود
+        funding = 0.0
         
         fg_value, _ = await get_fear_greed()
         if fg_value is not None:
@@ -1490,8 +1216,6 @@ def build_ladder_weighted(ind, direction, mode):
     risk = abs(avg_entry - initial_stop)
     reward = abs(take_profits[-1] - avg_entry)
     rr = reward / risk if risk > 0 else 0
-    entry_to_sl_pct = (risk / avg_entry * 100) if avg_entry > 0 else 0
-    entry_to_tp_pct = (reward / avg_entry * 100) if avg_entry > 0 else 0
     return {
         "entries": entries,
         "stop_losses": [initial_stop],
@@ -1500,8 +1224,8 @@ def build_ladder_weighted(ind, direction, mode):
         "risk": risk,
         "reward": reward,
         "rr": rr,
-        "entry_to_sl_pct": entry_to_sl_pct,
-        "entry_to_tp_pct": entry_to_tp_pct,
+        "entry_to_sl_pct": (risk / avg_entry * 100) if avg_entry > 0 else 0,
+        "entry_to_tp_pct": (reward / avg_entry * 100) if avg_entry > 0 else 0,
         "sl_atr": risk / atr if atr > 0 else 0,
         "tp_atr": reward / atr if atr > 0 else 0,
     }
@@ -1601,18 +1325,11 @@ def format_main_signal_v2(plan, code, chat_id):
     direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
     mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
     
+    # نمایش ۱۰ لایه
     layers_text = ""
-    layer_names = {
-        "structure": "ساختار بازار",
-        "mtf": "هم‌گرایی تایم‌فریم",
-        "momentum": "مومنتوم",
-        "volume": "حجم معاملات",
-        "sentiment": "احساسات بازار",
-        "trend": "روند"
-    }
-    for key, ok in plan.layer_results.items():
+    for layer, ok in plan.layer_results.items():
         emoji = "✅" if ok else "❌"
-        layers_text += f"{emoji} {layer_names.get(key, key)}\n"
+        layers_text += f"{emoji} {LAYER_NAMES.get(layer, layer)}\n"
     
     grade_emoji = {"A": "🔥", "B": "⚡", "C": "📊", "D": "💤"}.get(plan.signal_grade[:1], "📊")
     
@@ -1621,7 +1338,7 @@ def format_main_signal_v2(plan, code, chat_id):
         f"🕒 {shamsi_now()}\n"
         f"🛠️ حالت: {mode_label} | درجه: {plan.signal_grade}\n"
         f"{DIVIDER}\n"
-        f"🧩 *تحلیل لایه‌ای:*\n{layers_text}\n"
+        f"🧩 *تحلیل ۱۰ لایه‌ای:*\n{layers_text}\n"
         f"🎯 *اطمینان:* {plan.confidence:.0f}٪ ({confidence_badge(plan.confidence)})\n"
         f"📊 *نرخ موفقیت تخمینی:* {plan.win_rate_estimate:.1f}٪\n"
         f"📐 *نسبت ریسک به بازده:* 1:{plan.rr:.2f}\n"
@@ -1649,22 +1366,18 @@ def format_status_dashboard(code, ind, plan, chat_id, mode):
     header = f"🧭 *وضعیت لحظه‌ای* {code}/USDT\n🕒 {shamsi_now()}\n🛠️ حالت: {mode_label}\n{DIVIDER}\n"
     price_text = f"💰 قیمت: {fmt_amount(ind['price'], chat_id)}\n📊 روند EMA200: {ind['trend_label']}\n{DIVIDER}\n"
     
-    layers_text = "📋 *وضعیت لایه‌های تحلیل:*\n"
+    layers_text = "📋 *وضعیت لایه‌های تحلیل (۱۰ لایه):*\n"
     if plan and plan.layer_results:
-        layer_names = {
-            "structure": "ساختار بازار",
-            "mtf": "هم‌گرایی تایم‌فریم",
-            "momentum": "مومنتوم",
-            "volume": "حجم معاملات",
-            "sentiment": "احساسات بازار",
-            "trend": "روند"
-        }
         confirmed = 0
-        for key, ok in plan.layer_results.items():
+        total_weight = 0
+        for layer, ok in plan.layer_results.items():
             emoji = "✅" if ok else "❌"
-            layers_text += f"{emoji} {layer_names.get(key, key)}\n"
-            if ok: confirmed += 1
-        layers_text += f"\n💡 *جمع‌بندی:* {confirmed} از ۶ فیلتر تأیید شد"
+            weight = LAYER_WEIGHTS.get(layer, 0)
+            layers_text += f"{emoji} {LAYER_NAMES.get(layer, layer)} (وزن: {weight}%)\n"
+            if ok:
+                confirmed += 1
+                total_weight += weight
+        layers_text += f"\n💡 *جمع‌بندی:* {confirmed} از ۱۰ لایه تأیید شد | امتیاز وزنی: {total_weight}%"
     else:
         layers_text = "⏳ در حال تحلیل...\n"
     
@@ -1686,7 +1399,7 @@ def format_status_dashboard(code, ind, plan, chat_id, mode):
         )
     return rtl_lines(header + price_text + layers_text + footer + f"\n{DIVIDER}\n⚠️ این تحلیل تکنیکال است و تضمین سود یا توصیه مالی نیست.")
 
-# ---------- توابع اصلی هماهنگ ----------
+# ---------- توابع اصلی ----------
 async def generate_trade_plan(code, mode="standard"):
     return await generate_trade_plan_v2(code, mode)
 
@@ -1761,7 +1474,7 @@ async def generate_weekly_summary_async(code, chat_id):
     ret_24h = float(returns.iloc[-1]) if not returns.empty else 0
     best_date = shamsi_date(week_df.loc[best_idx, "timestamp"]) if best_idx in week_df.index else "-"
     worst_date = shamsi_date(week_df.loc[worst_idx, "timestamp"]) if worst_idx in week_df.index else "-"
-    funding = await cache.get_funding_rate(code)
+    funding = 0.0  # حذف فاندینگ
     fg_value, fg_class = await get_fear_greed()
     text = (
         f"📊 *تحلیل جامع ارز* {code}\n"
@@ -1800,9 +1513,8 @@ async def generate_weekly_summary_async(code, chat_id):
     text += f"\n📐 پهنای بولینگر: {bb_width:.2f}" if bb_width is not None else "\n📐 پهنای بولینگر: -"
     text += (
         f"\n{DIVIDER}\n"
-        f"💰 فاندینگ: {funding:+.3f}%\n"
         f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-        f"{DIVIDER}\nℹ️ داده‌ها از قراردادهای USDT Perpetual در KuCoin محاسبه شده‌اند."
+        f"{DIVIDER}\nℹ️ داده‌ها از بازار اسپات کوکوین و مکس محاسبه شده‌اند."
     )
     return rtl_lines(text)
 
@@ -1839,7 +1551,7 @@ def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
         parts.append(current.strip())
     return parts
 
-# ---------- مدیریت صفحه نمایش و پیام‌ها ----------
+# ---------- مدیریت صفحه نمایش ----------
 async def clear_interactive_screen(context, chat_id, keep_id=None):
     ids = interactive_screen_messages.pop(chat_id, [])
     for mid in ids:
@@ -1850,30 +1562,16 @@ async def clear_interactive_screen(context, chat_id, keep_id=None):
 def set_interactive_screen(chat_id, message_ids):
     interactive_screen_messages[chat_id] = message_ids
 
-def add_to_interactive_screen(chat_id, message_id):
-    if chat_id not in interactive_screen_messages:
-        interactive_screen_messages[chat_id] = []
-    interactive_screen_messages[chat_id].append(message_id)
-
 async def clear_overlay(context, chat_id):
     ids = overlay_messages.pop(chat_id, [])
     for mid in ids:
         try: await context.bot.delete_message(chat_id=chat_id, message_id=mid)
         except Exception: pass
 
-async def track_auto_message(app, chat_id, message_id):
-    history = auto_message_history.setdefault(chat_id, [])
-    history.append(message_id)
-    while len(history) > AUTO_KEEP_LAST_N:
-        old = history.pop(0)
-        try: await app.bot.delete_message(chat_id=chat_id, message_id=old)
-        except Exception: pass
-
 # ---------- کیبوردها ----------
 def build_grid_keyboard(buttons, columns):
     rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
-    # بدون noop – جای خالی پر نمی‌شود
-    return rows
+    return rows  # بدون noop
 
 def kb_currency():
     return InlineKeyboardMarkup([
@@ -2033,7 +1731,7 @@ def help_text(step):
         return rtl_lines(
             "📖 *شروع کار با ربات*\n"
             f"{DIVIDER}\n"
-            "این ربات به شما کمک می‌کند سیگنال‌های معاملاتی فیوچرز دریافت کنید.\n"
+            "این ربات با تحلیل ۱۰ لایه‌ای، سیگنال‌های معاملاتی فیوچرز تولید می‌کند.\n"
             "پس از شروع، ابتدا واحد پولی را انتخاب کنید.\n"
             "سپس سبک معاملاتی خود را از چهار حالت انتخاب کنید.\n"
             "در نهایت منوی اصلی نمایش داده می‌شود."
@@ -2056,11 +1754,15 @@ def help_text(step):
         )
     elif step == 3:
         return rtl_lines(
-            "📊 *تحلیل‌ها و سیگنال‌ها*\n"
+            "📊 *تحلیل‌ها و سیگنال‌ها (۱۰ لایه)*\n"
             f"{DIVIDER}\n"
-            "سیگنال‌ها بر اساس ۶ لایه تحلیل (ساختار بازار، هم‌گرایی تایم‌فریم، مومنتوم، حجم، احساسات، روند) تولید می‌شوند.\n"
-            "حداقل ۳ تا ۵ لایه (بسته به حالت) باید تأیید شوند.\n"
-            "ضریب اطمینان = درصد لایه‌های تأییدشده.\n"
+            "سیگنال‌ها بر اساس ۱۰ لایه تحلیل تولید می‌شوند:\n"
+            "۱. ساختار بازار | ۲. هم‌گرایی تایم‌فریم | ۳. مومنتوم\n"
+            "۴. حجم معاملات | ۵. احساسات بازار (جایگزین فاندینگ)\n"
+            "۶. روند | ۷. جریان سفارشات | ۸. تنوع بازار\n"
+            "۹. نوسان‌پذیری هوشمند | ۱۰. قدرت روند مکمل\n"
+            "حداقل ۴ تا ۷ لایه (بسته به حالت) باید تأیید شوند.\n"
+            "ضریب اطمینان = امتیاز وزنی لایه‌های تأییدشده.\n"
             "نرخ موفقیت تخمینی = درصد موفقیت سیگنال‌های گذشته.\n"
             "نسبت ریسک به بازده = نسبت سود بالقوه به ضرر احتمالی.\n"
             "اهرم پویا = بر اساس قدرت سیگنال و حالت معاملاتی.\n"
@@ -2079,10 +1781,13 @@ def help_text(step):
             f"{DIVIDER}\n"
             "ساختار بازار: شکست مقاومت یا برگشت از حمایت\n"
             "هم‌گرایی تایم‌فریم: همراستایی حداقل ۲ تایم‌فریم\n"
-            "احساسات بازار: وضعیت فاندینگ و Open Interest\n"
+            "احساسات بازار: ترکیبی از تغییر قیمت، حجم و ترس و طمع\n"
+            "جریان سفارشات: نسبت سفارشات خرید به فروش\n"
+            "تنوع بازار: درصد ارزهای بالای EMA۲۰\n"
+            "نوسان‌پذیری هوشمند: موقعیت قیمت در باند بولینگر\n"
+            "قدرت روند مکمل: اختلاف +DI و -DI\n"
             "رژیم بازار: رونددار (ADX بالا) یا رنج (ADX پایین)\n"
-            "اهرم پویا: اهرم پیشنهادی بر اساس قدرت سیگنال\n"
-            "ضریب اطمینان: درصد لایه‌های تأییدشده"
+            "اهرم پویا: اهرم پیشنهادی بر اساس قدرت سیگنال"
         )
     elif step == 6:
         return rtl_lines(
@@ -2106,7 +1811,7 @@ def welcome_text():
     return rtl_lines(
         "🌟✨ *به سیگنال‌یار حرفه‌ای خوش آمدید!* ✨🌟\n"
         f"{DIVIDER}\n"
-        "🤖 *ربات معاملاتی هوشمند* با تحلیل ۶ لایه‌ای\n"
+        "🤖 *ربات معاملاتی هوشمند* با تحلیل ۱۰ لایه‌ای\n"
         "🎯 *سیگنال‌های لحظه‌ای* با دقت بالا و مدیریت ریسک پویا\n"
         "📊 *تحلیل جامع ارزها* در تایم‌فریم‌های مختلف\n"
         "🔔 *اخبار نهنگ‌ها و رویدادهای مهم* به‌صورت خودکار\n"
@@ -2148,7 +1853,7 @@ async def trailing_monitor_loop(app):
                     for code, data in list(signals.items()):
                         plan = data["plan"]; stage = data["stage"]
                         try:
-                            ticker = await asyncio.to_thread(exchange.fetch_ticker, cache.symbol_for_code(code))
+                            ticker = await asyncio.to_thread(exchange_spot_kucoin.fetch_ticker, cache.symbol_for_code(code))
                             current = float(ticker.get("last") or ticker.get("close") or 0)
                         except Exception as e:
                             logger.debug("Trailing price fetch failed | code=%s | error=%s", code, e)
@@ -2678,7 +2383,7 @@ async def button_handler(update, context):
             set_interactive_screen(chat_id, [query.message.message_id])
         return
 
-    # ----- بخش ادمین: تحلیل جامع بدون پرسش حالت -----
+    # ----- بخش ادمین -----
     if data.startswith("askmode_"):
         if not is_admin_role(chat_id):
             await query.answer("⛔️ فقط ادمین.", show_alert=True); return
@@ -2913,8 +2618,6 @@ def format_technical_details(code, plan, ind, chat_id):
         f"ATR: {fmt_amount(ind['atr'], chat_id)} ({ind['atr_pct']:.2f}%)\n"
         f"حمایت: {fmt_amount(ind['support'], chat_id)} | مقاومت: {fmt_amount(ind['resistance'], chat_id)}\n"
         f"{DIVIDER}\n"
-        f"💰 فاندینگ: {plan.funding_rate:+.3f}%\n"
-        f"{DIVIDER}\n"
         f"⚠️ این تحلیل تکنیکال است و تضمین سود نیست."
     )
     return rtl_lines(text)
@@ -2947,7 +2650,7 @@ async def auto_report_loop(app):
                         plan = await generate_trade_plan_v2(code, mode)
                         if plan:
                             current_signals[code] = plan.direction
-                        await asyncio.sleep(0.5)  # کاهش فشار
+                        await asyncio.sleep(0.5)
 
                     prev_signals = last_sent_signals.get(chat_id, {})
 
@@ -2989,7 +2692,7 @@ async def post_init(app):
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
     app.create_task(macro_event_monitor_loop(app))
-    logger.info("Signal Bot V45 (Stable & Enhanced UI) started")
+    logger.info("Signal Bot V50 (10 Layers, Spot Only) started")
 
 def main():
     if not BOT_TOKEN:
