@@ -1,11 +1,10 @@
 """
-Telegram Signal Bot V53 - Institutional Grade (10 Layers, Gate.io Primary + KuCoin & CoinGecko Fallback)
+Telegram Signal Bot V54 - Institutional Grade (10 Layers, Gate.io + KuCoin Spot)
 - Gate.io به عنوان منبع اصلی OHLCV و قیمت
-- کوکوین اسپات و کوین‌گکو به عنوان پشتیبان (به ترتیب)
-- اضافه شدن ارز TON به لیست
+- کوکوین اسپات به عنوان پشتیبان
+- حذف CoinGecko به دلیل عدم پشتیبانی ccxt
+- اضافه شدن ارز TON
 - کش ۱۸۰ ثانیه و بهینه‌سازی سرعت
-- نمایش اطلاعات کامل در وضعیت لحظه‌ای
-- بروزرسانی راهنما با توضیحات منابع داده
 """
 
 import asyncio
@@ -56,7 +55,6 @@ ALWAYS_ALLOWED_USER_IDS = {
 }
 WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 
-# ---------- لیست ارزها (TON اضافه شد) ----------
 COIN_ICONS = {
     "AAVE": "AAVE", "ADA": "ADA", "ALGO": "ALGO", "APE": "APE",
     "APT": "APT", "AR": "AR", "ARB": "ARB", "ATOM": "ATOM",
@@ -68,7 +66,7 @@ COIN_ICONS = {
     "LINK": "LINK", "LTC": "LTC", "LUNC": "LUNC", "MANA": "MANA",
     "MINA": "MINA", "NEAR": "NEAR", "NEO": "NEO", "OP": "OP",
     "POL": "POL", "RUNE": "RUNE", "SAND": "SAND", "SHIB": "SHIB",
-    "SOL": "SOL", "STX": "STX", "SUI": "SUI", "TON": "TON",  # <-- اضافه شد
+    "SOL": "SOL", "STX": "STX", "SUI": "SUI", "TON": "TON",
     "TRX": "TRX", "UNI": "UNI", "VET": "VET", "XLM": "XLM",
     "XMR": "XMR", "XRP": "XRP",
 }
@@ -99,7 +97,7 @@ WEIGHT_BREADTH = 5
 WEIGHT_SMART_VOL = 5
 WEIGHT_COMP_TREND = 10
 
-OHLCV_TTL_SECONDS = 180           # ۱۸۰ ثانیه کش
+OHLCV_TTL_SECONDS = 180
 PRICE_TTL_SECONDS = 30
 FULL_REFRESH_TTL_SECONDS = 120
 MAX_OHLCV_CONCURRENCY = 1
@@ -115,19 +113,12 @@ BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
 # ---------- صرافی‌ها ----------
-# اصلی: Gate.io
 exchange_gateio = ccxt.gateio({
     "enableRateLimit": True,
     "options": {"defaultType": "spot"},
 })
 
-# پشتیبان ۱: کوکوین اسپات
 exchange_spot_kucoin = ccxt.kucoin({
-    "enableRateLimit": True,
-})
-
-# پشتیبان ۲: کوین‌گکو (فقط قیمت و OHLCV محدود)
-exchange_coingecko = ccxt.coingecko({
     "enableRateLimit": True,
 })
 
@@ -295,8 +286,8 @@ class MarketDataCache:
         self.ohlcv = {tf: {} for tf in TIMEFRAMES}
         self.ohlcv_updated_at = {tf: {} for tf in TIMEFRAMES}
         self.valid_codes = []
-        self.exchange_symbols = {}  # کد ارز → بهترین symbol
-        self.symbol_sources = {}    # کد ارز → منبع (gateio, kucoin, coingecko)
+        self.exchange_symbols = {}
+        self.symbol_sources = {}
         self.market_status = {
             code: {"status": "NO SWAP", "symbol": None, "error": None, "source": None}
             for code in COIN_CODES
@@ -317,15 +308,12 @@ class MarketDataCache:
         return self._symbol_locks[code]
 
     def _load_markets(self):
-        """بارگذاری بازارها از Gate.io، کوکوین اسپات و کوین‌گکو"""
         try:
-            # اول Gate.io
             gateio_markets = exchange_gateio.load_markets()
             selected = {}
             sources = {}
             for code in COIN_CODES:
                 found = False
-                # جستجو در Gate.io
                 for symbol, market in gateio_markets.items():
                     if market.get("base") == code and market.get("quote") == "USDT":
                         if market.get("active") is not False and market.get("type") == "spot":
@@ -335,7 +323,6 @@ class MarketDataCache:
                             found = True
                             break
                 if not found:
-                    # جستجو در کوکوین اسپات
                     try:
                         kucoin_markets = exchange_spot_kucoin.load_markets()
                         for symbol, market in kucoin_markets.items():
@@ -349,25 +336,11 @@ class MarketDataCache:
                     except Exception as e:
                         logger.debug(f"KuCoin load markets failed: {e}")
                 if not found:
-                    # جستجو در کوین‌گکو (فقط قیمت و OHLCV محدود)
-                    try:
-                        coingecko_markets = exchange_coingecko.load_markets()
-                        for symbol, market in coingecko_markets.items():
-                            if market.get("base") == code and market.get("quote") == "USDT":
-                                if market.get("active") is not False and market.get("type") == "spot":
-                                    selected[code] = symbol
-                                    sources[code] = "coingecko"
-                                    self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None, "source": "coingecko"}
-                                    found = True
-                                    break
-                    except Exception as e:
-                        logger.debug(f"CoinGecko load markets failed: {e}")
-                if not found:
-                    logger.warning(f"ارز {code} در هیچ صرافی‌ای یافت نشد.")
+                    logger.warning(f"ارز {code} در Gate.io و KuCoin یافت نشد.")
             self.exchange_symbols = selected
             self.symbol_sources = sources
             self.valid_codes = list(selected.keys())
-            logger.info("Markets loaded: %s/%s from Gate.io + KuCoin + CoinGecko", len(self.valid_codes), len(COIN_CODES))
+            logger.info("Markets loaded: %s/%s from Gate.io + KuCoin", len(self.valid_codes), len(COIN_CODES))
         except Exception as e:
             logger.exception("load_markets failed: %s", e)
 
@@ -399,47 +372,6 @@ class MarketDataCache:
         df = df.dropna(subset=required).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df if not df.empty else None
 
-    # ---------- قیمت از کوین‌گکو (فال‌بک) ----------
-    def _get_coingecko_prices(self, codes):
-        prices = {}
-        try:
-            ids_map = {
-                "AAVE": "aave", "ADA": "cardano", "ALGO": "algorand", "APE": "apecoin",
-                "APT": "aptos", "AR": "arweave", "ARB": "arbitrum", "ATOM": "cosmos",
-                "AVAX": "avalanche-2", "BCH": "bitcoin-cash", "BLUR": "blur", "BTC": "bitcoin",
-                "COMP": "compound-governance-token", "DOGE": "dogecoin", "DOT": "polkadot",
-                "EGLD": "elrond-erd-2", "ETC": "ethereum-classic", "ETH": "ethereum",
-                "FET": "fetch-ai", "FIL": "filecoin", "FLOW": "flow", "GALA": "gala",
-                "GRT": "the-graph", "ICP": "internet-computer", "INJ": "injective-protocol",
-                "KAS": "kaspa", "KAVA": "kava", "KSM": "kusama", "LINK": "chainlink",
-                "LTC": "litecoin", "LUNC": "terra-luna-classic", "MANA": "decentraland",
-                "MINA": "mina-protocol", "NEAR": "near", "NEO": "neo", "OP": "optimism",
-                "POL": "polygon-ecosystem-token", "RUNE": "thorchain", "SAND": "the-sandbox",
-                "SHIB": "shiba-inu", "SOL": "solana", "STX": "blockstack", "SUI": "sui",
-                "TON": "the-open-network",  # <-- اضافه شد
-                "TRX": "tron", "UNI": "uniswap", "VET": "vechain", "XLM": "stellar",
-                "XMR": "monero", "XRP": "ripple",
-            }
-            ids = [ids_map[code] for code in codes if code in ids_map]
-            if not ids:
-                return prices
-            url = "https://api.coingecko.com/api/v3/simple/price"
-            params = {"ids": ",".join(ids), "vs_currencies": "usd"}
-            r = requests.get(url, params=params, timeout=10)
-            r.raise_for_status()
-            data = r.json()
-            reverse_map = {v: k for k, v in ids_map.items()}
-            for cg_id, info in data.items():
-                if cg_id in reverse_map:
-                    code = reverse_map[cg_id]
-                    price = info.get("usd")
-                    if price:
-                        prices[code] = float(price)
-        except Exception as e:
-            logger.warning("CoinGecko fetch failed: %s", e)
-        return prices
-
-    # ---------- دریافت قیمت از Gate.io (اصلی) ----------
     async def update_prices(self, force=False, codes=None):
         target_codes = codes if codes is not None else COIN_CODES
         now = time.time()
@@ -449,7 +381,6 @@ class MarketDataCache:
         new_prices = {}
         price_sources.clear()
 
-        # ۱. Gate.io (اصلی)
         try:
             symbols = [f"{code}/USDT" for code in target_codes]
             tickers = await asyncio.to_thread(exchange_gateio.fetch_tickers, symbols)
@@ -460,11 +391,10 @@ class MarketDataCache:
                     price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
                     if price and price > 0:
                         new_prices[code] = float(price)
-                        price_sources[code] = "G"  # Gate.io
+                        price_sources[code] = "G"
         except Exception as e:
             logger.warning("Gate.io fetch_tickers failed: %s", e)
 
-        # ۲. کوکوین اسپات (پشتیبان)
         missing = [code for code in target_codes if code not in new_prices]
         if missing:
             try:
@@ -481,18 +411,6 @@ class MarketDataCache:
             except Exception as e:
                 logger.warning("KuCoin fallback fetch_tickers failed: %s", e)
 
-        # ۳. کوین‌گکو (آخرین پشتیبان)
-        still_missing = [code for code in target_codes if code not in new_prices]
-        if still_missing:
-            try:
-                gecko_prices = await asyncio.to_thread(self._get_coingecko_prices, still_missing)
-                for code, price in gecko_prices.items():
-                    if price and price > 0:
-                        new_prices[code] = price
-                        price_sources[code] = "C"
-            except Exception as e:
-                logger.warning("CoinGecko fallback failed: %s", e)
-
         for code in target_codes:
             if code in new_prices:
                 self.prices[code] = new_prices[code]
@@ -500,7 +418,6 @@ class MarketDataCache:
         logger.info("Prices loaded: %s/%s", len(self.prices), len(COIN_CODES))
         return self.prices
 
-    # ---------- لایه‌های جدید ----------
     def _get_market_breadth(self):
         now = time.time()
         if self._breadth_cache["value"] is not None and now - self._breadth_cache["ts"] < 60:
@@ -595,7 +512,6 @@ class MarketDataCache:
         else:
             return 0.0
 
-    # ---------- دریافت OHLCV با اولویت Gate.io -> KuCoin -> CoinGecko ----------
     async def _fetch_ohlcv_symbol(self, code, timeframe, limit=500):
         symbol = self.symbol_for_code(code)
         if not symbol:
@@ -607,19 +523,13 @@ class MarketDataCache:
         elif source == "kucoin":
             exchanges = [(exchange_spot_kucoin, "kucoin")]
         else:
-            exchanges = [(exchange_gateio, "gateio"), (exchange_spot_kucoin, "kucoin"), (exchange_coingecko, "coingecko")]
+            exchanges = [(exchange_gateio, "gateio"), (exchange_spot_kucoin, "kucoin")]
 
         async with self._sem:
             for ex, name in exchanges:
                 for attempt in range(3):
                     try:
-                        if name == "coingecko":
-                            # کوین‌گکو فقط تایم‌فریم‌های خاصی دارد
-                            tf_map = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
-                            tf = tf_map.get(timeframe, "1h")
-                            raw = await asyncio.to_thread(ex.fetch_ohlcv, symbol, tf, None, limit)
-                        else:
-                            raw = await asyncio.to_thread(ex.fetch_ohlcv, symbol, timeframe, None, limit)
+                        raw = await asyncio.to_thread(ex.fetch_ohlcv, symbol, timeframe, None, limit)
                         df = self._to_dataframe(raw)
                         if df is None or len(df) < 10:
                             logger.debug(f"OHLCV {code} {timeframe} from {name}: insufficient rows {len(df) if df is not None else 0}")
@@ -664,7 +574,6 @@ class MarketDataCache:
             self.last_full_ohlcv_update = time.time()
             logger.info("OHLCV refresh complete: %s", {tf: len(self.ohlcv.get(tf, {})) for tf in TIMEFRAMES})
 
-    # ---------- شاخص‌های اصلی ----------
     async def get_indicators(self, code, mode="standard"):
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
         main_tf = config["main_tf"]
@@ -1839,7 +1748,7 @@ async def generate_weekly_summary_async(code, chat_id):
     text += (
         f"\n{DIVIDER}\n"
         f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-        f"{DIVIDER}\nℹ️ داده‌ها از Gate.io (اصلی)، کوکوین اسپات و کوین‌گکو (پشتیبان) محاسبه شده‌اند."
+        f"{DIVIDER}\nℹ️ داده‌ها از Gate.io (اصلی) و کوکوین اسپات (پشتیبان) محاسبه شده‌اند."
     )
     return rtl_lines(text)
 
@@ -1853,8 +1762,6 @@ def format_prices_pretty(prices, chat_id):
                 source_emoji = "🅶"
             elif source == "K":
                 source_emoji = "🅺"
-            elif source == "C":
-                source_emoji = "🅲"
             else:
                 source_emoji = "❓"
             price_display = fmt_amount(price, chat_id)
@@ -2072,10 +1979,9 @@ def help_text(step):
         return rtl_lines(
             "💰 *قیمت‌های لحظه‌ای*\n"
             f"{DIVIDER}\n"
-            "قیمت‌ها از چند منبع دریافت می‌شوند:\n"
+            "قیمت‌ها از دو منبع دریافت می‌شوند:\n"
             "🅶 Gate.io (منبع اصلی)\n"
-            "🅺 کوکوین اسپات (پشتیبان اول)\n"
-            "🅲 CoinGecko (پشتیبان دوم)\n"
+            "🅺 کوکوین اسپات (پشتیبان)\n"
             "در صورت عدم دسترسی به منبع اصلی، به‌طور خودکار از پشتیبان استفاده می‌شود."
         )
     elif step == 2:
@@ -3032,7 +2938,7 @@ async def post_init(app):
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
     app.create_task(macro_event_monitor_loop(app))
-    logger.info("Signal Bot V53 (Gate.io Primary, 10 Layers) started")
+    logger.info("Signal Bot V54 (Gate.io + KuCoin, No CoinGecko) started")
 
 def main():
     if not BOT_TOKEN:
