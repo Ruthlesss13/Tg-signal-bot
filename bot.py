@@ -1,13 +1,9 @@
 """
-Telegram Signal Bot V50 - Institutional Grade (10 Layers, Spot Only)
-- حذف کامل فیوچرز و استفاده فقط از اسپات (رفع خطای ۴۲۹)
-- جایگزینی فاندینگ با شاخص احساسات ترکیبی (Sentiment Score)
-- افزایش لایه‌های تحلیل به ۱۰ لایه برای دقت بالاتر
-- پشتیبان قیمت از مکس (Max) به‌جای بایننس
-- چیدمان ۴ ستونه بدون دکمه noop
-- کش طولانی‌تر و بهینه‌سازی سرعت
-- رفع خطای NameError برای whale_monitor_loop
-- مدیریت صحیح تسک‌های پس‌زمینه برای رفع اخطارهای PTBUserWarning
+Telegram Signal Bot V51 - Institutional Grade (10 Layers, Spot Only)
+- کاهش سخت‌گیری سیگنال‌ها برای تولید بیشتر
+- به‌روزرسانی OHLCV هر ۶۰ ثانیه
+- نمایش اطلاعات کامل در وضعیت لحظه‌ای (تغییرات ۲۴h، سطوح کلیدی، خلاصه لایه‌ها)
+- رفع پیام "در حال تحلیل..." با نمایش دلایل عدم سیگنال
 """
 
 import asyncio
@@ -42,7 +38,7 @@ load_dotenv()
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.DEBUG,
+    level=logging.INFO,
 )
 logger = logging.getLogger("signal_bot")
 
@@ -101,9 +97,9 @@ WEIGHT_BREADTH = 5
 WEIGHT_SMART_VOL = 5
 WEIGHT_COMP_TREND = 10
 
-OHLCV_TTL_SECONDS = 300
-PRICE_TTL_SECONDS = 60
-FULL_REFRESH_TTL_SECONDS = 300
+OHLCV_TTL_SECONDS = 60           # ← کاهش به ۶۰ ثانیه برای به‌روزرسانی سریع‌تر
+PRICE_TTL_SECONDS = 30
+FULL_REFRESH_TTL_SECONDS = 120
 MAX_OHLCV_CONCURRENCY = 1
 MAX_SIGNAL_CONCURRENCY = 2
 MAX_PRICE_CONCURRENCY = 2
@@ -148,6 +144,11 @@ last_check_time = {}
 last_sent_signals = {}
 price_sources = {}
 
+# ========== تنظیمات سخت‌گیری کاهش‌یافته ==========
+MIN_SIGNAL_CONFIDENCE = 35
+MIN_DIRECTION_GAP = 5
+ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
+
 MODE_CONFIGS = {
     "fast": {
         "label": "⚡ سریع",
@@ -159,7 +160,7 @@ MODE_CONFIGS = {
         "max_leverage": 10,
         "min_rr": 0.8,
         "adx_min": 10,
-        "min_confirmations": 4,
+        "min_confirmations": 3,
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -172,7 +173,7 @@ MODE_CONFIGS = {
         "max_leverage": 7,
         "min_rr": 1.0,
         "adx_min": 13,
-        "min_confirmations": 5,
+        "min_confirmations": 4,
         "check_interval": 10 * 60,
     },
     "standard": {
@@ -184,8 +185,8 @@ MODE_CONFIGS = {
         "sl_atr_mult": 1.2,
         "max_leverage": 5,
         "min_rr": 1.2,
-        "adx_min": 16,
-        "min_confirmations": 6,
+        "adx_min": 14,           # کاهش از ۱۶ به ۱۴
+        "min_confirmations": 4,   # کاهش از ۶ به ۴
         "check_interval": 30 * 60,
     },
     "conservative": {
@@ -197,15 +198,11 @@ MODE_CONFIGS = {
         "sl_atr_mult": 2.0,
         "max_leverage": 3,
         "min_rr": 1.5,
-        "adx_min": 20,
-        "min_confirmations": 7,
+        "adx_min": 18,           # کاهش از ۲۰ به ۱۸
+        "min_confirmations": 5,   # کاهش از ۷ به ۵
         "check_interval": 60 * 60,
     },
 }
-
-MIN_SIGNAL_CONFIDENCE = 50
-MIN_DIRECTION_GAP = 8
-ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 
 LAYER_WEIGHTS = {
     "structure": 15,
@@ -356,6 +353,7 @@ class MarketDataCache:
         df = df.dropna(subset=required).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df if not df.empty else None
 
+    # ---------- قیمت از مکس ----------
     def _get_max_prices(self, codes):
         prices = {}
         try:
@@ -499,6 +497,7 @@ class MarketDataCache:
         logger.info("Prices loaded: %s/%s", len(self.prices), len(COIN_CODES))
         return self.prices
 
+    # ---------- لایه‌های جدید ----------
     def _get_market_breadth(self):
         now = time.time()
         if self._breadth_cache["value"] is not None and now - self._breadth_cache["ts"] < 60:
@@ -587,6 +586,7 @@ class MarketDataCache:
         else:
             return 0.0
 
+    # ---------- دریافت OHLCV از اسپات ----------
     async def _fetch_ohlcv_symbol(self, code, timeframe, limit=500):
         symbol = self.symbol_for_code(code)
         if not symbol:
@@ -637,6 +637,7 @@ class MarketDataCache:
             self.last_full_ohlcv_update = time.time()
             logger.info("OHLCV refresh complete: %s", {tf: len(self.ohlcv.get(tf, {})) for tf in TIMEFRAMES})
 
+    # ---------- شاخص‌های اصلی ----------
     async def get_indicators(self, code, mode="standard"):
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
         main_tf = config["main_tf"]
@@ -1277,9 +1278,9 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
     # ۵. احساسات بازار (جایگزین فاندینگ)
     sentiment_score = cache_obj._calculate_sentiment_score(code, ind)
     if direction == "LONG":
-        results["sentiment"] = sentiment_score > 0.3
+        results["sentiment"] = sentiment_score > 0.2   # کاهش آستانه
     else:
-        results["sentiment"] = sentiment_score < -0.3
+        results["sentiment"] = sentiment_score < -0.2
     
     # ۶. روند
     results["trend"] = ind["adx"] >= config["adx_min"] and (0.5 <= ind["atr_pct"] <= 8)
@@ -1288,32 +1289,32 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
     order_flow = await cache_obj._get_order_flow(code)
     if order_flow > 0:
         if direction == "LONG":
-            results["order_flow"] = order_flow > 1.2
+            results["order_flow"] = order_flow > 1.1
         else:
-            results["order_flow"] = order_flow < 0.8
+            results["order_flow"] = order_flow < 0.9
     else:
         results["order_flow"] = False
     
     # ۸. تنوع بازار
     breadth = cache_obj._get_market_breadth()
     if direction == "LONG":
-        results["breadth"] = breadth > 60
+        results["breadth"] = breadth > 55
     else:
-        results["breadth"] = breadth < 40
+        results["breadth"] = breadth < 45
     
     # ۹. نوسان‌پذیری هوشمند
     smart_vol = cache_obj._get_smart_volatility(ind)
     if direction == "LONG":
-        results["smart_vol"] = smart_vol < -0.3
+        results["smart_vol"] = smart_vol < -0.2
     else:
-        results["smart_vol"] = smart_vol > 0.3
+        results["smart_vol"] = smart_vol > 0.2
     
     # ۱۰. قدرت روند مکمل
     comp_trend = cache_obj._get_complementary_trend(ind)
     if direction == "LONG":
-        results["comp_trend"] = comp_trend > 0.3
+        results["comp_trend"] = comp_trend > 0.2
     else:
-        results["comp_trend"] = comp_trend < -0.3
+        results["comp_trend"] = comp_trend < -0.2
     
     return results
 
@@ -1560,7 +1561,7 @@ def update_signal_status(symbol, current_price):
             elif current_price <= rec["tp_prices"][0]:
                 rec["status"] = "tp1_hit"
 
-# ---------- فرمت‌سازی ----------
+# ---------- فرمت‌سازی با اطلاعات کامل وضعیت ----------
 def format_main_signal_v2(plan, code, chat_id):
     direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
     mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
@@ -1600,25 +1601,91 @@ def format_main_signal_v2(plan, code, chat_id):
     )
     return rtl_lines(text)
 
-def format_status_dashboard(code, ind, plan, chat_id, mode):
+def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, short_layers=None):
+    """نمایش اطلاعات کامل وضعیت لحظه‌ای با جزئیات لایه‌ها و دلایل عدم سیگنال"""
     mode_label = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])["label"]
-    header = f"🧭 *وضعیت لحظه‌ای* {code}/USDT\n🕒 {shamsi_now()}\n🛠️ حالت: {mode_label}\n{DIVIDER}\n"
-    price_text = f"💰 قیمت: {fmt_amount(ind['price'], chat_id)}\n📊 روند EMA200: {ind['trend_label']}\n{DIVIDER}\n"
+    config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
     
-    layers_text = "📋 *وضعیت لایه‌های تحلیل (۱۰ لایه):*\n"
+    # اطلاعات قیمت و تغییرات ۲۴ ساعته
+    price = ind['price']
+    df_daily = cache.ohlcv.get("1d", {}).get(code)
+    change_24h = 0
+    high_24h = price
+    low_24h = price
+    if df_daily is not None and len(df_daily) >= 2:
+        close_prev = float(df_daily["close"].iloc[-2])
+        if close_prev > 0:
+            change_24h = ((price - close_prev) / close_prev) * 100
+        high_24h = float(df_daily["high"].iloc[-1]) if pd.notna(df_daily["high"].iloc[-1]) else price
+        low_24h = float(df_daily["low"].iloc[-1]) if pd.notna(df_daily["low"].iloc[-1]) else price
+    
+    # قیمت نسبت به EMA20 و EMA50
+    ema20_pos = "بالای 📈" if ind['price_above_ema20'] else "زیر 📉"
+    ema50_pos = "بالای 📈" if ind['price_above_ema50'] else "زیر 📉"
+    
+    # مقدار MACD
+    macd_status = "مثبت 📈" if ind['macd_hist'] > 0 else "منفی 📉"
+    
+    # حمایت و مقاومت نزدیک
+    support = ind['support']
+    resistance = ind['resistance']
+    support_2 = ind['support'] * 0.99
+    resistance_2 = ind['resistance'] * 1.01
+    
+    # خلاصه لایه‌ها
     if plan and plan.layer_results:
-        confirmed = 0
-        total_weight = 0
+        confirmed = sum(1 for v in plan.layer_results.values() if v)
+        total_weight = sum(LAYER_WEIGHTS.get(layer, 0) for layer, ok in plan.layer_results.items() if ok)
+        layers_summary = "📋 *خلاصه تحلیل لایه‌ها (۱۰ لایه):*\n"
         for layer, ok in plan.layer_results.items():
             emoji = "✅" if ok else "❌"
             weight = LAYER_WEIGHTS.get(layer, 0)
-            layers_text += f"{emoji} {LAYER_NAMES.get(layer, layer)} (وزن: {weight}%)\n"
-            if ok:
-                confirmed += 1
-                total_weight += weight
-        layers_text += f"\n💡 *جمع‌بندی:* {confirmed} از ۱۰ لایه تأیید شد | امتیاز وزنی: {total_weight}%"
+            layers_summary += f"{emoji} {LAYER_NAMES.get(layer, layer)} (وزن: {weight}%)\n"
+        layers_summary += f"\n💡 *جمع‌بندی:* {confirmed} از ۱۰ لایه تأیید شد | امتیاز وزنی: {total_weight}%"
     else:
-        layers_text = "⏳ در حال تحلیل...\n"
+        # اگر plan وجود ندارد، از long_layers و short_layers استفاده کن
+        if long_layers is not None and short_layers is not None:
+            long_confirmed = sum(1 for v in long_layers.values() if v)
+            short_confirmed = sum(1 for v in short_layers.values() if v)
+            long_weight = sum(LAYER_WEIGHTS.get(layer, 0) for layer, ok in long_layers.items() if ok)
+            short_weight = sum(LAYER_WEIGHTS.get(layer, 0) for layer, ok in short_layers.items() if ok)
+            layers_summary = (
+                f"📋 *خلاصه تحلیل لایه‌ها:*\n"
+                f"🟢 لانگ: {long_confirmed} لایه تأیید | امتیاز وزنی: {long_weight}%\n"
+                f"🔴 شورت: {short_confirmed} لایه تأیید | امتیاز وزنی: {short_weight}%\n"
+                f"📊 اختلاف امتیاز: {abs(long_weight - short_weight):.0f}%\n"
+            )
+            # دلایل عدم سیگنال
+            reasons_no_signal = []
+            if ind['adx'] < config['adx_min']:
+                reasons_no_signal.append(f"⚠️ ADX پایین است ({ind['adx']:.1f} < {config['adx_min']})")
+            if long_confirmed < config['min_confirmations'] and short_confirmed < config['min_confirmations']:
+                reasons_no_signal.append(f"⚠️ تعداد لایه‌های تأییدشده کمتر از حداقل مورد نیاز ({config['min_confirmations']}) است")
+            if abs(long_weight - short_weight) < MIN_DIRECTION_GAP:
+                reasons_no_signal.append(f"⚠️ اختلاف امتیاز دو جهت کمتر از {MIN_DIRECTION_GAP} است")
+            if reasons_no_signal:
+                layers_summary += f"\n💡 *دلایل عدم سیگنال:*\n" + "\n".join(reasons_no_signal)
+            else:
+                layers_summary += f"\n💡 *وضعیت:* شرایط برای سیگنال‌دهی مناسب نیست (احتمالاً بازار رنج)"
+        else:
+            layers_summary = "📋 در حال تحلیل لایه‌ها..."
+
+    header = f"🧭 *وضعیت لحظه‌ای* {code}/USDT\n🕒 {shamsi_now()}\n🛠️ حالت: {mode_label}\n{DIVIDER}\n"
+    price_text = (
+        f"💰 قیمت: {fmt_amount(price, chat_id)}\n"
+        f"📊 تغییرات ۲۴h: {change_24h:+.2f}%\n"
+        f"📈 بالاترین ۲۴h: {fmt_amount(high_24h, chat_id)} | 📉 پایین‌ترین ۲۴h: {fmt_amount(low_24h, chat_id)}\n"
+        f"{DIVIDER}\n"
+        f"📈 روند EMA200: {ind['trend_label']}\n"
+        f"📊 قیمت نسبت به EMA20: {ema20_pos} | EMA50: {ema50_pos}\n"
+        f"🎯 RSI: {ind['rsi']:.1f}\n"
+        f"💪 ADX: {ind['adx']:.1f}\n"
+        f"📊 MACD: {macd_status}\n"
+        f"📊 حجم معاملات: {ind['volume_ratio']:.2f}× میانگین {' 🔊' if ind['volume_spike'] else ''}\n"
+        f"{DIVIDER}\n"
+        f"📊 حمایت نزدیک: {fmt_amount(support, chat_id)} | مقاومت نزدیک: {fmt_amount(resistance, chat_id)}\n"
+        f"📊 حمایت دوم: {fmt_amount(support_2, chat_id)} | مقاومت دوم: {fmt_amount(resistance_2, chat_id)}\n"
+    )
     
     if plan and plan.confidence >= MIN_SIGNAL_CONFIDENCE:
         footer = (
@@ -1631,12 +1698,9 @@ def format_status_dashboard(code, ind, plan, chat_id, mode):
             f"⚠️ مدیریت ریسک: حد ضرر را روی {fmt_amount(plan.sl_price, chat_id)} قرار دهید."
         )
     else:
-        footer = (
-            f"\n{DIVIDER}\n"
-            f"💤 سیگنال نهایی وجود ندارد.\n"
-            f"امتیاز بهترین جهت: {plan.confidence if plan else 0:.0f}٪"
-        )
-    return rtl_lines(header + price_text + layers_text + footer + f"\n{DIVIDER}\n⚠️ این تحلیل تکنیکال است و تضمین سود یا توصیه مالی نیست.")
+        footer = f"\n{DIVIDER}\n💤 در حال حاضر سیگنال نهایی وجود ندارد."
+
+    return rtl_lines(header + price_text + layers_summary + footer + f"\n{DIVIDER}\n⚠️ این تحلیل تکنیکال است و تضمین سود نیست.")
 
 # ---------- توابع اصلی ----------
 async def generate_trade_plan(code, mode="standard"):
@@ -1647,8 +1711,13 @@ async def generate_status_text_async(code, chat_id, mode="standard"):
     ind = await cache.get_indicators(code, mode)
     if not ind:
         return rtl_lines(f"{code}\n\n⚠️ داده کافی برای تحلیل این ارز دریافت نشد.")
+    
+    # محاسبه لایه‌ها برای هر دو جهت (حتی اگر سیگنال نهایی نباشد)
+    long_layers = await analyze_layers(code, "LONG", ind, mode, cache)
+    short_layers = await analyze_layers(code, "SHORT", ind, mode, cache)
+    
     plan = await generate_trade_plan_v2(code, mode)
-    return format_status_dashboard(code, ind, plan, chat_id, mode)
+    return format_status_dashboard(code, ind, plan, chat_id, mode, long_layers, short_layers)
 
 async def generate_weekly_summary_async(code, chat_id):
     await cache.update_prices(force=True, codes=[code])
@@ -2926,13 +2995,12 @@ async def post_init(app):
         BotCommand("report", "گزارش دوره‌ای"),
         BotCommand("stop", "توقف ربات"),
     ])
-    # ایجاد تسک‌های پس‌زمینه با مدیریت صحیح
     app.create_task(auto_report_loop(app))
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
     app.create_task(macro_event_monitor_loop(app))
-    logger.info("Signal Bot V50 (10 Layers, Spot Only) started")
+    logger.info("Signal Bot V51 (10 Layers, Spot Only, Improved UI) started")
 
 def main():
     if not BOT_TOKEN:
