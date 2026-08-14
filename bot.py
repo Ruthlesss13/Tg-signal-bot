@@ -1,11 +1,11 @@
 """
-Telegram Signal Bot V41 - KuCoin Spot & CoinGecko (Reliable Signals)
-- بازگشت به آستانه‌های سخت‌گیرانه برای دقت بالا (MIN_SIGNAL_CONFIDENCE=60, MIN_DIRECTION_GAP=10)
-- پشتیبانی از فیوچرز و اسپات (TON, MKR و ...)
-- غنی‌سازی اخبار نهنگ‌ها با ارزش دلاری، برچسب آدرس، تحلیل تأثیر
-- اضافه شدن ۸ دسته رویداد مهم (FED, ETF, هک, حرکت عظیم, هاردفورک, اقدام قانونی, سیاست, لیکوئیدیشن)
-- تاریخچه‌ی ۲۰ خبر آخر
-- سیگنال‌دهی دقیق و مطمئن
+Telegram Signal Bot V42 - Final Test (Low Thresholds)
+- حذف MKR و TON از لیست ارزها
+- مرتب‌سازی حروف‌الفبای لیست ارزها
+- کاهش تعداد ستون‌ها به ۳ برای نمایش بهتر
+- کاهش شدید آستانه‌های سیگنال‌دهی برای تست (MIN_SIGNAL_CONFIDENCE=30, MIN_DIRECTION_GAP=3)
+- کاهش adx_min و min_rr در تمام حالت‌ها
+- نگهداری بقیه امکانات V41
 """
 
 import asyncio
@@ -56,27 +56,28 @@ ALWAYS_ALLOWED_USER_IDS = {
 }
 WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 
-# ---------- لیست ارزها (USDT حذف شد) ----------
+# ---------- لیست ارزها (حذف MKR و TON و مرتب‌سازی) ----------
 COIN_ICONS = {
-    "BTC": "BTC", "ETH": "ETH", "XRP": "XRP", "DOGE": "DOGE",
-    "ADA": "ADA", "SOL": "SOL", "DOT": "DOT", "LINK": "LINK", "LTC": "LTC",
-    "BCH": "BCH", "ETC": "ETC", "XLM": "XLM", "ATOM": "ATOM", "FIL": "FIL",
-    "UNI": "UNI", "AAVE": "AAVE", "TRX": "TRX", "NEAR": "NEAR", "AVAX": "AVAX",
-    "SHIB": "SHIB", "POL": "POL", "VET": "VET", "XMR": "XMR", "NEO": "NEO",
-    "ALGO": "ALGO", "ICP": "ICP", "EGLD": "EGLD", "KSM": "KSM", "KAVA": "KAVA",
-    "FET": "FET", "MKR": "MKR", "TON": "TON", "RUNE": "RUNE", "OP": "OP",
-    "ARB": "ARB", "APT": "APT", "SUI": "SUI", "INJ": "INJ", "KAS": "KAS",
-    "STX": "STX", "GRT": "GRT", "SAND": "SAND", "MANA": "MANA", "GALA": "GALA",
-    "APE": "APE", "MINA": "MINA", "LUNC": "LUNC", "COMP": "COMP", "BLUR": "BLUR",
-    "AR": "AR", "FLOW": "FLOW",
+    "AAVE": "AAVE", "ADA": "ADA", "ALGO": "ALGO", "APE": "APE",
+    "APT": "APT", "AR": "AR", "ARB": "ARB", "ATOM": "ATOM",
+    "AVAX": "AVAX", "BCH": "BCH", "BLUR": "BLUR", "BTC": "BTC",
+    "COMP": "COMP", "DOT": "DOT", "EGLD": "EGLD", "ETC": "ETC",
+    "ETH": "ETH", "FET": "FET", "FIL": "FIL", "FLOW": "FLOW",
+    "GALA": "GALA", "GRT": "GRT", "ICP": "ICP", "INJ": "INJ",
+    "KAS": "KAS", "KAVA": "KAVA", "KSM": "KSM", "LINK": "LINK",
+    "LTC": "LTC", "LUNC": "LUNC", "MANA": "MANA", "MINA": "MINA",
+    "NEAR": "NEAR", "NEO": "NEO", "OP": "OP", "POL": "POL",
+    "RUNE": "RUNE", "SAND": "SAND", "SHIB": "SHIB", "SOL": "SOL",
+    "STX": "STX", "SUI": "SUI", "TRX": "TRX", "UNI": "UNI",
+    "VET": "VET", "XLM": "XLM", "XMR": "XMR", "XRP": "XRP",
 }
-COIN_CODES = list(COIN_ICONS.keys())  # ۴۶ ارز
+COIN_CODES = sorted(list(COIN_ICONS.keys()))  # مرتب‌سازی الفبایی
 
 TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d")
 TOP_SIGNALS_COUNT = 5
 TELEGRAM_MSG_LIMIT = 3500
 IRT_RATE_TTL_SECONDS = 60
-COINS_GRID_COLUMNS = 5
+COINS_GRID_COLUMNS = 3          # کاهش از ۵ به ۳ برای نمایش بهتر
 AUTO_KEEP_LAST_N = 3
 TRAILING_CHECK_SECONDS = 5 * 60
 FEAR_GREED_TTL = 3600
@@ -142,7 +143,7 @@ last_check_time = {}
 last_sent_signals = {}
 price_sources = {}
 
-# ---------- تنظیمات حالت‌ها با آستانه‌های سخت‌گیرانه ----------
+# ---------- تنظیمات حالت‌ها با آستانه‌های بسیار پایین (برای تست) ----------
 MODE_CONFIGS = {
     "fast": {
         "label": "⚡ سریع",
@@ -152,8 +153,8 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.4, 0.8, 1.2],
         "sl_atr_mult": 0.8,
         "max_leverage": 10,
-        "min_rr": 1.0,
-        "adx_min": 12,
+        "min_rr": 0.3,          # بسیار پایین
+        "adx_min": 5,           # بسیار پایین
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -164,8 +165,8 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.6, 1.2, 1.8],
         "sl_atr_mult": 1.0,
         "max_leverage": 7,
-        "min_rr": 1.1,
-        "adx_min": 13,
+        "min_rr": 0.5,
+        "adx_min": 7,
         "check_interval": 10 * 60,
     },
     "standard": {
@@ -176,8 +177,8 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.8, 1.5, 2.5],
         "sl_atr_mult": 1.2,
         "max_leverage": 5,
-        "min_rr": 1.2,
-        "adx_min": 15,
+        "min_rr": 0.7,
+        "adx_min": 9,
         "check_interval": 30 * 60,
     },
     "conservative": {
@@ -188,14 +189,14 @@ MODE_CONFIGS = {
         "tp_multipliers": [1.5, 2.5, 4.0],
         "sl_atr_mult": 2.0,
         "max_leverage": 3,
-        "min_rr": 1.5,
-        "adx_min": 20,
+        "min_rr": 1.0,
+        "adx_min": 12,
         "check_interval": 60 * 60,
     },
 }
 
-MIN_SIGNAL_CONFIDENCE = 60   # بازگشت به حالت سخت‌گیرانه
-MIN_DIRECTION_GAP = 10        # بازگشت به حالت سخت‌گیرانه
+MIN_SIGNAL_CONFIDENCE = 30   # بسیار پایین برای تست
+MIN_DIRECTION_GAP = 3        # بسیار پایین برای تست
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 
 @dataclass
@@ -297,7 +298,7 @@ class MarketDataCache:
                             candidates.append((symbol, market))
                         elif symbol == f"{code}USDTM" and market.get("type") == "swap":
                             candidates.append((symbol, market))
-                # اگر فیوچرز نبود، از اسپات استفاده کن (برای TON, MKR و ...)
+                # اگر فیوچرز نبود، از اسپات استفاده کن
                 if not candidates:
                     try:
                         spot_markets = exchange_spot_kucoin.load_markets()
@@ -314,7 +315,6 @@ class MarketDataCache:
                 symbol, market = candidates[0]
                 selected[code] = symbol
                 self.market_meta[code] = market
-                # تشخیص منبع داده
                 is_futures = market.get("type") == "swap" or market.get("swap") is True
                 source = "futures" if is_futures else "spot"
                 self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None, "source": source}
@@ -422,23 +422,20 @@ class MarketDataCache:
         prices = {}
         try:
             ids_map = {
-                "BTC": "bitcoin", "ETH": "ethereum", "XRP": "ripple",
-                "DOGE": "dogecoin", "ADA": "cardano", "SOL": "solana", "DOT": "polkadot",
-                "LINK": "chainlink", "LTC": "litecoin", "BCH": "bitcoin-cash",
-                "ETC": "ethereum-classic", "XLM": "stellar", "ATOM": "cosmos",
-                "FIL": "filecoin", "UNI": "uniswap", "AAVE": "aave", "TRX": "tron",
-                "NEAR": "near", "AVAX": "avalanche-2", "SHIB": "shiba-inu",
-                "POL": "polygon-ecosystem-token", "VET": "vechain", "XMR": "monero",
-                "NEO": "neo", "ALGO": "algorand", "ICP": "internet-computer",
-                "EGLD": "elrond-erd-2", "KSM": "kusama", "KAVA": "kava",
-                "FET": "fetch-ai", "MKR": "maker", "TON": "the-open-network",
-                "RUNE": "thorchain", "OP": "optimism", "ARB": "arbitrum",
-                "APT": "aptos", "SUI": "sui", "INJ": "injective-protocol",
-                "KAS": "kaspa", "STX": "blockstack", "GRT": "the-graph",
-                "SAND": "the-sandbox", "MANA": "decentraland", "GALA": "gala",
-                "APE": "apecoin", "MINA": "mina-protocol", "LUNC": "terra-luna-classic",
-                "COMP": "compound-governance-token", "BLUR": "blur", "AR": "arweave",
-                "FLOW": "flow",
+                "AAVE": "aave", "ADA": "cardano", "ALGO": "algorand", "APE": "apecoin",
+                "APT": "aptos", "AR": "arweave", "ARB": "arbitrum", "ATOM": "cosmos",
+                "AVAX": "avalanche-2", "BCH": "bitcoin-cash", "BLUR": "blur", "BTC": "bitcoin",
+                "COMP": "compound-governance-token", "DOT": "polkadot", "EGLD": "elrond-erd-2",
+                "ETC": "ethereum-classic", "ETH": "ethereum", "FET": "fetch-ai", "FIL": "filecoin",
+                "FLOW": "flow", "GALA": "gala", "GRT": "the-graph", "ICP": "internet-computer",
+                "INJ": "injective-protocol", "KAS": "kaspa", "KAVA": "kava", "KSM": "kusama",
+                "LINK": "chainlink", "LTC": "litecoin", "LUNC": "terra-luna-classic",
+                "MANA": "decentraland", "MINA": "mina-protocol", "NEAR": "near",
+                "NEO": "neo", "OP": "optimism", "POL": "polygon-ecosystem-token",
+                "RUNE": "thorchain", "SAND": "the-sandbox", "SHIB": "shiba-inu",
+                "SOL": "solana", "STX": "blockstack", "SUI": "sui", "TRX": "tron",
+                "UNI": "uniswap", "VET": "vechain", "XLM": "stellar", "XMR": "monero",
+                "XRP": "ripple",
             }
             ids = [ids_map[code] for code in codes if code in ids_map]
             if not ids:
@@ -465,7 +462,6 @@ class MarketDataCache:
         if not symbol:
             return None
         
-        # تشخیص منبع داده
         source = self.market_status.get(code, {}).get("source", "futures")
         use_futures = source == "futures"
         
@@ -521,7 +517,6 @@ class MarketDataCache:
         symbol = self.symbol_for_code(code)
         if not symbol:
             return 0.0
-        # اگر اسپات باشد، فاندینگ ندارد
         source = self.market_status.get(code, {}).get("source", "futures")
         if source == "spot":
             return 0.0
@@ -692,7 +687,7 @@ class MarketDataCache:
 
 cache = MarketDataCache()
 
-# ---------- توابع کمکی ----------
+# ---------- توابع کمکی (بدون تغییر) ----------
 def is_allowed(user_id):
     if user_id in ALWAYS_ALLOWED_USER_IDS or user_id in ADMIN_USER_IDS:
         return True
@@ -717,17 +712,15 @@ async def guard(update):
     return True
 
 def add_news_alert(text: str, importance: str = "medium", impact: str = "", details: dict = None):
-    """اضافه کردن خبر با سطح اهمیت و جزئیات"""
     global news_history
     entry = {
         "time": shamsi_now(),
         "text": text,
-        "importance": importance,  # high, medium, low
+        "importance": importance,
         "impact": impact,
         "details": details or {}
     }
     news_history.append(entry)
-    # مرتب‌سازی بر اساس اهمیت (high > medium > low) و سپس زمان
     importance_order = {"high": 0, "medium": 1, "low": 2}
     news_history.sort(key=lambda x: (importance_order.get(x.get("importance", "low"), 2), x.get("time", "")))
     if len(news_history) > 20:
@@ -836,7 +829,8 @@ async def get_fear_greed():
     if value is not None:
         fear_greed_cache.update(value=value, classification=classification, ts=now)
     return value, classification
-    # ---------- Events (غنی‌شده) ----------
+
+# ---------- Events ----------
 def fetch_upcoming_events():
     try:
         r = requests.get("https://api.coingecko.com/api/v3/events?upcoming=true", timeout=10)
@@ -852,7 +846,6 @@ def fetch_upcoming_events():
                 event_time = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
             except:
                 continue
-            # استخراج اطلاعات بیشتر (importance, description, impact)
             importance = "medium"
             if "hard fork" in name.lower() or "upgrade" in name.lower() or "ethereum" in name.lower():
                 importance = "high"
@@ -862,7 +855,7 @@ def fetch_upcoming_events():
                 "time": event_time,
                 "importance": importance,
                 "description": description,
-                "impact": "مشخص نیست"  # بعداً تحلیل می‌شود
+                "impact": "مشخص نیست"
             })
         return events
     except Exception as e:
@@ -906,7 +899,7 @@ async def check_and_notify_events(app):
             except Exception as e:
                 logger.warning("Event notify failed: %s", e)
 
-# ---------- Whale Alerts (غنی‌شده) ----------
+# ---------- Whale Alerts ----------
 def fetch_whale_alerts():
     try:
         if WHALE_ALERT_API_KEY:
@@ -918,12 +911,10 @@ def fetch_whale_alerts():
             for tx in data:
                 amount_btc = float(tx.get("amount", 0))
                 symbol = tx.get("symbol", "BTC")
-                # استخراج اطلاعات اضافی
                 from_address = tx.get("from", {}).get("address", "")
                 to_address = tx.get("to", {}).get("address", "")
                 from_owner = tx.get("from", {}).get("owner_type", "")
                 to_owner = tx.get("to", {}).get("owner_type", "")
-                # تشخیص ورود/خروج صرافی
                 exchange_keywords = ["exchange", "wallet", "binance", "coinbase", "kraken", "okx", "bybit"]
                 from_is_exchange = any(kw in from_owner.lower() for kw in exchange_keywords) if from_owner else False
                 to_is_exchange = any(kw in to_owner.lower() for kw in exchange_keywords) if to_owner else False
@@ -936,7 +927,6 @@ def fetch_whale_alerts():
                     flow_type = "انتقال بین صرافی‌ها"
                 else:
                     flow_type = "انتقال بین کیف‌پول‌ها"
-                # تحلیل تأثیر
                 impact = "خنثی"
                 if flow_type == "خروج از صرافی" and amount_btc > 2000:
                     impact = "نزولی 📉 (احتمال فروش)"
@@ -954,7 +944,7 @@ def fetch_whale_alerts():
                     "to_owner": to_owner or "ناشناس",
                     "flow_type": flow_type,
                     "impact": impact,
-                    "value_usd": amount_btc * cache.prices.get("BTC", 0)  # تخمین ارزش
+                    "value_usd": amount_btc * cache.prices.get("BTC", 0)
                 })
             return alerts
         else:
@@ -990,7 +980,6 @@ async def whale_monitor_loop(app):
             if subscribed_chat_ids:
                 alerts = fetch_whale_alerts()
                 if alerts:
-                    # ایجاد خبر غنی‌شده برای هر هشدار
                     for alert in alerts[:5]:
                         amount = alert["amount_btc"]
                         symbol = alert["symbol"]
@@ -1014,12 +1003,9 @@ async def whale_monitor_loop(app):
                             f"📈 تأثیر احتمالی: {impact}\n"
                             f"🕒 {shamsi_now()}"
                         )
-                        # اضافه کردن به تاریخچه با سطح اهمیت بالا
                         add_news_alert(text, importance="high", impact=impact, details=alert)
                     
-                    # ارسال به کاربران
                     for chat_id in subscribed_chat_ids:
-                        # فقط آخرین خبر مهم را ارسال کن (برای جلوگیری از اسپم)
                         latest = news_history[-1] if news_history else None
                         if latest and latest.get("importance") == "high":
                             await app.bot.send_message(chat_id=chat_id, text=rtl_lines(latest["text"]), parse_mode="Markdown")
@@ -1027,31 +1013,18 @@ async def whale_monitor_loop(app):
             logger.exception("Whale monitor error: %s", e)
         await asyncio.sleep(WHALE_CHECK_SECONDS)
 
-# ---------- پایش اخبار کلان اقتصادی (۸ دسته) ----------
+# ---------- پایش اخبار کلان اقتصادی (ساده‌سازی شده) ----------
 async def fetch_macro_events():
-    """دریافت رویدادهای کلان اقتصادی از منابع مختلف (ساده‌سازی شده)"""
-    events = []
-    try:
-        # شبیه‌سازی با استفاده از تقویم اقتصادی (در واقعیت باید از APIهای تخصصی مثل ForexFactory استفاده کرد)
-        # به‌عنوان نمونه، از یک منبع RSS یا وب‌سرویس فرضی استفاده می‌کنیم
-        # در اینجا فقط یک نمونه نمایشی قرار می‌دهیم
-        # در عمل باید با APIهای واقعی مثل Alpha Vantage یا ForexFactory متصل شد
-        # برای سادگی، از داده‌های ساختگی استفاده نمی‌کنیم و فقط تابع را خالی می‌گذاریم تا توسعه‌پذیر باشد
-        # در نسخه واقعی باید این بخش تکمیل شود
-        pass
-    except Exception as e:
-        logger.warning("Macro events fetch failed: %s", e)
-    return events
+    # در این نسخه ساده، فقط یک نمونه ساختگی برگردانید (در عمل با API واقعی)
+    return []
 
 async def macro_event_monitor_loop(app):
-    """حلقه‌ای برای بررسی رویدادهای کلان (هر ۶ ساعت)"""
-    await asyncio.sleep(120)  # تأخیر اولیه
+    await asyncio.sleep(120)
     while True:
         try:
             if subscribed_chat_ids:
                 events = await fetch_macro_events()
                 for ev in events:
-                    # ساخت خبر با سطح اهمیت و تأثیر
                     text = (
                         f"📰 *رویداد کلان اقتصادی*\n"
                         f"{ev.get('title', 'رویداد')}\n"
@@ -1065,7 +1038,7 @@ async def macro_event_monitor_loop(app):
                         await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
         except Exception as e:
             logger.exception("Macro event monitor error: %s", e)
-        await asyncio.sleep(6 * 3600)  # هر ۶ ساعت
+        await asyncio.sleep(6 * 3600)
 
 # ---------- Advanced Reporting ----------
 def compute_advanced_stats(signal_history, mode=None):
@@ -1125,7 +1098,7 @@ def compute_advanced_stats(signal_history, mode=None):
         "avg_confidence": avg_confidence, "wins": wins, "losses": losses,
     }
 
-# ---------- Scoring (بدون تغییر) ----------
+# ---------- Scoring ----------
 def category_scores(direction, ind, mode):
     config = MODE_CONFIGS[mode]
     long_side = direction == "LONG"
@@ -1425,7 +1398,7 @@ def update_signal_status(symbol, current_price):
             elif current_price <= rec["tp_prices"][0]:
                 rec["status"] = "tp1_hit"
 
-# ---------- Formatting (با تغییرات جزئی برای نمایش بهتر) ----------
+# ---------- Formatting ----------
 def format_main_signal(plan, code, chat_id):
     direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
     funding = f"\n💰 فاندینگ: {plan.funding_rate:+.3f}%" if plan.funding_rate else ""
@@ -1852,7 +1825,7 @@ def kb_coins(page=0):
         else:
             label = f"{code} ⚪"
         buttons.append(InlineKeyboardButton(label, callback_data=f"coin_{code}"))
-    rows = build_grid_keyboard(buttons, COINS_GRID_COLUMNS)
+    rows = build_grid_keyboard(buttons, COINS_GRID_COLUMNS)  # استفاده از ۳ ستون
     nav_row = []
     total_pages = (len(COIN_CODES) + PER_PAGE - 1) // PER_PAGE
     if page > 0:
@@ -2067,7 +2040,27 @@ async def news_monitor_loop(app):
         await asyncio.sleep(EVENTS_CHECK_SECONDS)
 
 # ---------- Macro event monitor (اضافه شده) ----------
-# قبلاً تابع macro_event_monitor_loop تعریف شد
+async def macro_event_monitor_loop(app):
+    await asyncio.sleep(120)
+    while True:
+        try:
+            if subscribed_chat_ids:
+                events = await fetch_macro_events()
+                for ev in events:
+                    text = (
+                        f"📰 *رویداد کلان اقتصادی*\n"
+                        f"{ev.get('title', 'رویداد')}\n"
+                        f"🕒 {shamsi_now()}\n"
+                        f"📊 سطح اهمیت: {ev.get('importance', 'medium')}\n"
+                        f"📈 تأثیر مورد انتظار: {ev.get('impact', 'نامشخص')}\n"
+                        f"📝 {ev.get('description', '')[:200]}"
+                    )
+                    add_news_alert(text, importance=ev.get('importance', 'medium'), impact=ev.get('impact', ''))
+                    for chat_id in subscribed_chat_ids:
+                        await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
+        except Exception as e:
+            logger.exception("Macro event monitor error: %s", e)
+        await asyncio.sleep(6 * 3600)
 
 # ---------- Periodic report generation ----------
 async def send_periodic_report(app, period="weekly"):
@@ -2693,6 +2686,7 @@ async def button_handler(update, context):
             text += f"{status_emoji} {rec['symbol']} {rec['direction']} @ {rec['entry_price']:.4f} ({MODE_CONFIGS.get(rec['mode'],{}).get('label','')})\n"
         await query.edit_message_text(rtl_lines(text), reply_markup=kb_admin_panel(), parse_mode="Markdown")
         return
+
     if data == "menu_all":
         if not is_admin_role(chat_id):
             await query.answer("⛔️ فقط ادمین.", show_alert=True); return
@@ -2788,8 +2782,8 @@ async def post_init(app):
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
-    app.create_task(macro_event_monitor_loop(app))  # اضافه شد
-    logger.info("Signal Bot V41 (Reliable Signals) started")
+    app.create_task(macro_event_monitor_loop(app))
+    logger.info("Signal Bot V42 (Low Thresholds for Test) started")
 
 def main():
     if not BOT_TOKEN:
