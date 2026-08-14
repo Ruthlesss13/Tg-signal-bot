@@ -1,10 +1,8 @@
 """
-Telegram Signal Bot V44 - Institutional Grade (Fixes & DOGE)
-- اصلاح دریافت OHLCV: افزایش تلاش‌ها، کاهش هم‌زمانی، بهبود انتخاب سمبل
-- افزودن DOGE به لیست ارزها و مرتب‌سازی کامل
-- اضافه کردن دکمه راهنما به منوی ادمین
-- غیرفعال کردن حذف کندل در حال شکل‌گیری برای داده‌های کم
-- بهبود پایداری و خطاگیری
+Telegram Signal Bot V45 - Institutional Grade (Stable & Improved UI)
+- رفع خطای 429 با سریالی‌سازی درخواست‌ها، کش طولانی‌تر و Backoff
+- متن خوش‌آمدگویی جدید و جذاب
+- چیدمان منظم و بدون فضای خالی در لیست ارزها
 """
 
 import asyncio
@@ -39,7 +37,7 @@ load_dotenv()
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.DEBUG,  # ← تغییر از INFO به DEBUG
+    level=logging.INFO,  # تغییر به INFO برای لاگ‌های کمتر
 )
 logger = logging.getLogger("signal_bot")
 
@@ -55,7 +53,7 @@ ALWAYS_ALLOWED_USER_IDS = {
 }
 WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 
-# ---------- لیست ارزها (DOGE اضافه شد) ----------
+# ---------- لیست ارزها (مرتب‌شده) ----------
 COIN_ICONS = {
     "AAVE": "AAVE", "ADA": "ADA", "ALGO": "ALGO", "APE": "APE",
     "APT": "APT", "AR": "AR", "ARB": "ARB", "ATOM": "ATOM",
@@ -93,10 +91,10 @@ WEIGHT_VOLUME = 15
 WEIGHT_VOLATILITY = 15
 WEIGHT_HTF = 20
 
-OHLCV_TTL_SECONDS = 20
+OHLCV_TTL_SECONDS = 60           # افزایش کش برای کاهش درخواست
 FULL_REFRESH_TTL_SECONDS = 300
 FUNDING_TTL_SECONDS = 30
-MAX_OHLCV_CONCURRENCY = 1   # کاهش هم‌زمانی برای جلوگیری از Rate Limit
+MAX_OHLCV_CONCURRENCY = 1        # سریال‌سازی درخواست‌ها
 MAX_SIGNAL_CONCURRENCY = 2
 MAX_PRICE_CONCURRENCY = 2
 RLM = "\u200f"
@@ -306,7 +304,7 @@ class MarketDataCache:
                             candidates.append((symbol, market))
                         elif symbol == f"{code}USDTM" and market.get("type") == "swap":
                             candidates.append((symbol, market))
-                        elif symbol == f"{code}/USDT" and market.get("type") == "swap":   # اضافه شد
+                        elif symbol == f"{code}/USDT" and market.get("type") == "swap":
                             candidates.append((symbol, market))
                 # اگر فیوچرز نبود، از اسپات استفاده کن
                 if not candidates:
@@ -359,10 +357,9 @@ class MarketDataCache:
         df = df.dropna(subset=required).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df if not df.empty else None
 
-    # حذف فیلتر حذف کندل در حال شکل‌گیری برای جلوگیری از کاهش تعداد کندل‌ها
+    # حذف فیلتر کندل در حال شکل‌گیری (کامنت شد)
     @staticmethod
     def _drop_forming_candle(df):
-        # دیگر حذف نمی‌کنیم، فقط برای سازگاری با کد قدیمی نگه‌داشته می‌شود
         return df.copy().reset_index(drop=True)
 
     async def update_prices(self, force=False, codes=None):
@@ -397,6 +394,7 @@ class MarketDataCache:
                 if price and price > 0:
                     new_prices[code] = float(price)
                     price_sources[code] = "K"
+                await asyncio.sleep(0.3)  # کاهش فشار
             except Exception as e:
                 logger.debug(f"Individual ticker failed for {code}: {e}")
 
@@ -462,7 +460,7 @@ class MarketDataCache:
             return None
         source = self.market_status.get(code, {}).get("source", "futures")
         use_futures = source == "futures"
-        # افزایش تلاش‌ها و فاصله
+        # exponential backoff
         for attempt in range(5):
             try:
                 if use_futures:
@@ -472,13 +470,13 @@ class MarketDataCache:
                 df = self._to_dataframe(raw)
                 if df is None or len(df) < 10:
                     logger.debug(f"OHLCV {code} {timeframe}: insufficient rows {len(df) if df is not None else 0}")
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(2 ** attempt)  # backoff
                     continue
-                # دیگر حذف نمی‌کنیم، مستقیم برگردان
                 return df
             except Exception as e:
-                logger.warning("OHLCV failed | code=%s | tf=%s | attempt=%s | error=%s", code, timeframe, attempt, e)
-                await asyncio.sleep(2)
+                wait = 2 ** attempt  # 1, 2, 4, 8, 16 ثانیه
+                logger.warning("OHLCV failed | code=%s | tf=%s | attempt=%s | wait=%ss | error=%s", code, timeframe, attempt, wait, e)
+                await asyncio.sleep(wait)
         return None
 
     async def ensure_symbol_data(self, code, timeframes=None, force=False):
@@ -506,7 +504,10 @@ class MarketDataCache:
             if not self.valid_codes:
                 return
             target_codes = list(codes if codes is not None else self.valid_codes)
-            await asyncio.gather(*(self.ensure_symbol_data(c, TIMEFRAMES, force=force) for c in target_codes))
+            # استفاده از Semaphore برای سریال‌سازی
+            for code in target_codes:
+                async with self._sem:
+                    await self.ensure_symbol_data(code, TIMEFRAMES, force=force)
             self.last_full_ohlcv_update = time.time()
             logger.info("OHLCV refresh complete: %s", {tf: len(self.ohlcv.get(tf, {})) for tf in TIMEFRAMES})
 
@@ -1849,7 +1850,7 @@ def kb_main(user_id, mode="standard"):
             [InlineKeyboardButton("📊 گزارش مقایسه‌ای", callback_data="admin_compare"), InlineKeyboardButton("🧾 گزارش دوره‌ای", callback_data="periodic_report")],
             [InlineKeyboardButton("🔄 شروع مجدد", callback_data="restart_bot"), InlineKeyboardButton("🛑 توقف ربات", callback_data="stop_bot")],
             [InlineKeyboardButton("📈 داشبورد تحلیلی", callback_data="dashboard"), InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")],
-            [InlineKeyboardButton("❓ راهنما", callback_data="help")],  # اضافه شد
+            [InlineKeyboardButton("❓ راهنما", callback_data="help")],
         ]
     else:
         rows = [
@@ -2039,12 +2040,21 @@ def help_text(step):
 
 def welcome_text():
     return rtl_lines(
-        "🌟✨ *به سیگنال‌یار حرفه‌ای خوش اومدی!* ✨🌟\n"
+        "🌟✨ *به سیگنال‌یار حرفه‌ای خوش آمدید!* ✨🌟\n"
         f"{DIVIDER}\n"
-        "🔔 ارسال سیگنال‌ها رویدادمحور است؛ فقط هنگام سیگنال جدید، تغییر جهت یا بسته‌شدن پیام می‌فرستم\n"
-        "👇 برای دریافت خودکار سیگنال، حتماً ارزهای مورد نظر را به علاقه‌مندی‌ها اضافه کنید\n\n"
-        "📜 پند روز: صبور باش که صبر کلید گشایش است\n\n"
-        "⚠️ تحلیل تکنیکال است، نه توصیه مالی."
+        "🤖 *ربات معاملاتی هوشمند* با تحلیل ۶ لایه‌ای\n"
+        "🎯 *سیگنال‌های لحظه‌ای* با دقت بالا و مدیریت ریسک پویا\n"
+        "📊 *تحلیل جامع ارزها* در تایم‌فریم‌های مختلف\n"
+        "🔔 *اخبار نهنگ‌ها و رویدادهای مهم* به‌صورت خودکار\n"
+        f"{DIVIDER}\n"
+        "🚀 *چگونه شروع کنیم؟*\n"
+        "۱. واحد پولی خود را انتخاب کنید\n"
+        "۲. سبک معاملاتی (سریع، نیمه‌سریع، استاندارد، محافظه‌کار) را تنظیم کنید\n"
+        "۳. ارزهای مورد نظر را به علاقه‌مندی‌ها اضافه کنید تا سیگنال خودکار دریافت کنید\n"
+        "۴. از منوی اصلی، قیمت‌ها، سیگنال‌ها و تحلیل‌ها را مشاهده کنید\n"
+        f"{DIVIDER}\n"
+        "⚠️ *توجه:* تمام تحلیل‌ها تکنیکال بوده و توصیه مالی نیستند.\n"
+        "🛡️ مدیریت ریسک را همواره رعایت کنید."
     )
 
 MAIN_MENU_HEADER = "✨ *سیگنال‌یار حرفه‌ای* ✨\n" + DIVIDER + "\n" + MENU_PROMPT
@@ -2873,6 +2883,7 @@ async def auto_report_loop(app):
                         plan = await generate_trade_plan_v2(code, mode)
                         if plan:
                             current_signals[code] = plan.direction
+                        await asyncio.sleep(0.5)  # کاهش فشار
 
                     prev_signals = last_sent_signals.get(chat_id, {})
 
@@ -2914,7 +2925,7 @@ async def post_init(app):
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
     app.create_task(macro_event_monitor_loop(app))
-    logger.info("Signal Bot V44 (Fixed) started")
+    logger.info("Signal Bot V45 (Stable & Enhanced UI) started")
 
 def main():
     if not BOT_TOKEN:
