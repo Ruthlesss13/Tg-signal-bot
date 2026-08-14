@@ -1,12 +1,10 @@
 """
-Telegram Signal Bot V43 - Institutional Grade Signal System
-- سیستم سیگنال‌دهی لایه‌ای (۶ لایه: ساختار بازار، هم‌گرایی تایم‌فریم، مومنتوم، حجم، احساسات، روند)
-- اهرم پویا بر اساس قدرت سیگنال و حالت معاملاتی
-- ضریب اطمینان و درصد موفقیت تخمینی
-- وضعیت لحظه‌ای به صورت داشبورد تحلیلی
-- اخبار با ایموجی متحرک و حذف خودکار بعد از ۱ ساعت
-- به‌روزرسانی راهنما با اصطلاحات جدید
-- حذف MKR و TON، مرتب‌سازی الفبایی، ستون ۳
+Telegram Signal Bot V44 - Institutional Grade (Fixes & DOGE)
+- اصلاح دریافت OHLCV: افزایش تلاش‌ها، کاهش هم‌زمانی، بهبود انتخاب سمبل
+- افزودن DOGE به لیست ارزها و مرتب‌سازی کامل
+- اضافه کردن دکمه راهنما به منوی ادمین
+- غیرفعال کردن حذف کندل در حال شکل‌گیری برای داده‌های کم
+- بهبود پایداری و خطاگیری
 """
 
 import asyncio
@@ -57,22 +55,23 @@ ALWAYS_ALLOWED_USER_IDS = {
 }
 WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 
-# ---------- لیست ارزها (حذف MKR و TON، مرتب‌سازی) ----------
+# ---------- لیست ارزها (DOGE اضافه شد) ----------
 COIN_ICONS = {
     "AAVE": "AAVE", "ADA": "ADA", "ALGO": "ALGO", "APE": "APE",
     "APT": "APT", "AR": "AR", "ARB": "ARB", "ATOM": "ATOM",
     "AVAX": "AVAX", "BCH": "BCH", "BLUR": "BLUR", "BTC": "BTC",
-    "COMP": "COMP", "DOT": "DOT", "EGLD": "EGLD", "ETC": "ETC",
-    "ETH": "ETH", "FET": "FET", "FIL": "FIL", "FLOW": "FLOW",
-    "GALA": "GALA", "GRT": "GRT", "ICP": "ICP", "INJ": "INJ",
-    "KAS": "KAS", "KAVA": "KAVA", "KSM": "KSM", "LINK": "LINK",
-    "LTC": "LTC", "LUNC": "LUNC", "MANA": "MANA", "MINA": "MINA",
-    "NEAR": "NEAR", "NEO": "NEO", "OP": "OP", "POL": "POL",
-    "RUNE": "RUNE", "SAND": "SAND", "SHIB": "SHIB", "SOL": "SOL",
-    "STX": "STX", "SUI": "SUI", "TRX": "TRX", "UNI": "UNI",
-    "VET": "VET", "XLM": "XLM", "XMR": "XMR", "XRP": "XRP",
+    "COMP": "COMP", "DOGE": "DOGE", "DOT": "DOT", "EGLD": "EGLD",
+    "ETC": "ETC", "ETH": "ETH", "FET": "FET", "FIL": "FIL",
+    "FLOW": "FLOW", "GALA": "GALA", "GRT": "GRT", "ICP": "ICP",
+    "INJ": "INJ", "KAS": "KAS", "KAVA": "KAVA", "KSM": "KSM",
+    "LINK": "LINK", "LTC": "LTC", "LUNC": "LUNC", "MANA": "MANA",
+    "MINA": "MINA", "NEAR": "NEAR", "NEO": "NEO", "OP": "OP",
+    "POL": "POL", "RUNE": "RUNE", "SAND": "SAND", "SHIB": "SHIB",
+    "SOL": "SOL", "STX": "STX", "SUI": "SUI", "TRX": "TRX",
+    "UNI": "UNI", "VET": "VET", "XLM": "XLM", "XMR": "XMR",
+    "XRP": "XRP",
 }
-COIN_CODES = sorted(list(COIN_ICONS.keys()))
+COIN_CODES = sorted(list(COIN_ICONS.keys()))  # مرتب‌سازی الفبایی
 
 TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d")
 TOP_SIGNALS_COUNT = 5
@@ -85,7 +84,7 @@ FEAR_GREED_TTL = 3600
 EVENTS_CHECK_SECONDS = 6 * 3600
 WHALE_CHECK_SECONDS = 30 * 60
 WHALE_MIN_AMOUNT_BTC = 1000
-NEWS_AUTO_DELETE_SECONDS = 3600  # ۱ ساعت
+NEWS_AUTO_DELETE_SECONDS = 3600
 
 PER_PAGE = 20
 WEIGHT_TREND = 25
@@ -97,7 +96,7 @@ WEIGHT_HTF = 20
 OHLCV_TTL_SECONDS = 20
 FULL_REFRESH_TTL_SECONDS = 300
 FUNDING_TTL_SECONDS = 30
-MAX_OHLCV_CONCURRENCY = 3
+MAX_OHLCV_CONCURRENCY = 1   # کاهش هم‌زمانی برای جلوگیری از Rate Limit
 MAX_SIGNAL_CONCURRENCY = 2
 MAX_PRICE_CONCURRENCY = 2
 RLM = "\u200f"
@@ -140,13 +139,12 @@ fear_greed_cache = {"value": None, "ts": 0.0, "classification": ""}
 upcoming_events_cache = {"events": [], "ts": 0.0}
 whale_alert_cache = {"last_id": None, "ts": 0.0}
 news_history: List[Dict] = []
-news_message_ids: Dict[int, List[int]] = {}  # chat_id -> list of message_ids
+news_message_ids: Dict[int, List[int]] = {}
 
 last_check_time = {}
 last_sent_signals = {}
 price_sources = {}
 
-# ---------- تنظیمات حالت‌ها با منطق جدید ----------
 MODE_CONFIGS = {
     "fast": {
         "label": "⚡ سریع",
@@ -158,7 +156,7 @@ MODE_CONFIGS = {
         "max_leverage": 10,
         "min_rr": 0.8,
         "adx_min": 10,
-        "min_confirmations": 3,  # از ۶ لایه، حداقل ۳ تأیید
+        "min_confirmations": 3,
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -213,8 +211,8 @@ class TradePlan:
     trend: str
     rsi: float
     current_price: float = 0.0
-    confidence: float = 0.0      # ۰ تا ۱۰۰
-    win_rate_estimate: float = 0.0  # درصد موفقیت تخمینی
+    confidence: float = 0.0
+    win_rate_estimate: float = 0.0
     entries: list = field(default_factory=list)
     stop_losses: list = field(default_factory=list)
     take_profits: list = field(default_factory=list)
@@ -238,9 +236,8 @@ class TradePlan:
     timestamp: float = 0.0
     status: str = "open"
     mode: str = "standard"
-    # فیلدهای جدید
-    layer_results: dict = field(default_factory=dict)  # نتیجه هر لایه
-    signal_grade: str = ""  # A, B, C, D
+    layer_results: dict = field(default_factory=dict)
+    signal_grade: str = ""
 
 class MarketDataCache:
     _instance = None
@@ -287,6 +284,7 @@ class MarketDataCache:
             for code in COIN_CODES:
                 self.market_status[code] = {"status": "NO SWAP", "symbol": None, "error": None, "source": None}
                 candidates = []
+                # جستجوی فیوچرز با فرمت‌های مختلف
                 for symbol, market in markets.items():
                     if market.get("base") != code:
                         continue
@@ -299,6 +297,7 @@ class MarketDataCache:
                     if market.get("active") is False:
                         continue
                     candidates.append((symbol, market))
+                # اگر پیدا نشد، فرمت‌های جایگزین
                 if not candidates:
                     for symbol, market in markets.items():
                         if symbol == f"{code}/USDT:USDT" and market.get("type") == "swap":
@@ -307,6 +306,9 @@ class MarketDataCache:
                             candidates.append((symbol, market))
                         elif symbol == f"{code}USDTM" and market.get("type") == "swap":
                             candidates.append((symbol, market))
+                        elif symbol == f"{code}/USDT" and market.get("type") == "swap":   # اضافه شد
+                            candidates.append((symbol, market))
+                # اگر فیوچرز نبود، از اسپات استفاده کن
                 if not candidates:
                     try:
                         spot_markets = exchange_spot_kucoin.load_markets()
@@ -357,16 +359,10 @@ class MarketDataCache:
         df = df.dropna(subset=required).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df if not df.empty else None
 
+    # حذف فیلتر حذف کندل در حال شکل‌گیری برای جلوگیری از کاهش تعداد کندل‌ها
     @staticmethod
     def _drop_forming_candle(df):
-        if df is None or len(df) < 2:
-            return df
-        now = pd.Timestamp.now(tz="UTC")
-        latest = df["timestamp"].iloc[-1]
-        timeframe_delta = df["timestamp"].iloc[-1] - df["timestamp"].iloc[-2] if len(df) >= 2 else None
-        if timeframe_delta and timeframe_delta > pd.Timedelta(0):
-            if latest + timeframe_delta > now:
-                return df.iloc[:-1].copy().reset_index(drop=True)
+        # دیگر حذف نمی‌کنیم، فقط برای سازگاری با کد قدیمی نگه‌داشته می‌شود
         return df.copy().reset_index(drop=True)
 
     async def update_prices(self, force=False, codes=None):
@@ -429,17 +425,17 @@ class MarketDataCache:
                 "AAVE": "aave", "ADA": "cardano", "ALGO": "algorand", "APE": "apecoin",
                 "APT": "aptos", "AR": "arweave", "ARB": "arbitrum", "ATOM": "cosmos",
                 "AVAX": "avalanche-2", "BCH": "bitcoin-cash", "BLUR": "blur", "BTC": "bitcoin",
-                "COMP": "compound-governance-token", "DOT": "polkadot", "EGLD": "elrond-erd-2",
-                "ETC": "ethereum-classic", "ETH": "ethereum", "FET": "fetch-ai", "FIL": "filecoin",
-                "FLOW": "flow", "GALA": "gala", "GRT": "the-graph", "ICP": "internet-computer",
-                "INJ": "injective-protocol", "KAS": "kaspa", "KAVA": "kava", "KSM": "kusama",
-                "LINK": "chainlink", "LTC": "litecoin", "LUNC": "terra-luna-classic",
-                "MANA": "decentraland", "MINA": "mina-protocol", "NEAR": "near",
-                "NEO": "neo", "OP": "optimism", "POL": "polygon-ecosystem-token",
-                "RUNE": "thorchain", "SAND": "the-sandbox", "SHIB": "shiba-inu",
-                "SOL": "solana", "STX": "blockstack", "SUI": "sui", "TRX": "tron",
-                "UNI": "uniswap", "VET": "vechain", "XLM": "stellar", "XMR": "monero",
-                "XRP": "ripple",
+                "COMP": "compound-governance-token", "DOGE": "dogecoin", "DOT": "polkadot",
+                "EGLD": "elrond-erd-2", "ETC": "ethereum-classic", "ETH": "ethereum",
+                "FET": "fetch-ai", "FIL": "filecoin", "FLOW": "flow", "GALA": "gala",
+                "GRT": "the-graph", "ICP": "internet-computer", "INJ": "injective-protocol",
+                "KAS": "kaspa", "KAVA": "kava", "KSM": "kusama", "LINK": "chainlink",
+                "LTC": "litecoin", "LUNC": "terra-luna-classic", "MANA": "decentraland",
+                "MINA": "mina-protocol", "NEAR": "near", "NEO": "neo", "OP": "optimism",
+                "POL": "polygon-ecosystem-token", "RUNE": "thorchain", "SAND": "the-sandbox",
+                "SHIB": "shiba-inu", "SOL": "solana", "STX": "blockstack", "SUI": "sui",
+                "TRX": "tron", "UNI": "uniswap", "VET": "vechain", "XLM": "stellar",
+                "XMR": "monero", "XRP": "ripple",
             }
             ids = [ids_map[code] for code in codes if code in ids_map]
             if not ids:
@@ -460,30 +456,30 @@ class MarketDataCache:
             logger.warning("CoinGecko fetch failed: %s", e)
         return prices
 
-    async def _fetch_ohlcv_symbol(self, code, timeframe, limit=300):
+    async def _fetch_ohlcv_symbol(self, code, timeframe, limit=500):
         symbol = self.symbol_for_code(code)
         if not symbol:
             return None
         source = self.market_status.get(code, {}).get("source", "futures")
         use_futures = source == "futures"
-        async with self._sem:
-            for attempt in range(3):
-                try:
-                    if use_futures:
-                        raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
-                    else:
-                        raw = await asyncio.to_thread(exchange_spot_kucoin.fetch_ohlcv, symbol, timeframe, None, limit)
-                    df = self._to_dataframe(raw)
-                    if df is None or len(df) < 10:
-                        return None
-                    closed = self._drop_forming_candle(df)
-                    if closed is None or len(closed) < 5:
-                        return None
-                    return closed
-                except Exception as e:
-                    logger.warning("OHLCV failed | code=%s | tf=%s | attempt=%s | error=%s", code, timeframe, attempt, e)
-                    await asyncio.sleep(1)
-            return None
+        # افزایش تلاش‌ها و فاصله
+        for attempt in range(5):
+            try:
+                if use_futures:
+                    raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
+                else:
+                    raw = await asyncio.to_thread(exchange_spot_kucoin.fetch_ohlcv, symbol, timeframe, None, limit)
+                df = self._to_dataframe(raw)
+                if df is None or len(df) < 10:
+                    logger.debug(f"OHLCV {code} {timeframe}: insufficient rows {len(df) if df is not None else 0}")
+                    await asyncio.sleep(2)
+                    continue
+                # دیگر حذف نمی‌کنیم، مستقیم برگردان
+                return df
+            except Exception as e:
+                logger.warning("OHLCV failed | code=%s | tf=%s | attempt=%s | error=%s", code, timeframe, attempt, e)
+                await asyncio.sleep(2)
+        return None
 
     async def ensure_symbol_data(self, code, timeframes=None, force=False):
         if timeframes is None:
@@ -539,9 +535,7 @@ class MarketDataCache:
                     return cached["value"]
                 return 0.0
 
-    # ---------- توابع کمکی برای تحلیل لایه‌ای ----------
     def _check_structure(self, df, direction):
-        """لایه ۱: ساختار بازار (شکست، برگشت از حمایت/مقاومت)"""
         if df is None or len(df) < 30:
             return False
         high = df["high"].iloc[-20:]
@@ -550,10 +544,8 @@ class MarketDataCache:
         prev_high = float(high.max())
         prev_low = float(low.min())
         if direction == "LONG":
-            # شکست مقاومت یا برگشت از حمایت
             if price > prev_high * 1.001:
                 return True
-            # بررسی کندل برگشتی (مشعل صعودی)
             last_candle = df.iloc[-1]
             if last_candle["close"] > last_candle["open"] and (last_candle["close"] - last_candle["low"]) > 2 * (last_candle["high"] - last_candle["close"]):
                 return True
@@ -567,12 +559,10 @@ class MarketDataCache:
             return False
 
     def _check_mtf(self, code, direction, mode):
-        """لایه ۲: هم‌گرایی تایم‌فریم"""
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
         main_tf = config["main_tf"]
         confirm_tfs = config["confirm_tfs"]
         confirm_count = 0
-        # بررسی تایم‌فریم اصلی
         df_main = self.ohlcv.get(main_tf, {}).get(code)
         if df_main is not None and len(df_main) > 50:
             price = float(df_main["close"].iloc[-1])
@@ -581,7 +571,6 @@ class MarketDataCache:
                 confirm_count += 1
             elif direction == "SHORT" and price < ema200:
                 confirm_count += 1
-        # بررسی تایم‌فریم‌های تأیید
         for tf in confirm_tfs:
             df = self.ohlcv.get(tf, {}).get(code)
             if df is not None and len(df) > 50:
@@ -591,11 +580,9 @@ class MarketDataCache:
                     confirm_count += 1
                 elif direction == "SHORT" and price < ema200:
                     confirm_count += 1
-        # حداقل ۲ تایم‌فریم همراستا
         return confirm_count >= 2
 
     def _check_momentum(self, ind, direction):
-        """لایه ۳: مومنتوم و واگرایی"""
         score = 0
         if direction == "LONG":
             if ind["macd_hist"] > 0:
@@ -618,7 +605,6 @@ class MarketDataCache:
         return score >= 2
 
     def _check_volume(self, ind):
-        """لایه ۴: حجم معاملات"""
         if ind["volume_ratio"] >= 1.5:
             return True
         if ind["volume_spike"]:
@@ -626,37 +612,19 @@ class MarketDataCache:
         return False
 
     def _check_sentiment(self, code, direction):
-        """لایه ۵: احساسات بازار (فاندینگ)"""
         funding = self._funding_cache.get(code, {}).get("value", 0)
         if direction == "LONG":
-            # فاندینگ خیلی مثبت نباشد (اشباع خرید)
             return funding < 0.05
         else:
-            # فاندینگ خیلی منفی نباشد (اشباع فروش)
             return funding > -0.05
 
     def _check_trend(self, ind, mode):
-        """لایه ۶: روند و نوسان‌پذیری"""
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
         if ind["adx"] < config["adx_min"]:
             return False
         if ind["atr_pct"] < 0.5 or ind["atr_pct"] > 8:
             return False
         return True
-
-    def _analyze_layers(self, code, direction, ind, mode):
-        """تحلیل ۶ لایه و بازگرداندن نتایج"""
-        df = self.ohlcv.get(MODE_CONFIGS[mode]["main_tf"], {}).get(code)
-        results = {
-            "structure": self._check_structure(df, direction),
-            "mtf": self._check_mtf(code, direction, mode),
-            "momentum": self._check_momentum(ind, direction),
-            "volume": self._check_volume(ind),
-            "sentiment": self._check_sentiment(code, direction),
-            "trend": self._check_trend(ind, mode),
-        }
-        confirmed = sum(1 for v in results.values() if v)
-        return results, confirmed
 
     async def get_indicators(self, code, mode="standard"):
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
@@ -832,7 +800,6 @@ async def guard(update):
     return True
 
 def add_news_alert(text: str, importance: str = "medium", impact: str = "", details: dict = None, auto_delete: bool = True):
-    """اضافه کردن خبر با سطح اهمیت و جزئیات، با قابلیت حذف خودکار"""
     global news_history
     entry = {
         "time": shamsi_now(),
@@ -851,7 +818,6 @@ def add_news_alert(text: str, importance: str = "medium", impact: str = "", deta
     save_state()
 
 def get_win_rate_estimate():
-    """محاسبه درصد موفقیت تخمینی از تاریخچه سیگنال‌ها"""
     if not signal_history:
         return 50.0
     wins = sum(1 for s in signal_history if s["status"].startswith("tp"))
@@ -948,7 +914,6 @@ def signal_grade(confidence):
     return "D (ضعیف)"
 
 async def delete_news_messages_after_delay(app, chat_id, message_id, delay=NEWS_AUTO_DELETE_SECONDS):
-    """حذف پیام خبر بعد از زمان مشخص"""
     await asyncio.sleep(delay)
     try:
         await app.bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -1041,7 +1006,6 @@ async def check_and_notify_events(app):
                 text += "\n"
             try:
                 msg = await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
-                # حذف خودکار بعد از ۱ ساعت
                 asyncio.create_task(delete_news_messages_after_delay(app, chat_id, msg.message_id))
             except Exception as e:
                 logger.warning("Event notify failed: %s", e)
@@ -1137,7 +1101,6 @@ async def whale_monitor_loop(app):
                         to_addr = alert.get("to_address", "نامشخص")
                         from_owner = alert.get("from_owner", "ناشناس")
                         to_owner = alert.get("to_owner", "ناشناس")
-                        # ایموجی متحرک ساده
                         whale_emoji = "🐋" if amount > 5000 else "🐳"
                         text = (
                             f"{whale_emoji} *حرکت نهنگ بزرگ*\n"
@@ -1157,7 +1120,6 @@ async def whale_monitor_loop(app):
                         latest = news_history[-1] if news_history else None
                         if latest and latest.get("importance") == "high":
                             msg = await app.bot.send_message(chat_id=chat_id, text=rtl_lines(latest["text"]), parse_mode="Markdown")
-                            # حذف خودکار بعد از ۱ ساعت
                             asyncio.create_task(delete_news_messages_after_delay(app, chat_id, msg.message_id))
         except Exception as e:
             logger.exception("Whale monitor error: %s", e)
@@ -1165,7 +1127,6 @@ async def whale_monitor_loop(app):
 
 # ---------- Macro event monitor ----------
 async def fetch_macro_events():
-    # در نسخه فعلی ساده، در آینده قابل گسترش با API واقعی
     return []
 
 async def macro_event_monitor_loop(app):
@@ -1249,9 +1210,8 @@ def compute_advanced_stats(signal_history, mode=None):
         "avg_confidence": avg_confidence, "wins": wins, "losses": losses,
     }
 
-# ---------- لایه‌های سیگنال (با استفاده از متدهای cache) ----------
+# ---------- توابع تحلیل لایه‌ها ----------
 async def analyze_layers(code, direction, ind, mode, cache_obj):
-    """تحلیل ۶ لایه با استفاده از متدهای cache"""
     config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
     df = cache_obj.ohlcv.get(config["main_tf"], {}).get(code)
     
@@ -1266,7 +1226,6 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
         prev_low = float(low.min())
         if direction == "LONG":
             structure_ok = price > prev_high * 1.001
-            # یا برگشت از حمایت با کندل صعودی
             last = df.iloc[-1]
             if not structure_ok and last["close"] > last["open"] and (last["close"] - last["low"]) > 2 * (last["high"] - last["close"]):
                 structure_ok = True
@@ -1333,7 +1292,6 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
 
 # ---------- تولید سیگنال جدید ----------
 async def generate_trade_plan_v2(code, mode="standard"):
-    """نسخه جدید تولید سیگنال با سیستم لایه‌ای"""
     try:
         await cache.update_prices(force=True, codes=[code])
         ind = await cache.get_indicators(code, mode)
@@ -1343,24 +1301,23 @@ async def generate_trade_plan_v2(code, mode="standard"):
         
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
         
-        # محاسبه امتیاز لانگ و شورت
-        long_layers, long_confirmed = await analyze_layers(code, "LONG", ind, mode, cache)
-        short_layers, short_confirmed = await analyze_layers(code, "SHORT", ind, mode, cache)
+        long_layers = await analyze_layers(code, "LONG", ind, mode, cache)
+        short_layers = await analyze_layers(code, "SHORT", ind, mode, cache)
+        
+        long_confirmed = sum(1 for v in long_layers.values() if v)
+        short_confirmed = sum(1 for v in short_layers.values() if v)
         
         long_score = long_confirmed / 6 * 100
         short_score = short_confirmed / 6 * 100
         
-        # انتخاب جهت
         direction = None
         confidence = 0
         layers = {}
         
-        # فیلتر رژیم بازار (ADX)
         if ind["adx"] < config["adx_min"]:
             logger.info(f"Market regime: ADX {ind['adx']:.1f} < {config['adx_min']} for {code}")
             return None
         
-        # بررسی حداقل تأییدیه‌ها و اختلاف امتیاز
         if long_confirmed >= config["min_confirmations"] and long_score >= short_score + MIN_DIRECTION_GAP:
             direction = "LONG"
             confidence = long_score
@@ -1373,12 +1330,10 @@ async def generate_trade_plan_v2(code, mode="standard"):
             logger.info(f"No direction for {code}: long_conf={long_confirmed}, short_conf={short_confirmed}, gap={abs(long_score-short_score)}")
             return None
         
-        # بررسی حداقل اطمینان
         if confidence < MIN_SIGNAL_CONFIDENCE:
             logger.info(f"Confidence too low for {code}: {confidence:.1f} < {MIN_SIGNAL_CONFIDENCE}")
             return None
         
-        # محاسبه سطوح
         levels = build_ladder_weighted(ind, direction, mode)
         if levels["rr"] < config["min_rr"]:
             logger.info(f"RR too low for {code}: {levels['rr']:.2f} < {config['min_rr']}")
@@ -1386,7 +1341,6 @@ async def generate_trade_plan_v2(code, mode="standard"):
         
         funding = await cache.get_funding_rate(code)
         
-        # اعمال فیلتر ترس و طمع
         fg_value, _ = await get_fear_greed()
         if fg_value is not None:
             if direction == "LONG" and fg_value > 80:
@@ -1397,7 +1351,6 @@ async def generate_trade_plan_v2(code, mode="standard"):
         confidence = max(0, min(100, confidence))
         confidence = float(confidence)
         
-        # محاسبه اهرم پویا
         max_lev = config["max_leverage"]
         if confidence >= 90:
             leverage = max_lev
@@ -1410,14 +1363,11 @@ async def generate_trade_plan_v2(code, mode="standard"):
         else:
             leverage = 1
         
-        # درصد موفقیت تخمینی
         win_rate_est = get_win_rate_estimate()
         
         entry_avg = levels["avg_entry"]
         liq = calc_liquidation_price(direction, entry_avg, leverage)
         reasons, warnings = signal_reasons(direction, ind, mode)
-        
-        # درجه سیگنال
         grade = signal_grade(confidence)
         
         plan = TradePlan(
@@ -1580,17 +1530,12 @@ def update_signal_status(symbol, current_price):
             elif current_price <= rec["tp_prices"][0]:
                 rec["status"] = "tp1_hit"
 
-# ---------- Formatting (نسخه جدید) ----------
+# ---------- فرمت‌سازی ----------
 def format_main_signal_v2(plan, code, chat_id):
     direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
     mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
     
-    # نمایش وضعیت لایه‌ها
     layers_text = ""
-    layer_emojis = {
-        "structure": "🏗️", "mtf": "⏳", "momentum": "🚀",
-        "volume": "🔊", "sentiment": "🧠", "trend": "📈"
-    }
     layer_names = {
         "structure": "ساختار بازار",
         "mtf": "هم‌گرایی تایم‌فریم",
@@ -1634,13 +1579,10 @@ def format_main_signal_v2(plan, code, chat_id):
     return rtl_lines(text)
 
 def format_status_dashboard(code, ind, plan, chat_id, mode):
-    """داشبورد وضعیت لحظه‌ای با نمایش لایه‌ها"""
     mode_label = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])["label"]
     header = f"🧭 *وضعیت لحظه‌ای* {code}/USDT\n🕒 {shamsi_now()}\n🛠️ حالت: {mode_label}\n{DIVIDER}\n"
-    
     price_text = f"💰 قیمت: {fmt_amount(ind['price'], chat_id)}\n📊 روند EMA200: {ind['trend_label']}\n{DIVIDER}\n"
     
-    # وضعیت لایه‌ها
     layers_text = "📋 *وضعیت لایه‌های تحلیل:*\n"
     if plan and plan.layer_results:
         layer_names = {
@@ -1660,7 +1602,6 @@ def format_status_dashboard(code, ind, plan, chat_id, mode):
     else:
         layers_text = "⏳ در حال تحلیل...\n"
     
-    # اگر سیگنال وجود دارد
     if plan and plan.confidence >= MIN_SIGNAL_CONFIDENCE:
         footer = (
             f"\n{DIVIDER}\n"
@@ -1677,14 +1618,12 @@ def format_status_dashboard(code, ind, plan, chat_id, mode):
             f"💤 سیگنال نهایی وجود ندارد.\n"
             f"امتیاز بهترین جهت: {plan.confidence if plan else 0:.0f}٪"
         )
-    
     return rtl_lines(header + price_text + layers_text + footer + f"\n{DIVIDER}\n⚠️ این تحلیل تکنیکال است و تضمین سود یا توصیه مالی نیست.")
 
-# ---------- generate_trade_plan (نسخه جدید) ----------
+# ---------- توابع اصلی هماهنگ ----------
 async def generate_trade_plan(code, mode="standard"):
     return await generate_trade_plan_v2(code, mode)
 
-# ---------- Status text ----------
 async def generate_status_text_async(code, chat_id, mode="standard"):
     await cache.update_prices(force=True, codes=[code])
     ind = await cache.get_indicators(code, mode)
@@ -1693,7 +1632,6 @@ async def generate_status_text_async(code, chat_id, mode="standard"):
     plan = await generate_trade_plan_v2(code, mode)
     return format_status_dashboard(code, ind, plan, chat_id, mode)
 
-# ---------- Weekly summary (بدون تغییر) ----------
 async def generate_weekly_summary_async(code, chat_id):
     await cache.update_prices(force=True, codes=[code])
     week_df = await cache.get_weekly_data(code)
@@ -1802,7 +1740,6 @@ async def generate_weekly_summary_async(code, chat_id):
     )
     return rtl_lines(text)
 
-# ---------- Prices formatting ----------
 def format_prices_pretty(prices, chat_id):
     lines = ["💰 قیمت لحظه‌ای", f"🕒 {shamsi_now()}", DIVIDER]
     for code in COIN_CODES:
@@ -1816,7 +1753,6 @@ def format_prices_pretty(prices, chat_id):
             lines.append(f"{code} ⚠️ قیمت در دسترس نیست")
     return rtl_lines("\n".join(lines))
 
-# ---------- Split message ----------
 def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
     if len(text) <= limit:
         return [text]
@@ -1837,7 +1773,7 @@ def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
         parts.append(current.strip())
     return parts
 
-# ---------- Screen management ----------
+# ---------- مدیریت صفحه نمایش و پیام‌ها ----------
 async def clear_interactive_screen(context, chat_id, keep_id=None):
     ids = interactive_screen_messages.pop(chat_id, [])
     for mid in ids:
@@ -1867,7 +1803,7 @@ async def track_auto_message(app, chat_id, message_id):
         try: await app.bot.delete_message(chat_id=chat_id, message_id=old)
         except Exception: pass
 
-# ---------- Keyboards ----------
+# ---------- کیبوردها ----------
 def build_grid_keyboard(buttons, columns):
     rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
     if rows and len(rows[-1]) < columns:
@@ -1913,6 +1849,7 @@ def kb_main(user_id, mode="standard"):
             [InlineKeyboardButton("📊 گزارش مقایسه‌ای", callback_data="admin_compare"), InlineKeyboardButton("🧾 گزارش دوره‌ای", callback_data="periodic_report")],
             [InlineKeyboardButton("🔄 شروع مجدد", callback_data="restart_bot"), InlineKeyboardButton("🛑 توقف ربات", callback_data="stop_bot")],
             [InlineKeyboardButton("📈 داشبورد تحلیلی", callback_data="dashboard"), InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")],
+            [InlineKeyboardButton("❓ راهنما", callback_data="help")],  # اضافه شد
         ]
     else:
         rows = [
@@ -2184,7 +2121,6 @@ async def news_monitor_loop(app):
             logger.exception("News monitor error: %s", e)
         await asyncio.sleep(EVENTS_CHECK_SECONDS)
 
-# ---------- Macro event monitor ----------
 async def macro_event_monitor_loop(app):
     await asyncio.sleep(120)
     while True:
@@ -2793,12 +2729,13 @@ async def button_handler(update, context):
         mode = user_trading_mode.get(chat_id, "standard")
         try:
             ind = await cache.get_indicators(code, mode)
-            if not ind: await query.edit_message_text("⚠️ داده کافی نیست.", reply_markup=kb_back_main()); return
+            if not ind:
+                await query.edit_message_text("⚠️ داده کافی نیست.", reply_markup=kb_back_main())
+                return
             plan = await generate_trade_plan_v2(code, mode)
             if not plan:
                 await query.edit_message_text("💤 سیگنال فعلی موجود نیست.\nدلایل احتمالی: ADX پایین یا عدم تأیید کافی لایه‌ها.", reply_markup=kb_back_main())
                 return
-            # برای جزئیات فنی، از همان فرمت قبلی استفاده می‌کنیم (می‌توان بعداً بهبود داد)
             details_text = format_technical_details(code, plan, ind, chat_id)
             await query.edit_message_text(split_long_message(details_text)[0], reply_markup=kb_back_to_signal(code), parse_mode="Markdown")
         except Exception as e:
@@ -2849,9 +2786,8 @@ async def button_handler(update, context):
         await query.edit_message_text("⏳ در حال تحلیل همه ارزها (برای ادمین)...")
         try:
             mode = "standard"
-            # در این نسخه ساده، فقط یک نمونه از همه ارزها تحلیل می‌شود
             plans = {}
-            for code in COIN_CODES[:20]:  # محدود به ۲۰ ارز برای جلوگیری از timeout
+            for code in COIN_CODES[:20]:
                 plan = await generate_trade_plan_v2(code, mode)
                 if plan:
                     plans[code] = plan
@@ -2873,7 +2809,6 @@ async def button_handler(update, context):
             set_interactive_screen(chat_id, new_ids)
         return
 
-# ---------- format_technical_details (برای سازگاری) ----------
 def format_technical_details(code, plan, ind, chat_id):
     direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
     reasons_text = "\n".join(f" ✅ {x}" for x in plan.reasons[:15])
@@ -2950,8 +2885,6 @@ async def auto_report_loop(app):
                                 msg = await app.bot.send_message(chat_id=chat_id, text=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
                                 active_signals.setdefault(chat_id, {})[code] = {"plan": plan, "stage": 0, "last_notified": 0}
                                 prev_signals[code] = {"direction": direction, "timestamp": time.time()}
-                                # حذف پیام سیگنال بعد از ۱ ساعت (اختیاری)
-                                # asyncio.create_task(delete_news_messages_after_delay(app, chat_id, msg.message_id))
 
                     for code in list(prev_signals.keys()):
                         if code not in current_signals:
@@ -2981,7 +2914,7 @@ async def post_init(app):
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
     app.create_task(macro_event_monitor_loop(app))
-    logger.info("Signal Bot V43 (Institutional Grade) started")
+    logger.info("Signal Bot V44 (Fixed) started")
 
 def main():
     if not BOT_TOKEN:
