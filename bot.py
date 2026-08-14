@@ -1,8 +1,8 @@
 """
 Telegram Signal Bot V45 - Institutional Grade (Stable & Beautiful UI)
 - سریالی‌سازی کامل درخواست‌های OHLCV با Semaphore در fetch
-- لیست ارزها با ۲ ستون و بدون جای خالی (با noop)
-- متن خوش‌آمدگویی جذاب و حرفه‌ای
+- لیست ارزها با ۴ ستون و بدون دکمه noop
+- قیمت‌ها از اسپات کوکوین + پشتیبان مکس (Max)
 - کش طولانی‌تر و مکث افزایشی برای جلوگیری از خطای ۴۲۹
 """
 
@@ -38,7 +38,7 @@ load_dotenv()
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.DEBUG,  # برای عیب‌یابی دقیق
+    level=logging.DEBUG,
 )
 logger = logging.getLogger("signal_bot")
 
@@ -54,7 +54,7 @@ ALWAYS_ALLOWED_USER_IDS = {
 }
 WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 
-# ---------- لیست ارزها (مرتب‌شده) ----------
+# ---------- لیست ارزها ----------
 COIN_ICONS = {
     "AAVE": "AAVE", "ADA": "ADA", "ALGO": "ALGO", "APE": "APE",
     "APT": "APT", "AR": "AR", "ARB": "ARB", "ATOM": "ATOM",
@@ -70,13 +70,13 @@ COIN_ICONS = {
     "UNI": "UNI", "VET": "VET", "XLM": "XLM", "XMR": "XMR",
     "XRP": "XRP",
 }
-COIN_CODES = sorted(list(COIN_ICONS.keys()))  # مرتب‌سازی الفبایی
+COIN_CODES = sorted(list(COIN_ICONS.keys()))
 
 TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d")
 TOP_SIGNALS_COUNT = 5
 TELEGRAM_MSG_LIMIT = 3500
 IRT_RATE_TTL_SECONDS = 60
-COINS_GRID_COLUMNS = 2          # ۲ ستون برای نمایش بهتر
+COINS_GRID_COLUMNS = 4          # ۴ ستون
 AUTO_KEEP_LAST_N = 3
 TRAILING_CHECK_SECONDS = 5 * 60
 FEAR_GREED_TTL = 3600
@@ -85,17 +85,17 @@ WHALE_CHECK_SECONDS = 30 * 60
 WHALE_MIN_AMOUNT_BTC = 1000
 NEWS_AUTO_DELETE_SECONDS = 3600
 
-PER_PAGE = 20
+PER_PAGE = 12                     # ۳ ردیف × ۴ ستون
 WEIGHT_TREND = 25
 WEIGHT_MOMENTUM = 25
 WEIGHT_VOLUME = 15
 WEIGHT_VOLATILITY = 15
 WEIGHT_HTF = 20
 
-OHLCV_TTL_SECONDS = 120          # افزایش کش
+OHLCV_TTL_SECONDS = 120
 FULL_REFRESH_TTL_SECONDS = 300
 FUNDING_TTL_SECONDS = 30
-MAX_OHLCV_CONCURRENCY = 1        # سریال‌سازی درخواست‌ها
+MAX_OHLCV_CONCURRENCY = 1
 MAX_SIGNAL_CONCURRENCY = 2
 MAX_PRICE_CONCURRENCY = 2
 RLM = "\u200f"
@@ -359,6 +359,61 @@ class MarketDataCache:
     def _drop_forming_candle(df):
         return df.copy().reset_index(drop=True)
 
+    # ---------- دریافت قیمت از مکس (Max) ----------
+    def _get_max_prices(self, codes):
+        prices = {}
+        try:
+            # مپ نام ارزها در مکس (بیشتر ارزهای اصلی را دارد)
+            max_symbol_map = {
+                "BTC": "BTCUSDT", "ETH": "ETHUSDT", "XRP": "XRPUSDT", "LTC": "LTCUSDT",
+                "BCH": "BCHUSDT", "ADA": "ADAUSDT", "DOT": "DOTUSDT", "LINK": "LINKUSDT",
+                "DOGE": "DOGEUSDT", "SOL": "SOLUSDT", "MATIC": "MATICUSDT", "AVAX": "AVAXUSDT",
+                "UNI": "UNIUSDT", "ATOM": "ATOMUSDT", "ETC": "ETCUSDT", "XLM": "XLMUSDT",
+                "ALGO": "ALGOUSDT", "VET": "VETUSDT", "FIL": "FILUSDT", "TRX": "TRXUSDT",
+                "EOS": "EOSUSDT", "AAVE": "AAVEUSDT", "MKR": "MKRUSDT", "SNX": "SNXUSDT",
+                "COMP": "COMPUSDT", "ZEC": "ZECUSDT", "XTZ": "XTZUSDT", "NEO": "NEOUSDT",
+                "KSM": "KSMUSDT", "DASH": "DASHUSDT", "YFI": "YFIUSDT", "SUSHI": "SUSHIUSDT",
+                "UMA": "UMAUSDT", "CRV": "CRVUSDT", "1INCH": "1INCHUSDT", "AAVE": "AAVEUSDT",
+                "GRT": "GRTUSDT", "REN": "RENUSDT", "BAL": "BALUSDT", "LRC": "LRCUSDT",
+                "ZRX": "ZRXUSDT", "BAT": "BATUSDT", "ENJ": "ENJUSDT", "MANA": "MANAUSDT",
+                "SAND": "SANDUSDT", "CHZ": "CHZUSDT", "OCEAN": "OCEANUSDT", "ANKR": "ANKRUSDT",
+                "API3": "API3USDT", "BAND": "BANDUSDT", "STORJ": "STORJUSDT", "SKL": "SKLUSDT",
+                "NU": "NUUSDT", "CVC": "CVCUSDT", "KAVA": "KAVAUSDT", "ICP": "ICPUSDT",
+                "AR": "ARUSDT", "NEAR": "NEARUSDT", "FTM": "FTMUSDT", "HNT": "HNTUSDT",
+                "FLOW": "FLOWUSDT", "MINA": "MINAUSDT", "APE": "APEUSDT", "APT": "APTUSDT",
+                "ARB": "ARBUSDT", "OP": "OPUSDT", "SUI": "SUIUSDT", "BLUR": "BLURUSDT",
+                "LUNC": "LUNCUSDT", "STX": "STXUSDT", "EGLD": "EGLDUSDT", "INJ": "INJUSDT",
+                "FET": "FETUSDT", "GALA": "GALAUSDT", "POL": "POLUSDT", "RUNE": "RUNEUSDT",
+                "SHIB": "SHIBUSDT", "KAS": "KASUSDT", "XMR": "XMRUSDT",
+            }
+            symbols = []
+            for code in codes:
+                if code in max_symbol_map:
+                    symbols.append(max_symbol_map[code])
+            if not symbols:
+                return prices
+            
+            # دریافت تیکرها از مکس
+            url = "https://api.max-api.com/api/v2/markets/tickers"
+            r = requests.get(url, timeout=8)
+            r.raise_for_status()
+            data = r.json()
+            if "data" in data and isinstance(data["data"], list):
+                for item in data["data"]:
+                    symbol = item.get("symbol")
+                    if symbol in symbols:
+                        price = item.get("last")
+                        if price and float(price) > 0:
+                            # پیدا کردن کد ارز
+                            for code, sym in max_symbol_map.items():
+                                if sym == symbol and code in codes:
+                                    prices[code] = float(price)
+                                    break
+            logger.info(f"Max prices fetched: {len(prices)}/{len(codes)}")
+        except Exception as e:
+            logger.warning("Max price fetch failed: %s", e)
+        return prices
+
     async def update_prices(self, force=False, codes=None):
         target_codes = codes if codes is not None else COIN_CODES
         now = time.time()
@@ -368,6 +423,7 @@ class MarketDataCache:
         new_prices = {}
         price_sources.clear()
 
+        # ۱. کوکوین اسپات (اولویت اول)
         try:
             symbols = [f"{code}/USDT" for code in target_codes]
             tickers = await asyncio.to_thread(exchange_spot_kucoin.fetch_tickers, symbols)
@@ -382,6 +438,7 @@ class MarketDataCache:
         except Exception as e:
             logger.warning("KuCoin spot fetch_tickers failed: %s", e)
 
+        # ۲. درخواست تکی برای ارزهای missing از کوکوین اسپات
         missing = [code for code in target_codes if code not in new_prices]
         for code in missing:
             try:
@@ -395,10 +452,23 @@ class MarketDataCache:
             except Exception as e:
                 logger.debug(f"Individual ticker failed for {code}: {e}")
 
+        # ۳. پشتیبان مکس (Max) برای ارزهای باقی‌مانده
         still_missing = [code for code in target_codes if code not in new_prices]
         if still_missing:
             try:
-                gecko_prices = await asyncio.to_thread(self._get_coingecko_prices, still_missing)
+                max_prices = await asyncio.to_thread(self._get_max_prices, still_missing)
+                for code, price in max_prices.items():
+                    if price and price > 0:
+                        new_prices[code] = price
+                        price_sources[code] = "M"  # Max
+            except Exception as e:
+                logger.warning("Max fallback failed: %s", e)
+
+        # ۴. پشتیبان نهایی CoinGecko (در صورت نیاز)
+        final_missing = [code for code in target_codes if code not in new_prices]
+        if final_missing:
+            try:
+                gecko_prices = await asyncio.to_thread(self._get_coingecko_prices, final_missing)
                 for code, price in gecko_prices.items():
                     if price and price > 0:
                         new_prices[code] = price
@@ -410,7 +480,7 @@ class MarketDataCache:
             if code in new_prices:
                 self.prices[code] = new_prices[code]
         self.last_price_update = time.time()
-        logger.info("Prices loaded: %s/%s", len(self.prices), len(COIN_CODES))
+        logger.info("Prices loaded: %s/%s (sources: %s)", len(self.prices), len(COIN_CODES), set(price_sources.values()))
         return self.prices
 
     def _get_coingecko_prices(self, codes):
@@ -457,7 +527,6 @@ class MarketDataCache:
             return None
         source = self.market_status.get(code, {}).get("source", "futures")
         use_futures = source == "futures"
-        # سریال‌سازی درخواست‌ها با Semaphore
         async with self._sem:
             for attempt in range(5):
                 try:
@@ -502,7 +571,6 @@ class MarketDataCache:
             if not self.valid_codes:
                 return
             target_codes = list(codes if codes is not None else self.valid_codes)
-            # حلقه سریالی (Semaphore داخل fetch است)
             for code in target_codes:
                 await self.ensure_symbol_data(code, TIMEFRAMES, force=force)
             self.last_full_ohlcv_update = time.time()
@@ -1744,7 +1812,7 @@ def format_prices_pretty(prices, chat_id):
         price = prices.get(code)
         if price is not None and price > 0:
             source = price_sources.get(code, "K")
-            source_emoji = "🅺" if source == "K" else "🅲"
+            source_emoji = "🅺" if source == "K" else "🅼" if source == "M" else "🅲"
             price_display = fmt_amount(price, chat_id)
             lines.append(f"{code} {source_emoji} → {price_display}")
         else:
@@ -1804,9 +1872,7 @@ async def track_auto_message(app, chat_id, message_id):
 # ---------- کیبوردها ----------
 def build_grid_keyboard(buttons, columns):
     rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
-    # پر کردن جای خالی با دکمه‌های noop
-    if rows and len(rows[-1]) < columns:
-        rows[-1].extend(InlineKeyboardButton("\u2063", callback_data="noop") for _ in range(columns - len(rows[-1])))
+    # بدون noop – جای خالی پر نمی‌شود
     return rows
 
 def kb_currency():
@@ -1977,8 +2043,8 @@ def help_text(step):
             "💰 *قیمت‌های لحظه‌ای*\n"
             f"{DIVIDER}\n"
             "قیمت‌ها از کوکوین اسپات دریافت می‌شوند.\n"
-            "در صورت عدم دسترسی، از CoinGecko به‌عنوان پشتیبان استفاده می‌شود.\n"
-            "نماد 🅺 = کوکوین، 🅲 = CoinGecko"
+            "در صورت عدم دسترسی، از مکس (Max) به‌عنوان پشتیبان استفاده می‌شود.\n"
+            "نماد 🅺 = کوکوین، 🅼 = مکس، 🅲 = CoinGecko"
         )
     elif step == 2:
         return rtl_lines(
