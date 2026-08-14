@@ -1,12 +1,12 @@
 """
-Telegram Signal Bot V38 - KuCoin Spot & CoinGecko (Optimized)
-- حذف کامل نوبیتکس
-- قیمت از کوکوین اسپات + CoinGecko
-- نرخ تومان از ولکس
-- نمایش تومان در کنار دلار
-- ایموجی نماد صرافی (🅺/🅲)
-- بهبود سیگنال‌دهی و وضعیت لحظه‌ای
-- بهینه‌سازی مصرف حافظه و سرعت
+Telegram Signal Bot V39 - KuCoin Spot & CoinGecko (Optimized)
+- رفع مشکل سیگنال‌دهی با کاهش آستانه‌ها (MIN_SIGNAL_CONFIDENCE=40, MIN_DIRECTION_GAP=3)
+- کاهش adx_min و min_rr در حالت‌های سریع‌تر
+- رفع نمایش قیمت LUNC با fallback تکی
+- بهبود وضعیت لحظه‌ای با نمایش دلیل عدم تولید سیگنال
+- بازطراحی منوی ادمین (حذف تغییر سبک و انتقال داشبورد به ردیف آخر)
+- حذف کامل نوبیتکس و استفاده از ولکس برای نرخ تومان
+- بهینه‌سازی دریافت قیمت (کوکوین اسپات + CoinGecko)
 """
 
 import asyncio
@@ -57,7 +57,7 @@ ALWAYS_ALLOWED_USER_IDS = {
 }
 WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 
-# ---------- لیست ۴۶ ارز (بدون ایموجی) ----------
+# ---------- لیست ۴۶ ارز ----------
 COIN_ICONS = {
     "BTC": "BTC", "ETH": "ETH", "USDT": "USDT", "XRP": "XRP", "DOGE": "DOGE",
     "ADA": "ADA", "SOL": "SOL", "DOT": "DOT", "LINK": "LINK", "LTC": "LTC",
@@ -71,7 +71,7 @@ COIN_ICONS = {
     "APE": "APE", "MINA": "MINA", "LUNC": "LUNC", "COMP": "COMP", "BLUR": "BLUR",
     "AR": "AR", "FLOW": "FLOW",
 }
-COIN_CODES = list(COIN_ICONS.keys())
+COIN_CODES = list(COIN_ICONS.keys())  # ۴۶ ارز
 
 TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d")
 TOP_SIGNALS_COUNT = 5
@@ -107,7 +107,6 @@ DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
-# ---------- صرافی‌ها ----------
 exchange = ccxt.kucoinfutures({
     "enableRateLimit": True,
     "options": {"defaultType": "swap", "adjustForTimeDifference": True},
@@ -117,7 +116,6 @@ exchange_spot_kucoin = ccxt.kucoin({
     "enableRateLimit": True,
 })
 
-# ---------- متغیرهای سراسری ----------
 last_plans = {}
 subscribed_chat_ids = set()
 user_currency = {}
@@ -143,6 +141,7 @@ last_check_time = {}
 last_sent_signals = {}
 price_sources = {}
 
+# ---------- تنظیمات حالت‌ها با آستانه‌های پایین‌تر ----------
 MODE_CONFIGS = {
     "fast": {
         "label": "⚡ سریع",
@@ -152,8 +151,8 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.4, 0.8, 1.2],
         "sl_atr_mult": 0.8,
         "max_leverage": 10,
-        "min_rr": 0.8,
-        "adx_min": 8,
+        "min_rr": 0.6,      # کاهش یافته از 0.8
+        "adx_min": 6,       # کاهش یافته از 8
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -164,8 +163,8 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.6, 1.2, 1.8],
         "sl_atr_mult": 1.0,
         "max_leverage": 7,
-        "min_rr": 1.1,
-        "adx_min": 9,
+        "min_rr": 0.8,      # کاهش یافته از 1.1
+        "adx_min": 8,       # کاهش یافته از 9
         "check_interval": 10 * 60,
     },
     "standard": {
@@ -176,8 +175,8 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.8, 1.5, 2.5],
         "sl_atr_mult": 1.2,
         "max_leverage": 5,
-        "min_rr": 1.2,
-        "adx_min": 15,
+        "min_rr": 1.0,      # کاهش یافته از 1.2
+        "adx_min": 12,      # کاهش یافته از 15
         "check_interval": 30 * 60,
     },
     "conservative": {
@@ -189,13 +188,13 @@ MODE_CONFIGS = {
         "sl_atr_mult": 2.0,
         "max_leverage": 3,
         "min_rr": 1.5,
-        "adx_min": 20,
+        "adx_min": 18,      # کاهش یافته از 20 (کمی)
         "check_interval": 60 * 60,
     },
 }
 
-MIN_SIGNAL_CONFIDENCE = 45   # کاهش یافته برای سیگنال‌های بیشتر
-MIN_DIRECTION_GAP = 5
+MIN_SIGNAL_CONFIDENCE = 40   # کاهش یافته برای سیگنال‌های بیشتر
+MIN_DIRECTION_GAP = 3        # کاهش یافته از 5
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 
 @dataclass
@@ -345,7 +344,7 @@ class MarketDataCache:
                 return df.iloc[:-1].copy().reset_index(drop=True)
         return df.copy().reset_index(drop=True)
 
-    # ---------- دریافت قیمت از کوکوین اسپات + CoinGecko ----------
+    # ---------- دریافت قیمت با fallback تکی برای ارزهای خاص (LUNC) ----------
     async def update_prices(self, force=False, codes=None):
         target_codes = codes if codes is not None else COIN_CODES
         now = time.time()
@@ -370,11 +369,25 @@ class MarketDataCache:
         except Exception as e:
             logger.warning("KuCoin spot fetch_tickers failed: %s", e)
 
-        # 2) پشتیبان: CoinGecko
+        # 2) Fallback تکی برای ارزهایی که در fetch_tickers نیامدند (مثل LUNC)
         missing = [code for code in target_codes if code not in new_prices]
-        if missing:
+        for code in missing:
             try:
-                gecko_prices = await asyncio.to_thread(self._get_coingecko_prices, missing)
+                sym = f"{code}/USDT"
+                ticker = await asyncio.to_thread(exchange_spot_kucoin.fetch_ticker, sym)
+                price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
+                if price and price > 0:
+                    new_prices[code] = float(price)
+                    price_sources[code] = "K"
+                    logger.debug(f"Fetched {code} via individual ticker")
+            except Exception as e:
+                logger.debug(f"Individual ticker failed for {code}: {e}")
+
+        # 3) CoinGecko برای ارزهای باقی‌مانده
+        still_missing = [code for code in target_codes if code not in new_prices]
+        if still_missing:
+            try:
+                gecko_prices = await asyncio.to_thread(self._get_coingecko_prices, still_missing)
                 for code, price in gecko_prices.items():
                     if price and price > 0:
                         new_prices[code] = price
@@ -683,7 +696,7 @@ def add_news_alert(text: str):
         news_history.pop(0)
     save_state()
 
-# ---------- دریافت نرخ تومان از ولکس (جایگزین نوبیتکس) ----------
+# ---------- دریافت نرخ تومان از ولکس ----------
 def fetch_irt_rate_wallex():
     try:
         r = requests.get("https://api.wallex.ir/v1/markets", timeout=8)
@@ -1127,7 +1140,6 @@ def determine_leverage(confidence, mode):
 
 async def generate_trade_plan(code, mode="standard"):
     try:
-        # به‌روزرسانی قیمت همین ارز
         await cache.update_prices(force=True, codes=[code])
         ind = await cache.get_indicators(code, mode)
         if not ind:
@@ -1617,16 +1629,16 @@ def kb_mode_selection_for_action(action, code):
         [InlineKeyboardButton("🔙 بازگشت", callback_data=f"coin_{code}")],
     ])
 
+# ---------- منوی اصلی اصلاح‌شده برای ادمین ----------
 def kb_main(user_id, mode="standard"):
     role = user_role.get(user_id, "user")
     if role == "admin":
         rows = [
             [InlineKeyboardButton("💰 قیمت لحظه‌ای", callback_data="menu_prices"), InlineKeyboardButton("🪙 انتخاب ارز", callback_data="menu_coins")],
-            [InlineKeyboardButton("📈 داشبورد تحلیلی", callback_data="dashboard"), InlineKeyboardButton("⭐ علاقه‌مندی‌ها", callback_data="favorites")],
-            [InlineKeyboardButton("📅 رویدادها", callback_data="events_menu"), InlineKeyboardButton("🔄 تغییر سبک معاملاتی", callback_data="change_mode")],
+            [InlineKeyboardButton("📅 رویدادها", callback_data="events_menu"), InlineKeyboardButton("⭐ علاقه‌مندی‌ها", callback_data="favorites")],
             [InlineKeyboardButton("📊 گزارش مقایسه‌ای", callback_data="admin_compare"), InlineKeyboardButton("🧾 گزارش دوره‌ای", callback_data="periodic_report")],
             [InlineKeyboardButton("🔄 شروع مجدد", callback_data="restart_bot"), InlineKeyboardButton("🛑 توقف ربات", callback_data="stop_bot")],
-            [InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")],
+            [InlineKeyboardButton("📈 داشبورد تحلیلی", callback_data="dashboard"), InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")],
         ]
     else:
         rows = [
@@ -2587,7 +2599,7 @@ async def post_init(app):
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
-    logger.info("Signal Bot V38 (Optimized) started")
+    logger.info("Signal Bot V39 (Fully Optimized) started")
 
 def main():
     if not BOT_TOKEN:
