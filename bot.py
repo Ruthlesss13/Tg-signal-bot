@@ -1,12 +1,14 @@
 """
-Telegram Signal Bot V39 - KuCoin Spot & CoinGecko (Optimized)
-- رفع مشکل سیگنال‌دهی با کاهش آستانه‌ها (MIN_SIGNAL_CONFIDENCE=40, MIN_DIRECTION_GAP=3)
-- کاهش adx_min و min_rr در حالت‌های سریع‌تر
-- رفع نمایش قیمت LUNC با fallback تکی
-- بهبود وضعیت لحظه‌ای با نمایش دلیل عدم تولید سیگنال
-- بازطراحی منوی ادمین (حذف تغییر سبک و انتقال داشبورد به ردیف آخر)
-- حذف کامل نوبیتکس و استفاده از ولکس برای نرخ تومان
-- بهینه‌سازی دریافت قیمت (کوکوین اسپات + CoinGecko)
+Telegram Signal Bot V40 - KuCoin Spot & CoinGecko (Final Optimized)
+- حذف USDT
+- پشتیبانی از TON و MKR با داده‌های اسپات
+- بهبود سیگنال‌دهی با آستانه‌های پایین‌تر (MIN_SIGNAL_CONFIDENCE=30, MIN_DIRECTION_GAP=2)
+- کاهش adx_min و min_rr در تمام حالت‌ها
+- اصلاح منوی ادمین (حذف تغییر سبک، انتقال داشبورد به ردیف آخر)
+- چیدمان جدید منوی ارز: وضعیت لحظه‌ای، پیشنهاد لحظه‌ای، تحلیل جامع
+- تحلیل جامع ارز برای ادمین بدون پرسش حالت
+- قیمت‌ها از کوکوین اسپات با fallback CoinGecko
+- نرخ تومان از ولکس
 """
 
 import asyncio
@@ -57,9 +59,9 @@ ALWAYS_ALLOWED_USER_IDS = {
 }
 WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 
-# ---------- لیست ۴۶ ارز ----------
+# ---------- لیست ارزها (USDT حذف شد) ----------
 COIN_ICONS = {
-    "BTC": "BTC", "ETH": "ETH", "USDT": "USDT", "XRP": "XRP", "DOGE": "DOGE",
+    "BTC": "BTC", "ETH": "ETH", "XRP": "XRP", "DOGE": "DOGE",
     "ADA": "ADA", "SOL": "SOL", "DOT": "DOT", "LINK": "LINK", "LTC": "LTC",
     "BCH": "BCH", "ETC": "ETC", "XLM": "XLM", "ATOM": "ATOM", "FIL": "FIL",
     "UNI": "UNI", "AAVE": "AAVE", "TRX": "TRX", "NEAR": "NEAR", "AVAX": "AVAX",
@@ -107,6 +109,7 @@ DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
+# ---------- صرافی‌ها ----------
 exchange = ccxt.kucoinfutures({
     "enableRateLimit": True,
     "options": {"defaultType": "swap", "adjustForTimeDifference": True},
@@ -116,6 +119,7 @@ exchange_spot_kucoin = ccxt.kucoin({
     "enableRateLimit": True,
 })
 
+# ---------- متغیرهای سراسری ----------
 last_plans = {}
 subscribed_chat_ids = set()
 user_currency = {}
@@ -151,8 +155,8 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.4, 0.8, 1.2],
         "sl_atr_mult": 0.8,
         "max_leverage": 10,
-        "min_rr": 0.6,      # کاهش یافته از 0.8
-        "adx_min": 6,       # کاهش یافته از 8
+        "min_rr": 0.3,      # کاهش یافته
+        "adx_min": 4,       # کاهش یافته
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -163,8 +167,8 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.6, 1.2, 1.8],
         "sl_atr_mult": 1.0,
         "max_leverage": 7,
-        "min_rr": 0.8,      # کاهش یافته از 1.1
-        "adx_min": 8,       # کاهش یافته از 9
+        "min_rr": 0.5,
+        "adx_min": 5,
         "check_interval": 10 * 60,
     },
     "standard": {
@@ -175,8 +179,8 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.8, 1.5, 2.5],
         "sl_atr_mult": 1.2,
         "max_leverage": 5,
-        "min_rr": 1.0,      # کاهش یافته از 1.2
-        "adx_min": 12,      # کاهش یافته از 15
+        "min_rr": 0.7,
+        "adx_min": 8,
         "check_interval": 30 * 60,
     },
     "conservative": {
@@ -187,14 +191,14 @@ MODE_CONFIGS = {
         "tp_multipliers": [1.5, 2.5, 4.0],
         "sl_atr_mult": 2.0,
         "max_leverage": 3,
-        "min_rr": 1.5,
-        "adx_min": 18,      # کاهش یافته از 20 (کمی)
+        "min_rr": 1.0,
+        "adx_min": 12,
         "check_interval": 60 * 60,
     },
 }
 
-MIN_SIGNAL_CONFIDENCE = 40   # کاهش یافته برای سیگنال‌های بیشتر
-MIN_DIRECTION_GAP = 3        # کاهش یافته از 5
+MIN_SIGNAL_CONFIDENCE = 30   # کاهش یافته
+MIN_DIRECTION_GAP = 2        # کاهش یافته
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 
 @dataclass
@@ -274,6 +278,7 @@ class MarketDataCache:
             for code in COIN_CODES:
                 self.market_status[code] = {"status": "NO SWAP", "symbol": None, "error": None}
                 candidates = []
+                # جستجوی فیوچرز
                 for symbol, market in markets.items():
                     if market.get("base") != code:
                         continue
@@ -286,6 +291,7 @@ class MarketDataCache:
                     if market.get("active") is False:
                         continue
                     candidates.append((symbol, market))
+                # جستجوی جایگزین
                 if not candidates:
                     for symbol, market in markets.items():
                         if symbol == f"{code}/USDT:USDT" and market.get("type") == "swap":
@@ -294,6 +300,17 @@ class MarketDataCache:
                             candidates.append((symbol, market))
                         elif symbol == f"{code}USDTM" and market.get("type") == "swap":
                             candidates.append((symbol, market))
+                # اگر فیوچرز نبود، از اسپات استفاده کن (برای TON, MKR و ...)
+                if not candidates:
+                    try:
+                        spot_markets = exchange_spot_kucoin.load_markets()
+                        for symbol, market in spot_markets.items():
+                            if market.get("base") == code and market.get("quote") == "USDT":
+                                if market.get("active") is not False:
+                                    candidates.append((symbol, market))
+                                    break
+                    except Exception as e:
+                        logger.debug(f"Spot market check failed for {code}: {e}")
                 if not candidates:
                     continue
                 candidates.sort(key=lambda x: x[0])
@@ -303,7 +320,7 @@ class MarketDataCache:
                 self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None}
             self.exchange_symbols = selected
             self.valid_codes = list(selected.keys())
-            logger.info("KuCoin swap markets: %s/%s selected", len(self.valid_codes), len(COIN_CODES))
+            logger.info("KuCoin markets: %s/%s selected", len(self.valid_codes), len(COIN_CODES))
         except Exception as e:
             logger.exception("load_markets failed: %s", e)
 
@@ -344,7 +361,7 @@ class MarketDataCache:
                 return df.iloc[:-1].copy().reset_index(drop=True)
         return df.copy().reset_index(drop=True)
 
-    # ---------- دریافت قیمت با fallback تکی برای ارزهای خاص (LUNC) ----------
+    # ---------- دریافت قیمت ----------
     async def update_prices(self, force=False, codes=None):
         target_codes = codes if codes is not None else COIN_CODES
         now = time.time()
@@ -354,7 +371,7 @@ class MarketDataCache:
         new_prices = {}
         price_sources.clear()
 
-        # 1) کوکوین اسپات (با fetch_tickers)
+        # 1) کوکوین اسپات
         try:
             symbols = [f"{code}/USDT" for code in target_codes]
             tickers = await asyncio.to_thread(exchange_spot_kucoin.fetch_tickers, symbols)
@@ -369,7 +386,7 @@ class MarketDataCache:
         except Exception as e:
             logger.warning("KuCoin spot fetch_tickers failed: %s", e)
 
-        # 2) Fallback تکی برای ارزهایی که در fetch_tickers نیامدند (مثل LUNC)
+        # 2) Fallback تکی
         missing = [code for code in target_codes if code not in new_prices]
         for code in missing:
             try:
@@ -379,11 +396,10 @@ class MarketDataCache:
                 if price and price > 0:
                     new_prices[code] = float(price)
                     price_sources[code] = "K"
-                    logger.debug(f"Fetched {code} via individual ticker")
             except Exception as e:
                 logger.debug(f"Individual ticker failed for {code}: {e}")
 
-        # 3) CoinGecko برای ارزهای باقی‌مانده
+        # 3) CoinGecko
         still_missing = [code for code in target_codes if code not in new_prices]
         if still_missing:
             try:
@@ -395,7 +411,6 @@ class MarketDataCache:
             except Exception as e:
                 logger.warning("CoinGecko fallback failed: %s", e)
 
-        # بروزرسانی کش
         for code in target_codes:
             if code in new_prices:
                 self.prices[code] = new_prices[code]
@@ -407,7 +422,7 @@ class MarketDataCache:
         prices = {}
         try:
             ids_map = {
-                "BTC": "bitcoin", "ETH": "ethereum", "USDT": "tether", "XRP": "ripple",
+                "BTC": "bitcoin", "ETH": "ethereum", "XRP": "ripple",
                 "DOGE": "dogecoin", "ADA": "cardano", "SOL": "solana", "DOT": "polkadot",
                 "LINK": "chainlink", "LTC": "litecoin", "BCH": "bitcoin-cash",
                 "ETC": "ethereum-classic", "XLM": "stellar", "ATOM": "cosmos",
@@ -444,15 +459,24 @@ class MarketDataCache:
             logger.warning("CoinGecko fetch failed: %s", e)
         return prices
 
-    # ---------- OHLCV (از کوکوین فیوچرز) ----------
+    # ---------- OHLCV (از فیوچرز یا اسپات) ----------
     async def _fetch_ohlcv_symbol(self, code, timeframe, limit=300):
         symbol = self.symbol_for_code(code)
         if not symbol:
             return None
+        
+        # تشخیص اینکه آیا از فیوچرز استفاده کنیم یا اسپات
+        use_futures = True
+        if self.market_status.get(code, {}).get("status") == "NO SWAP":
+            use_futures = False
+        
         async with self._sem:
             for attempt in range(3):
                 try:
-                    raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
+                    if use_futures:
+                        raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
+                    else:
+                        raw = await asyncio.to_thread(exchange_spot_kucoin.fetch_ohlcv, symbol, timeframe, None, limit)
                     df = self._to_dataframe(raw)
                     if df is None or len(df) < 10:
                         return None
@@ -497,6 +521,9 @@ class MarketDataCache:
     async def get_funding_rate(self, code):
         symbol = self.symbol_for_code(code)
         if not symbol:
+            return 0.0
+        # اگر اسپات باشد، فاندینگ ندارد
+        if self.market_status.get(code, {}).get("status") == "NO SWAP":
             return 0.0
         cached = self._funding_cache.get(code)
         if cached is not None and time.time() - cached["ts"] < FUNDING_TTL_SECONDS:
@@ -696,7 +723,7 @@ def add_news_alert(text: str):
         news_history.pop(0)
     save_state()
 
-# ---------- دریافت نرخ تومان از ولکس ----------
+# ---------- نرخ تومان از ولکس ----------
 def fetch_irt_rate_wallex():
     try:
         r = requests.get("https://api.wallex.ir/v1/markets", timeout=8)
@@ -1527,7 +1554,7 @@ async def generate_weekly_summary_async(code, chat_id):
     )
     return rtl_lines(text)
 
-# ---------- Prices formatting با ایموجی صرافی و نمایش تومان ----------
+# ---------- Prices formatting ----------
 def format_prices_pretty(prices, chat_id):
     lines = ["💰 قیمت لحظه‌ای", f"🕒 {shamsi_now()}", DIVIDER]
     for code in COIN_CODES:
@@ -1629,7 +1656,7 @@ def kb_mode_selection_for_action(action, code):
         [InlineKeyboardButton("🔙 بازگشت", callback_data=f"coin_{code}")],
     ])
 
-# ---------- منوی اصلی اصلاح‌شده برای ادمین ----------
+# ---------- منوی اصلی اصلاح‌شده ----------
 def kb_main(user_id, mode="standard"):
     role = user_role.get(user_id, "user")
     if role == "admin":
@@ -1697,12 +1724,13 @@ def kb_coins(page=0):
     rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
+# ---------- منوی ارز با ترتیب جدید ----------
 def kb_coin_detail(code, is_fav, is_admin_role=False):
     fav_btn = InlineKeyboardButton("🗑️ حذف از علاقه‌مندی‌ها" if is_fav else "⭐ افزودن به علاقه‌مندی‌ها", callback_data=f"toggle_fav_{code}")
     buttons = [
         [InlineKeyboardButton("🧭 وضعیت لحظه‌ای", callback_data=f"askmode_suggest_{code}" if is_admin_role else f"suggest_{code}")],
-        [InlineKeyboardButton("📆 تحلیل جامع ارز", callback_data=f"askmode_weekly_{code}" if is_admin_role else f"weekly_{code}")],
         [InlineKeyboardButton("🚀 پیشنهاد لحظه‌ای", callback_data=f"askmode_instant_{code}" if is_admin_role else f"instant_{code}")],
+        [InlineKeyboardButton("📆 تحلیل جامع ارز", callback_data=f"askmode_weekly_{code}" if is_admin_role else f"weekly_{code}")],
         [fav_btn],
         [InlineKeyboardButton("🔙 لیست ارزها", callback_data="menu_coins"), InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")],
     ]
@@ -2344,17 +2372,29 @@ async def button_handler(update, context):
             set_interactive_screen(chat_id, [query.message.message_id])
         return
 
+    # ----- بخش ادمین: تحلیل جامع بدون پرسش حالت -----
     if data.startswith("askmode_"):
         if not is_admin_role(chat_id):
             await query.answer("⛔️ فقط ادمین.", show_alert=True); return
         parts = data.split("_", 2)
         action = parts[1]
         code = parts[2]
-        await query.edit_message_text(
-            f"🛠️ حالت معاملاتی برای {action} {code} را انتخاب کن:",
-            reply_markup=kb_mode_selection_for_action(action, code),
-        )
-        return
+        # اگر action == "weekly" باشد، مستقیماً برو به تحلیل جامع
+        if action == "weekly":
+            try:
+                summary = await asyncio.wait_for(generate_weekly_summary_async(code, chat_id), timeout=30)
+                await query.edit_message_text(split_long_message(summary)[0], reply_markup=kb_weekly(code), parse_mode="Markdown")
+                set_interactive_screen(chat_id, [query.message.message_id])
+            except Exception as e:
+                logger.exception("Weekly UI error | code=%s: %s", code, e)
+                await query.edit_message_text(f"❌ خطا در تحلیل جامع ارز {code}.", reply_markup=kb_back_main())
+            return
+        else:
+            await query.edit_message_text(
+                f"🛠️ حالت معاملاتی برای {action} {code} را انتخاب کن:",
+                reply_markup=kb_mode_selection_for_action(action, code),
+            )
+            return
 
     if data.startswith("run_"):
         parts = data.split("_", 3)
@@ -2400,6 +2440,7 @@ async def button_handler(update, context):
                 await query.edit_message_text(f"❌ خطا در تحلیل جامع ارز {code}.", reply_markup=kb_back_main())
         return
 
+    # ----- کاربر عادی -----
     if data.startswith("suggest_"):
         if is_admin_role(chat_id):
             return
@@ -2599,7 +2640,7 @@ async def post_init(app):
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
-    logger.info("Signal Bot V39 (Fully Optimized) started")
+    logger.info("Signal Bot V40 (Final Optimized) started")
 
 def main():
     if not BOT_TOKEN:
