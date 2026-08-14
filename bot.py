@@ -1,8 +1,9 @@
 """
-Telegram Signal Bot V45 - Institutional Grade (Stable & Improved UI)
-- رفع خطای 429 با سریالی‌سازی درخواست‌ها، کش طولانی‌تر و Backoff
-- متن خوش‌آمدگویی جدید و جذاب
-- چیدمان منظم و بدون فضای خالی در لیست ارزها
+Telegram Signal Bot V45 - Institutional Grade (Stable & Beautiful UI)
+- سریالی‌سازی کامل درخواست‌های OHLCV با Semaphore در fetch
+- لیست ارزها با ۲ ستون و بدون جای خالی (با noop)
+- متن خوش‌آمدگویی جذاب و حرفه‌ای
+- کش طولانی‌تر و مکث افزایشی برای جلوگیری از خطای ۴۲۹
 """
 
 import asyncio
@@ -37,7 +38,7 @@ load_dotenv()
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,  # تغییر به INFO برای لاگ‌های کمتر
+    level=logging.DEBUG,  # برای عیب‌یابی دقیق
 )
 logger = logging.getLogger("signal_bot")
 
@@ -75,7 +76,7 @@ TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d")
 TOP_SIGNALS_COUNT = 5
 TELEGRAM_MSG_LIMIT = 3500
 IRT_RATE_TTL_SECONDS = 60
-COINS_GRID_COLUMNS = 3
+COINS_GRID_COLUMNS = 2          # ۲ ستون برای نمایش بهتر
 AUTO_KEEP_LAST_N = 3
 TRAILING_CHECK_SECONDS = 5 * 60
 FEAR_GREED_TTL = 3600
@@ -91,7 +92,7 @@ WEIGHT_VOLUME = 15
 WEIGHT_VOLATILITY = 15
 WEIGHT_HTF = 20
 
-OHLCV_TTL_SECONDS = 60           # افزایش کش برای کاهش درخواست
+OHLCV_TTL_SECONDS = 120          # افزایش کش
 FULL_REFRESH_TTL_SECONDS = 300
 FUNDING_TTL_SECONDS = 30
 MAX_OHLCV_CONCURRENCY = 1        # سریال‌سازی درخواست‌ها
@@ -282,7 +283,6 @@ class MarketDataCache:
             for code in COIN_CODES:
                 self.market_status[code] = {"status": "NO SWAP", "symbol": None, "error": None, "source": None}
                 candidates = []
-                # جستجوی فیوچرز با فرمت‌های مختلف
                 for symbol, market in markets.items():
                     if market.get("base") != code:
                         continue
@@ -295,7 +295,6 @@ class MarketDataCache:
                     if market.get("active") is False:
                         continue
                     candidates.append((symbol, market))
-                # اگر پیدا نشد، فرمت‌های جایگزین
                 if not candidates:
                     for symbol, market in markets.items():
                         if symbol == f"{code}/USDT:USDT" and market.get("type") == "swap":
@@ -306,7 +305,6 @@ class MarketDataCache:
                             candidates.append((symbol, market))
                         elif symbol == f"{code}/USDT" and market.get("type") == "swap":
                             candidates.append((symbol, market))
-                # اگر فیوچرز نبود، از اسپات استفاده کن
                 if not candidates:
                     try:
                         spot_markets = exchange_spot_kucoin.load_markets()
@@ -357,7 +355,6 @@ class MarketDataCache:
         df = df.dropna(subset=required).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df if not df.empty else None
 
-    # حذف فیلتر کندل در حال شکل‌گیری (کامنت شد)
     @staticmethod
     def _drop_forming_candle(df):
         return df.copy().reset_index(drop=True)
@@ -394,7 +391,7 @@ class MarketDataCache:
                 if price and price > 0:
                     new_prices[code] = float(price)
                     price_sources[code] = "K"
-                await asyncio.sleep(0.3)  # کاهش فشار
+                await asyncio.sleep(0.3)
             except Exception as e:
                 logger.debug(f"Individual ticker failed for {code}: {e}")
 
@@ -460,23 +457,24 @@ class MarketDataCache:
             return None
         source = self.market_status.get(code, {}).get("source", "futures")
         use_futures = source == "futures"
-        # exponential backoff
-        for attempt in range(5):
-            try:
-                if use_futures:
-                    raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
-                else:
-                    raw = await asyncio.to_thread(exchange_spot_kucoin.fetch_ohlcv, symbol, timeframe, None, limit)
-                df = self._to_dataframe(raw)
-                if df is None or len(df) < 10:
-                    logger.debug(f"OHLCV {code} {timeframe}: insufficient rows {len(df) if df is not None else 0}")
-                    await asyncio.sleep(2 ** attempt)  # backoff
-                    continue
-                return df
-            except Exception as e:
-                wait = 2 ** attempt  # 1, 2, 4, 8, 16 ثانیه
-                logger.warning("OHLCV failed | code=%s | tf=%s | attempt=%s | wait=%ss | error=%s", code, timeframe, attempt, wait, e)
-                await asyncio.sleep(wait)
+        # سریال‌سازی درخواست‌ها با Semaphore
+        async with self._sem:
+            for attempt in range(5):
+                try:
+                    if use_futures:
+                        raw = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe, None, limit)
+                    else:
+                        raw = await asyncio.to_thread(exchange_spot_kucoin.fetch_ohlcv, symbol, timeframe, None, limit)
+                    df = self._to_dataframe(raw)
+                    if df is None or len(df) < 10:
+                        logger.debug(f"OHLCV {code} {timeframe}: insufficient rows {len(df) if df is not None else 0}")
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    return df
+                except Exception as e:
+                    wait = 2 ** attempt
+                    logger.warning("OHLCV failed | code=%s | tf=%s | attempt=%s | wait=%ss | error=%s", code, timeframe, attempt, wait, e)
+                    await asyncio.sleep(wait)
         return None
 
     async def ensure_symbol_data(self, code, timeframes=None, force=False):
@@ -504,10 +502,9 @@ class MarketDataCache:
             if not self.valid_codes:
                 return
             target_codes = list(codes if codes is not None else self.valid_codes)
-            # استفاده از Semaphore برای سریال‌سازی
+            # حلقه سریالی (Semaphore داخل fetch است)
             for code in target_codes:
-                async with self._sem:
-                    await self.ensure_symbol_data(code, TIMEFRAMES, force=force)
+                await self.ensure_symbol_data(code, TIMEFRAMES, force=force)
             self.last_full_ohlcv_update = time.time()
             logger.info("OHLCV refresh complete: %s", {tf: len(self.ohlcv.get(tf, {})) for tf in TIMEFRAMES})
 
@@ -1807,6 +1804,7 @@ async def track_auto_message(app, chat_id, message_id):
 # ---------- کیبوردها ----------
 def build_grid_keyboard(buttons, columns):
     rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
+    # پر کردن جای خالی با دکمه‌های noop
     if rows and len(rows[-1]) < columns:
         rows[-1].extend(InlineKeyboardButton("\u2063", callback_data="noop") for _ in range(columns - len(rows[-1])))
     return rows
