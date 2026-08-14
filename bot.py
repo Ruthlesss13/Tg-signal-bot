@@ -105,9 +105,9 @@ WEIGHT_COMP_TREND = 10
 OHLCV_TTL_SECONDS = 180
 PRICE_TTL_SECONDS = 30
 FULL_REFRESH_TTL_SECONDS = 120
-MAX_OHLCV_CONCURRENCY = 1
-MAX_SIGNAL_CONCURRENCY = 2
-MAX_PRICE_CONCURRENCY = 2
+MAX_OHLCV_CONCURRENCY = 8
+MAX_SIGNAL_CONCURRENCY = 4
+MAX_PRICE_CONCURRENCY = 8
 RLM = "\u200f"
 
 DATA_DIR = os.getenv("DATA_DIR", "/data")
@@ -302,6 +302,7 @@ class MarketDataCache:
         self._update_lock = asyncio.Lock()
         self._symbol_locks = {}
         self._breadth_cache = {"value": None, "ts": 0.0}
+        self._breadth_sample_count = 0
         self._sentiment_cache = {}
         self._macro_cache = {"data": {}, "ts": 0.0}
         self._load_markets()
@@ -314,6 +315,7 @@ class MarketDataCache:
     def _load_markets(self):
         try:
             gateio_markets = exchange_gateio.load_markets()
+            kucoin_markets = None  # بارگذاری تنبل - فقط یک‌بار
             selected = {}
             sources = {}
             for code in COIN_CODES:
@@ -327,18 +329,20 @@ class MarketDataCache:
                         self.market_status[code] = {"status": "SWAP OK", "symbol": gateio_symbol, "error": None, "source": "gateio"}
                         found = True
                 if not found:
-                    try:
-                        kucoin_markets = exchange_spot_kucoin.load_markets()
-                        kucoin_symbol = f"{code}/USDT"
-                        if kucoin_symbol in kucoin_markets:
-                            market = kucoin_markets[kucoin_symbol]
-                            if market.get("active") is not False and market.get("type") == "spot":
-                                selected[code] = kucoin_symbol
-                                sources[code] = "kucoin"
-                                self.market_status[code] = {"status": "SWAP OK", "symbol": kucoin_symbol, "error": None, "source": "kucoin"}
-                                found = True
-                    except Exception as e:
-                        logger.debug(f"KuCoin load markets failed: {e}")
+                    if kucoin_markets is None:
+                        try:
+                            kucoin_markets = exchange_spot_kucoin.load_markets()
+                        except Exception as e:
+                            logger.warning("KuCoin load markets failed: %s", e)
+                            kucoin_markets = {}
+                    kucoin_symbol = f"{code}/USDT"
+                    if kucoin_symbol in kucoin_markets:
+                        market = kucoin_markets[kucoin_symbol]
+                        if market.get("active") is not False and market.get("type") == "spot":
+                            selected[code] = kucoin_symbol
+                            sources[code] = "kucoin"
+                            self.market_status[code] = {"status": "SWAP OK", "symbol": kucoin_symbol, "error": None, "source": "kucoin"}
+                            found = True
                 if not found:
                     logger.warning(f"ارز {code} در Gate.io و KuCoin یافت نشد.")
                     selected[code] = code
@@ -513,6 +517,7 @@ class MarketDataCache:
                         count_above += 1
                     total += 1
         breadth = count_above / total * 100 if total > 0 else 50
+        self._breadth_sample_count = total
         self._breadth_cache = {"value": breadth, "ts": now}
         return breadth
 
@@ -649,8 +654,9 @@ class MarketDataCache:
             if not self.valid_codes:
                 return
             target_codes = list(codes if codes is not None else self.valid_codes)
-            for code in target_codes:
-                await self.ensure_symbol_data(code, TIMEFRAMES, force=force)
+            # اجرای هم‌زمان درخواست‌ها با محدودیت semaphore
+            tasks = [self.ensure_symbol_data(code, TIMEFRAMES, force=force) for code in target_codes]
+            await asyncio.gather(*tasks)
             self.last_full_ohlcv_update = time.time()
             logger.info("OHLCV refresh complete: %s", {tf: len(self.ohlcv.get(tf, {})) for tf in TIMEFRAMES})
 
@@ -1342,7 +1348,7 @@ async def get_upcoming_events(force=False):
     return events
 
 # ---------- توابع تحلیل لایه‌ها ----------
-async def analyze_layers(code, direction, ind, mode, cache_obj):
+async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None):
     config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
     df = cache_obj.ohlcv.get(config["main_tf"], {}).get(code)
     results = {}
@@ -1353,14 +1359,20 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
         prev_high = float(high.max())
         prev_low = float(low.min())
         if direction == "LONG":
-            structure_ok = price > prev_high * 1.001
+            structure_ok = price > prev_low * 0.999
             last = df.iloc[-1]
             if not structure_ok and last["close"] > last["open"] and (last["close"] - last["low"]) > 2 * (last["high"] - last["close"]):
                 structure_ok = True
+            # اجازه در بازار رنج: قیمت در نیمه پایینی محدوده ۲۰ کندلی
+            if not structure_ok and price <= (prev_high + prev_low) / 2:
+                structure_ok = True
         else:
-            structure_ok = price < prev_low * 0.999
+            structure_ok = price < prev_high * 1.001
             last = df.iloc[-1]
             if not structure_ok and last["close"] < last["open"] and (last["high"] - last["close"]) > 2 * (last["close"] - last["low"]):
+                structure_ok = True
+            # اجازه در بازار رنج: قیمت در نیمه بالایی محدوده
+            if not structure_ok and price >= (prev_high + prev_low) / 2:
                 structure_ok = True
         results["structure"] = structure_ok
     else:
@@ -1385,7 +1397,7 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
                 mtf_count += 1
             elif direction == "SHORT" and price < ema200:
                 mtf_count += 1
-    results["mtf"] = mtf_count >= 2
+    results["mtf"] = mtf_count >= 1
     momentum_score = 0
     if direction == "LONG":
         if ind["macd_hist"] > 0: momentum_score += 1
@@ -1398,14 +1410,15 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
         if ind["roc"] < 0: momentum_score += 1
         if ind["bearish_div"] or ind["macd_bearish_div"]: momentum_score += 1
     results["momentum"] = momentum_score >= 2
-    results["volume"] = ind["volume_ratio"] >= 1.5 or ind["volume_spike"]
+    results["volume"] = ind["volume_ratio"] >= 1.0 or ind["volume_spike"]
     sentiment_score = await cache_obj._calculate_sentiment_score(code, ind)
     if direction == "LONG":
-        results["sentiment"] = sentiment_score > 0.2
+        results["sentiment"] = sentiment_score > 0
     else:
-        results["sentiment"] = sentiment_score < -0.2
-    results["trend"] = ind["adx"] >= config["adx_min"] and (0.5 <= ind["atr_pct"] <= 8)
-    order_flow = await cache_obj._get_order_flow(code)
+        results["sentiment"] = sentiment_score < 0
+    results["trend"] = ind["price_above_ema200"] if direction == "LONG" else not ind["price_above_ema200"]
+    if order_flow is None:
+        order_flow = await cache_obj._get_order_flow(code)
     if order_flow > 0:
         if direction == "LONG":
             results["order_flow"] = order_flow > 1.1
@@ -1414,20 +1427,20 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
     else:
         results["order_flow"] = False
     breadth = cache_obj._get_market_breadth()
+    sample_count = getattr(cache_obj, "_breadth_sample_count", 0)
     if direction == "LONG":
-        results["breadth"] = breadth > 55
+        results["breadth"] = (breadth > 55) if sample_count >= 5 else True
     else:
-        results["breadth"] = breadth < 45
+        results["breadth"] = (breadth < 45) if sample_count >= 5 else True
     smart_vol = cache_obj._get_smart_volatility(ind)
     if direction == "LONG":
-        results["smart_vol"] = smart_vol < -0.2
+        results["smart_vol"] = smart_vol < 0
     else:
-        results["smart_vol"] = smart_vol > 0.2
-    comp_trend = cache_obj._get_complementary_trend(ind)
+        results["smart_vol"] = smart_vol > 0
     if direction == "LONG":
-        results["comp_trend"] = comp_trend > 0.2
+        results["comp_trend"] = ind["plus_di"] > ind["minus_di"]
     else:
-        results["comp_trend"] = comp_trend < -0.2
+        results["comp_trend"] = ind["minus_di"] > ind["plus_di"]
     return results
 
 # ---------- تولید سیگنال جدید ----------
@@ -1439,8 +1452,10 @@ async def generate_trade_plan_v2(code, mode="standard"):
             logger.info(f"No indicators for {code}")
             return None
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
-        long_layers = await analyze_layers(code, "LONG", ind, mode, cache)
-        short_layers = await analyze_layers(code, "SHORT", ind, mode, cache)
+        # دریافت یک‌باره order_flow برای هر دو جهت
+        order_flow = await cache._get_order_flow(code)
+        long_layers = await analyze_layers(code, "LONG", ind, mode, cache, order_flow)
+        short_layers = await analyze_layers(code, "SHORT", ind, mode, cache, order_flow)
         long_score = 0
         short_score = 0
         long_confirmed = 0
@@ -1455,9 +1470,6 @@ async def generate_trade_plan_v2(code, mode="standard"):
         direction = None
         confidence = 0
         layers = {}
-        if ind["adx"] < config["adx_min"]:
-            logger.info(f"Market regime: ADX {ind['adx']:.1f} < {config['adx_min']} for {code}")
-            return None
         if long_confirmed >= config["min_confirmations"] and long_score >= short_score + MIN_DIRECTION_GAP:
             direction = "LONG"
             confidence = long_score
@@ -1796,8 +1808,9 @@ async def generate_status_text_async(code, chat_id, mode="standard"):
     ind = await cache.get_indicators(code, mode)
     if not ind:
         return rtl_lines(f"{code}\n\n⚠️ داده کافی برای تحلیل این ارز دریافت نشد.")
-    long_layers = await analyze_layers(code, "LONG", ind, mode, cache)
-    short_layers = await analyze_layers(code, "SHORT", ind, mode, cache)
+    order_flow = await cache._get_order_flow(code)
+    long_layers = await analyze_layers(code, "LONG", ind, mode, cache, order_flow)
+    short_layers = await analyze_layers(code, "SHORT", ind, mode, cache, order_flow)
     plan = await generate_trade_plan_v2(code, mode)
     return format_status_dashboard(code, ind, plan, chat_id, mode, long_layers, short_layers)
 
