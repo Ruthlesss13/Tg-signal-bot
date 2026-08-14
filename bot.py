@@ -1,9 +1,11 @@
 """
-Telegram Signal Bot V51 - Institutional Grade (10 Layers, Spot Only)
-- کاهش سخت‌گیری سیگنال‌ها برای تولید بیشتر
-- به‌روزرسانی OHLCV هر ۶۰ ثانیه
-- نمایش اطلاعات کامل در وضعیت لحظه‌ای (تغییرات ۲۴h، سطوح کلیدی، خلاصه لایه‌ها)
-- رفع پیام "در حال تحلیل..." با نمایش دلایل عدم سیگنال
+Telegram Signal Bot V53 - Institutional Grade (10 Layers, Gate.io Primary + KuCoin & CoinGecko Fallback)
+- Gate.io به عنوان منبع اصلی OHLCV و قیمت
+- کوکوین اسپات و کوین‌گکو به عنوان پشتیبان (به ترتیب)
+- اضافه شدن ارز TON به لیست
+- کش ۱۸۰ ثانیه و بهینه‌سازی سرعت
+- نمایش اطلاعات کامل در وضعیت لحظه‌ای
+- بروزرسانی راهنما با توضیحات منابع داده
 """
 
 import asyncio
@@ -54,7 +56,7 @@ ALWAYS_ALLOWED_USER_IDS = {
 }
 WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 
-# ---------- لیست ارزها ----------
+# ---------- لیست ارزها (TON اضافه شد) ----------
 COIN_ICONS = {
     "AAVE": "AAVE", "ADA": "ADA", "ALGO": "ALGO", "APE": "APE",
     "APT": "APT", "AR": "AR", "ARB": "ARB", "ATOM": "ATOM",
@@ -66,9 +68,9 @@ COIN_ICONS = {
     "LINK": "LINK", "LTC": "LTC", "LUNC": "LUNC", "MANA": "MANA",
     "MINA": "MINA", "NEAR": "NEAR", "NEO": "NEO", "OP": "OP",
     "POL": "POL", "RUNE": "RUNE", "SAND": "SAND", "SHIB": "SHIB",
-    "SOL": "SOL", "STX": "STX", "SUI": "SUI", "TRX": "TRX",
-    "UNI": "UNI", "VET": "VET", "XLM": "XLM", "XMR": "XMR",
-    "XRP": "XRP",
+    "SOL": "SOL", "STX": "STX", "SUI": "SUI", "TON": "TON",  # <-- اضافه شد
+    "TRX": "TRX", "UNI": "UNI", "VET": "VET", "XLM": "XLM",
+    "XMR": "XMR", "XRP": "XRP",
 }
 COIN_CODES = sorted(list(COIN_ICONS.keys()))
 
@@ -97,7 +99,7 @@ WEIGHT_BREADTH = 5
 WEIGHT_SMART_VOL = 5
 WEIGHT_COMP_TREND = 10
 
-OHLCV_TTL_SECONDS = 60           # ← کاهش به ۶۰ ثانیه برای به‌روزرسانی سریع‌تر
+OHLCV_TTL_SECONDS = 180           # ۱۸۰ ثانیه کش
 PRICE_TTL_SECONDS = 30
 FULL_REFRESH_TTL_SECONDS = 120
 MAX_OHLCV_CONCURRENCY = 1
@@ -112,8 +114,20 @@ DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
-# ---------- صرافی اسپات ----------
+# ---------- صرافی‌ها ----------
+# اصلی: Gate.io
+exchange_gateio = ccxt.gateio({
+    "enableRateLimit": True,
+    "options": {"defaultType": "spot"},
+})
+
+# پشتیبان ۱: کوکوین اسپات
 exchange_spot_kucoin = ccxt.kucoin({
+    "enableRateLimit": True,
+})
+
+# پشتیبان ۲: کوین‌گکو (فقط قیمت و OHLCV محدود)
+exchange_coingecko = ccxt.coingecko({
     "enableRateLimit": True,
 })
 
@@ -144,7 +158,6 @@ last_check_time = {}
 last_sent_signals = {}
 price_sources = {}
 
-# ========== تنظیمات سخت‌گیری کاهش‌یافته ==========
 MIN_SIGNAL_CONFIDENCE = 35
 MIN_DIRECTION_GAP = 5
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
@@ -185,8 +198,8 @@ MODE_CONFIGS = {
         "sl_atr_mult": 1.2,
         "max_leverage": 5,
         "min_rr": 1.2,
-        "adx_min": 14,           # کاهش از ۱۶ به ۱۴
-        "min_confirmations": 4,   # کاهش از ۶ به ۴
+        "adx_min": 14,
+        "min_confirmations": 4,
         "check_interval": 30 * 60,
     },
     "conservative": {
@@ -198,8 +211,8 @@ MODE_CONFIGS = {
         "sl_atr_mult": 2.0,
         "max_leverage": 3,
         "min_rr": 1.5,
-        "adx_min": 18,           # کاهش از ۲۰ به ۱۸
-        "min_confirmations": 5,   # کاهش از ۷ به ۵
+        "adx_min": 18,
+        "min_confirmations": 5,
         "check_interval": 60 * 60,
     },
 }
@@ -282,8 +295,8 @@ class MarketDataCache:
         self.ohlcv = {tf: {} for tf in TIMEFRAMES}
         self.ohlcv_updated_at = {tf: {} for tf in TIMEFRAMES}
         self.valid_codes = []
-        self.exchange_symbols = {}
-        self.market_meta = {}
+        self.exchange_symbols = {}  # کد ارز → بهترین symbol
+        self.symbol_sources = {}    # کد ارز → منبع (gateio, kucoin, coingecko)
         self.market_status = {
             code: {"status": "NO SWAP", "symbol": None, "error": None, "source": None}
             for code in COIN_CODES
@@ -304,32 +317,65 @@ class MarketDataCache:
         return self._symbol_locks[code]
 
     def _load_markets(self):
+        """بارگذاری بازارها از Gate.io، کوکوین اسپات و کوین‌گکو"""
         try:
-            markets = exchange_spot_kucoin.load_markets(reload=True)
+            # اول Gate.io
+            gateio_markets = exchange_gateio.load_markets()
             selected = {}
+            sources = {}
             for code in COIN_CODES:
-                self.market_status[code] = {"status": "NO SWAP", "symbol": None, "error": None, "source": None}
-                for symbol, market in markets.items():
-                    if market.get("base") != code:
-                        continue
-                    if market.get("quote") != "USDT":
-                        continue
-                    if market.get("active") is False:
-                        continue
-                    if market.get("type") != "spot":
-                        continue
-                    selected[code] = symbol
-                    self.market_meta[code] = market
-                    self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None, "source": "spot"}
-                    break
+                found = False
+                # جستجو در Gate.io
+                for symbol, market in gateio_markets.items():
+                    if market.get("base") == code and market.get("quote") == "USDT":
+                        if market.get("active") is not False and market.get("type") == "spot":
+                            selected[code] = symbol
+                            sources[code] = "gateio"
+                            self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None, "source": "gateio"}
+                            found = True
+                            break
+                if not found:
+                    # جستجو در کوکوین اسپات
+                    try:
+                        kucoin_markets = exchange_spot_kucoin.load_markets()
+                        for symbol, market in kucoin_markets.items():
+                            if market.get("base") == code and market.get("quote") == "USDT":
+                                if market.get("active") is not False and market.get("type") == "spot":
+                                    selected[code] = symbol
+                                    sources[code] = "kucoin"
+                                    self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None, "source": "kucoin"}
+                                    found = True
+                                    break
+                    except Exception as e:
+                        logger.debug(f"KuCoin load markets failed: {e}")
+                if not found:
+                    # جستجو در کوین‌گکو (فقط قیمت و OHLCV محدود)
+                    try:
+                        coingecko_markets = exchange_coingecko.load_markets()
+                        for symbol, market in coingecko_markets.items():
+                            if market.get("base") == code and market.get("quote") == "USDT":
+                                if market.get("active") is not False and market.get("type") == "spot":
+                                    selected[code] = symbol
+                                    sources[code] = "coingecko"
+                                    self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None, "source": "coingecko"}
+                                    found = True
+                                    break
+                    except Exception as e:
+                        logger.debug(f"CoinGecko load markets failed: {e}")
+                if not found:
+                    logger.warning(f"ارز {code} در هیچ صرافی‌ای یافت نشد.")
             self.exchange_symbols = selected
+            self.symbol_sources = sources
             self.valid_codes = list(selected.keys())
-            logger.info("KuCoin spot markets: %s/%s selected", len(self.valid_codes), len(COIN_CODES))
+            logger.info("Markets loaded: %s/%s from Gate.io + KuCoin + CoinGecko", len(self.valid_codes), len(COIN_CODES))
         except Exception as e:
             logger.exception("load_markets failed: %s", e)
 
     def symbol_for_code(self, code) -> Optional[str]:
         return self.exchange_symbols.get(code)
+
+    def source_for_code(self, code) -> Optional[str]:
+        return self.symbol_sources.get(code, "unknown")
 
     @staticmethod
     def _to_dataframe(raw):
@@ -353,47 +399,7 @@ class MarketDataCache:
         df = df.dropna(subset=required).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df if not df.empty else None
 
-    # ---------- قیمت از مکس ----------
-    def _get_max_prices(self, codes):
-        prices = {}
-        try:
-            max_symbol_map = {
-                "BTC": "BTCUSDT", "ETH": "ETHUSDT", "XRP": "XRPUSDT", "LTC": "LTCUSDT",
-                "BCH": "BCHUSDT", "ADA": "ADAUSDT", "DOT": "DOTUSDT", "LINK": "LINKUSDT",
-                "DOGE": "DOGEUSDT", "SOL": "SOLUSDT", "AVAX": "AVAXUSDT",
-                "UNI": "UNIUSDT", "ATOM": "ATOMUSDT", "ETC": "ETCUSDT", "XLM": "XLMUSDT",
-                "ALGO": "ALGOUSDT", "VET": "VETUSDT", "FIL": "FILUSDT", "TRX": "TRXUSDT",
-                "AAVE": "AAVEUSDT", "COMP": "COMPUSDT", "NEO": "NEOUSDT",
-                "KSM": "KSMUSDT", "KAVA": "KAVAUSDT", "ICP": "ICPUSDT",
-                "AR": "ARUSDT", "NEAR": "NEARUSDT", "FLOW": "FLOWUSDT", "MINA": "MINAUSDT",
-                "APE": "APEUSDT", "APT": "APTUSDT", "ARB": "ARBUSDT", "OP": "OPUSDT",
-                "SUI": "SUIUSDT", "BLUR": "BLURUSDT", "LUNC": "LUNCUSDT", "STX": "STXUSDT",
-                "EGLD": "EGLDUSDT", "INJ": "INJUSDT", "FET": "FETUSDT", "GALA": "GALAUSDT",
-                "POL": "POLUSDT", "RUNE": "RUNEUSDT", "SHIB": "SHIBUSDT", "KAS": "KASUSDT",
-                "XMR": "XMRUSDT", "MANA": "MANAUSDT", "SAND": "SANDUSDT",
-            }
-            symbols = [max_symbol_map[code] for code in codes if code in max_symbol_map]
-            if not symbols:
-                return prices
-            url = "https://api.max-api.com/api/v2/markets/tickers"
-            r = requests.get(url, timeout=8)
-            r.raise_for_status()
-            data = r.json()
-            if "data" in data and isinstance(data["data"], list):
-                for item in data["data"]:
-                    symbol = item.get("symbol")
-                    if symbol in symbols:
-                        price = item.get("last")
-                        if price and float(price) > 0:
-                            for code, sym in max_symbol_map.items():
-                                if sym == symbol and code in codes:
-                                    prices[code] = float(price)
-                                    break
-            logger.info(f"Max prices fetched: {len(prices)}/{len(codes)}")
-        except Exception as e:
-            logger.warning("Max price fetch failed: %s", e)
-        return prices
-
+    # ---------- قیمت از کوین‌گکو (فال‌بک) ----------
     def _get_coingecko_prices(self, codes):
         prices = {}
         try:
@@ -410,6 +416,7 @@ class MarketDataCache:
                 "MINA": "mina-protocol", "NEAR": "near", "NEO": "neo", "OP": "optimism",
                 "POL": "polygon-ecosystem-token", "RUNE": "thorchain", "SAND": "the-sandbox",
                 "SHIB": "shiba-inu", "SOL": "solana", "STX": "blockstack", "SUI": "sui",
+                "TON": "the-open-network",  # <-- اضافه شد
                 "TRX": "tron", "UNI": "uniswap", "VET": "vechain", "XLM": "stellar",
                 "XMR": "monero", "XRP": "ripple",
             }
@@ -432,6 +439,7 @@ class MarketDataCache:
             logger.warning("CoinGecko fetch failed: %s", e)
         return prices
 
+    # ---------- دریافت قیمت از Gate.io (اصلی) ----------
     async def update_prices(self, force=False, codes=None):
         target_codes = codes if codes is not None else COIN_CODES
         now = time.time()
@@ -441,9 +449,10 @@ class MarketDataCache:
         new_prices = {}
         price_sources.clear()
 
+        # ۱. Gate.io (اصلی)
         try:
             symbols = [f"{code}/USDT" for code in target_codes]
-            tickers = await asyncio.to_thread(exchange_spot_kucoin.fetch_tickers, symbols)
+            tickers = await asyncio.to_thread(exchange_gateio.fetch_tickers, symbols)
             for code in target_codes:
                 sym = f"{code}/USDT"
                 if sym in tickers:
@@ -451,38 +460,32 @@ class MarketDataCache:
                     price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
                     if price and price > 0:
                         new_prices[code] = float(price)
-                        price_sources[code] = "K"
+                        price_sources[code] = "G"  # Gate.io
         except Exception as e:
-            logger.warning("KuCoin spot fetch_tickers failed: %s", e)
+            logger.warning("Gate.io fetch_tickers failed: %s", e)
 
+        # ۲. کوکوین اسپات (پشتیبان)
         missing = [code for code in target_codes if code not in new_prices]
-        for code in missing:
+        if missing:
             try:
-                sym = f"{code}/USDT"
-                ticker = await asyncio.to_thread(exchange_spot_kucoin.fetch_ticker, sym)
-                price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
-                if price and price > 0:
-                    new_prices[code] = float(price)
-                    price_sources[code] = "K"
-                await asyncio.sleep(0.3)
+                symbols = [f"{code}/USDT" for code in missing]
+                tickers = await asyncio.to_thread(exchange_spot_kucoin.fetch_tickers, symbols)
+                for code in missing:
+                    sym = f"{code}/USDT"
+                    if sym in tickers:
+                        ticker = tickers[sym]
+                        price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
+                        if price and price > 0:
+                            new_prices[code] = float(price)
+                            price_sources[code] = "K"
             except Exception as e:
-                logger.debug(f"Individual ticker failed for {code}: {e}")
+                logger.warning("KuCoin fallback fetch_tickers failed: %s", e)
 
+        # ۳. کوین‌گکو (آخرین پشتیبان)
         still_missing = [code for code in target_codes if code not in new_prices]
         if still_missing:
             try:
-                max_prices = await asyncio.to_thread(self._get_max_prices, still_missing)
-                for code, price in max_prices.items():
-                    if price and price > 0:
-                        new_prices[code] = price
-                        price_sources[code] = "M"
-            except Exception as e:
-                logger.warning("Max fallback failed: %s", e)
-
-        final_missing = [code for code in target_codes if code not in new_prices]
-        if final_missing:
-            try:
-                gecko_prices = await asyncio.to_thread(self._get_coingecko_prices, final_missing)
+                gecko_prices = await asyncio.to_thread(self._get_coingecko_prices, still_missing)
                 for code, price in gecko_prices.items():
                     if price and price > 0:
                         new_prices[code] = price
@@ -522,7 +525,13 @@ class MarketDataCache:
             symbol = self.symbol_for_code(code)
             if not symbol:
                 return 0.0
-            order_book = await asyncio.to_thread(exchange_spot_kucoin.fetch_order_book, symbol, limit=5)
+            source = self.source_for_code(code)
+            if source == "gateio":
+                order_book = await asyncio.to_thread(exchange_gateio.fetch_order_book, symbol, limit=5)
+            elif source == "kucoin":
+                order_book = await asyncio.to_thread(exchange_spot_kucoin.fetch_order_book, symbol, limit=5)
+            else:
+                return 0.0
             bids_volume = sum(bid[1] for bid in order_book["bids"][:5])
             asks_volume = sum(ask[1] for ask in order_book["asks"][:5])
             if asks_volume == 0:
@@ -586,26 +595,44 @@ class MarketDataCache:
         else:
             return 0.0
 
-    # ---------- دریافت OHLCV از اسپات ----------
+    # ---------- دریافت OHLCV با اولویت Gate.io -> KuCoin -> CoinGecko ----------
     async def _fetch_ohlcv_symbol(self, code, timeframe, limit=500):
         symbol = self.symbol_for_code(code)
         if not symbol:
             return None
+        source = self.source_for_code(code)
+        exchanges = []
+        if source == "gateio":
+            exchanges = [(exchange_gateio, "gateio")]
+        elif source == "kucoin":
+            exchanges = [(exchange_spot_kucoin, "kucoin")]
+        else:
+            exchanges = [(exchange_gateio, "gateio"), (exchange_spot_kucoin, "kucoin"), (exchange_coingecko, "coingecko")]
+
         async with self._sem:
-            for attempt in range(5):
-                try:
-                    raw = await asyncio.to_thread(exchange_spot_kucoin.fetch_ohlcv, symbol, timeframe, None, limit)
-                    df = self._to_dataframe(raw)
-                    if df is None or len(df) < 10:
-                        logger.debug(f"OHLCV {code} {timeframe}: insufficient rows {len(df) if df is not None else 0}")
-                        await asyncio.sleep(2 ** attempt)
-                        continue
-                    return df
-                except Exception as e:
-                    wait = 2 ** attempt
-                    logger.warning("OHLCV failed | code=%s | tf=%s | attempt=%s | wait=%ss | error=%s", code, timeframe, attempt, wait, e)
-                    await asyncio.sleep(wait)
-        return None
+            for ex, name in exchanges:
+                for attempt in range(3):
+                    try:
+                        if name == "coingecko":
+                            # کوین‌گکو فقط تایم‌فریم‌های خاصی دارد
+                            tf_map = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
+                            tf = tf_map.get(timeframe, "1h")
+                            raw = await asyncio.to_thread(ex.fetch_ohlcv, symbol, tf, None, limit)
+                        else:
+                            raw = await asyncio.to_thread(ex.fetch_ohlcv, symbol, timeframe, None, limit)
+                        df = self._to_dataframe(raw)
+                        if df is None or len(df) < 10:
+                            logger.debug(f"OHLCV {code} {timeframe} from {name}: insufficient rows {len(df) if df is not None else 0}")
+                            await asyncio.sleep(2 ** attempt)
+                            continue
+                        logger.debug(f"OHLCV {code} {timeframe} fetched from {name}")
+                        return df
+                    except Exception as e:
+                        wait = 2 ** attempt
+                        logger.warning(f"OHLCV {code} {timeframe} from {name} attempt {attempt} failed: {e}, wait {wait}s")
+                        await asyncio.sleep(wait)
+            logger.warning(f"OHLCV {code} {timeframe} failed from all sources")
+            return None
 
     async def ensure_symbol_data(self, code, timeframes=None, force=False):
         if timeframes is None:
@@ -1278,7 +1305,7 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
     # ۵. احساسات بازار (جایگزین فاندینگ)
     sentiment_score = cache_obj._calculate_sentiment_score(code, ind)
     if direction == "LONG":
-        results["sentiment"] = sentiment_score > 0.2   # کاهش آستانه
+        results["sentiment"] = sentiment_score > 0.2
     else:
         results["sentiment"] = sentiment_score < -0.2
     
@@ -1561,7 +1588,7 @@ def update_signal_status(symbol, current_price):
             elif current_price <= rec["tp_prices"][0]:
                 rec["status"] = "tp1_hit"
 
-# ---------- فرمت‌سازی با اطلاعات کامل وضعیت ----------
+# ---------- فرمت‌سازی ----------
 def format_main_signal_v2(plan, code, chat_id):
     direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
     mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
@@ -1602,11 +1629,9 @@ def format_main_signal_v2(plan, code, chat_id):
     return rtl_lines(text)
 
 def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, short_layers=None):
-    """نمایش اطلاعات کامل وضعیت لحظه‌ای با جزئیات لایه‌ها و دلایل عدم سیگنال"""
     mode_label = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])["label"]
     config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
     
-    # اطلاعات قیمت و تغییرات ۲۴ ساعته
     price = ind['price']
     df_daily = cache.ohlcv.get("1d", {}).get(code)
     change_24h = 0
@@ -1619,20 +1644,15 @@ def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, sh
         high_24h = float(df_daily["high"].iloc[-1]) if pd.notna(df_daily["high"].iloc[-1]) else price
         low_24h = float(df_daily["low"].iloc[-1]) if pd.notna(df_daily["low"].iloc[-1]) else price
     
-    # قیمت نسبت به EMA20 و EMA50
     ema20_pos = "بالای 📈" if ind['price_above_ema20'] else "زیر 📉"
     ema50_pos = "بالای 📈" if ind['price_above_ema50'] else "زیر 📉"
-    
-    # مقدار MACD
     macd_status = "مثبت 📈" if ind['macd_hist'] > 0 else "منفی 📉"
     
-    # حمایت و مقاومت نزدیک
     support = ind['support']
     resistance = ind['resistance']
     support_2 = ind['support'] * 0.99
     resistance_2 = ind['resistance'] * 1.01
     
-    # خلاصه لایه‌ها
     if plan and plan.layer_results:
         confirmed = sum(1 for v in plan.layer_results.values() if v)
         total_weight = sum(LAYER_WEIGHTS.get(layer, 0) for layer, ok in plan.layer_results.items() if ok)
@@ -1643,7 +1663,6 @@ def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, sh
             layers_summary += f"{emoji} {LAYER_NAMES.get(layer, layer)} (وزن: {weight}%)\n"
         layers_summary += f"\n💡 *جمع‌بندی:* {confirmed} از ۱۰ لایه تأیید شد | امتیاز وزنی: {total_weight}%"
     else:
-        # اگر plan وجود ندارد، از long_layers و short_layers استفاده کن
         if long_layers is not None and short_layers is not None:
             long_confirmed = sum(1 for v in long_layers.values() if v)
             short_confirmed = sum(1 for v in short_layers.values() if v)
@@ -1655,7 +1674,6 @@ def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, sh
                 f"🔴 شورت: {short_confirmed} لایه تأیید | امتیاز وزنی: {short_weight}%\n"
                 f"📊 اختلاف امتیاز: {abs(long_weight - short_weight):.0f}%\n"
             )
-            # دلایل عدم سیگنال
             reasons_no_signal = []
             if ind['adx'] < config['adx_min']:
                 reasons_no_signal.append(f"⚠️ ADX پایین است ({ind['adx']:.1f} < {config['adx_min']})")
@@ -1712,7 +1730,6 @@ async def generate_status_text_async(code, chat_id, mode="standard"):
     if not ind:
         return rtl_lines(f"{code}\n\n⚠️ داده کافی برای تحلیل این ارز دریافت نشد.")
     
-    # محاسبه لایه‌ها برای هر دو جهت (حتی اگر سیگنال نهایی نباشد)
     long_layers = await analyze_layers(code, "LONG", ind, mode, cache)
     short_layers = await analyze_layers(code, "SHORT", ind, mode, cache)
     
@@ -1822,7 +1839,7 @@ async def generate_weekly_summary_async(code, chat_id):
     text += (
         f"\n{DIVIDER}\n"
         f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-        f"{DIVIDER}\nℹ️ داده‌ها از بازار اسپات کوکوین و مکس محاسبه شده‌اند."
+        f"{DIVIDER}\nℹ️ داده‌ها از Gate.io (اصلی)، کوکوین اسپات و کوین‌گکو (پشتیبان) محاسبه شده‌اند."
     )
     return rtl_lines(text)
 
@@ -1831,8 +1848,15 @@ def format_prices_pretty(prices, chat_id):
     for code in COIN_CODES:
         price = prices.get(code)
         if price is not None and price > 0:
-            source = price_sources.get(code, "K")
-            source_emoji = "🅺" if source == "K" else "🅼" if source == "M" else "🅲"
+            source = price_sources.get(code, "G")
+            if source == "G":
+                source_emoji = "🅶"
+            elif source == "K":
+                source_emoji = "🅺"
+            elif source == "C":
+                source_emoji = "🅲"
+            else:
+                source_emoji = "❓"
             price_display = fmt_amount(price, chat_id)
             lines.append(f"{code} {source_emoji} → {price_display}")
         else:
@@ -2048,9 +2072,11 @@ def help_text(step):
         return rtl_lines(
             "💰 *قیمت‌های لحظه‌ای*\n"
             f"{DIVIDER}\n"
-            "قیمت‌ها از کوکوین اسپات دریافت می‌شوند.\n"
-            "در صورت عدم دسترسی، از مکس (Max) به‌عنوان پشتیبان استفاده می‌شود.\n"
-            "نماد 🅺 = کوکوین، 🅼 = مکس، 🅲 = CoinGecko"
+            "قیمت‌ها از چند منبع دریافت می‌شوند:\n"
+            "🅶 Gate.io (منبع اصلی)\n"
+            "🅺 کوکوین اسپات (پشتیبان اول)\n"
+            "🅲 CoinGecko (پشتیبان دوم)\n"
+            "در صورت عدم دسترسی به منبع اصلی، به‌طور خودکار از پشتیبان استفاده می‌شود."
         )
     elif step == 2:
         return rtl_lines(
@@ -2161,7 +2187,13 @@ async def trailing_monitor_loop(app):
                     for code, data in list(signals.items()):
                         plan = data["plan"]; stage = data["stage"]
                         try:
-                            ticker = await asyncio.to_thread(exchange_spot_kucoin.fetch_ticker, cache.symbol_for_code(code))
+                            source = cache.source_for_code(code)
+                            if source == "gateio":
+                                ticker = await asyncio.to_thread(exchange_gateio.fetch_ticker, cache.symbol_for_code(code))
+                            elif source == "kucoin":
+                                ticker = await asyncio.to_thread(exchange_spot_kucoin.fetch_ticker, cache.symbol_for_code(code))
+                            else:
+                                continue
                             current = float(ticker.get("last") or ticker.get("close") or 0)
                         except Exception as e:
                             logger.debug("Trailing price fetch failed | code=%s | error=%s", code, e)
@@ -3000,7 +3032,7 @@ async def post_init(app):
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
     app.create_task(macro_event_monitor_loop(app))
-    logger.info("Signal Bot V51 (10 Layers, Spot Only, Improved UI) started")
+    logger.info("Signal Bot V53 (Gate.io Primary, 10 Layers) started")
 
 def main():
     if not BOT_TOKEN:
