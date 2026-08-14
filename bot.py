@@ -1,4 +1,4 @@
-""" 
+"""
 Telegram Signal Bot V50 - Institutional Grade (10 Layers, Spot Only)
 - حذف کامل فیوچرز و استفاده فقط از اسپات (رفع خطای ۴۲۹)
 - جایگزینی فاندینگ با شاخص احساسات ترکیبی (Sentiment Score)
@@ -6,6 +6,8 @@ Telegram Signal Bot V50 - Institutional Grade (10 Layers, Spot Only)
 - پشتیبان قیمت از مکس (Max) به‌جای بایننس
 - چیدمان ۴ ستونه بدون دکمه noop
 - کش طولانی‌تر و بهینه‌سازی سرعت
+- رفع خطای NameError برای whale_monitor_loop
+- مدیریت صحیح تسک‌های پس‌زمینه برای رفع اخطارهای PTBUserWarning
 """
 
 import asyncio
@@ -78,7 +80,7 @@ TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d")
 TOP_SIGNALS_COUNT = 5
 TELEGRAM_MSG_LIMIT = 3500
 IRT_RATE_TTL_SECONDS = 60
-COINS_GRID_COLUMNS = 4          # ۴ ستون
+COINS_GRID_COLUMNS = 4
 AUTO_KEEP_LAST_N = 3
 TRAILING_CHECK_SECONDS = 5 * 60
 FEAR_GREED_TTL = 3600
@@ -87,7 +89,7 @@ WHALE_CHECK_SECONDS = 30 * 60
 WHALE_MIN_AMOUNT_BTC = 1000
 NEWS_AUTO_DELETE_SECONDS = 3600
 
-PER_PAGE = 12                     # ۳ ردیف × ۴ ستون
+PER_PAGE = 12
 WEIGHT_TREND = 15
 WEIGHT_MOMENTUM = 15
 WEIGHT_VOLUME = 10
@@ -99,10 +101,10 @@ WEIGHT_BREADTH = 5
 WEIGHT_SMART_VOL = 5
 WEIGHT_COMP_TREND = 10
 
-OHLCV_TTL_SECONDS = 300          # افزایش کش
-PRICE_TTL_SECONDS = 60           # کش قیمت
+OHLCV_TTL_SECONDS = 300
+PRICE_TTL_SECONDS = 60
 FULL_REFRESH_TTL_SECONDS = 300
-MAX_OHLCV_CONCURRENCY = 1        # سریال‌سازی درخواست‌ها
+MAX_OHLCV_CONCURRENCY = 1
 MAX_SIGNAL_CONCURRENCY = 2
 MAX_PRICE_CONCURRENCY = 2
 RLM = "\u200f"
@@ -114,7 +116,7 @@ DIVIDER = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
-# ---------- صرافی اسپات (فقط کوکوین اسپات) ----------
+# ---------- صرافی اسپات ----------
 exchange_spot_kucoin = ccxt.kucoin({
     "enableRateLimit": True,
 })
@@ -157,7 +159,7 @@ MODE_CONFIGS = {
         "max_leverage": 10,
         "min_rr": 0.8,
         "adx_min": 10,
-        "min_confirmations": 4,   # از ۱۰ لایه حداقل ۴ لایه
+        "min_confirmations": 4,
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -205,7 +207,6 @@ MIN_SIGNAL_CONFIDENCE = 50
 MIN_DIRECTION_GAP = 8
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 
-# وزن‌های لایه‌های ۱۰گانه (جمعاً ۱۰۰)
 LAYER_WEIGHTS = {
     "structure": 15,
     "mtf": 15,
@@ -244,7 +245,7 @@ class TradePlan:
     entries: list = field(default_factory=list)
     stop_losses: list = field(default_factory=list)
     take_profits: list = field(default_factory=list)
-    funding_rate: float = 0.0  # برای سازگاری با کد قدیمی (همیشه ۰)
+    funding_rate: float = 0.0
     leverage: int = 1
     liquidation_price: float = 0.0
     scores: dict = field(default_factory=dict)
@@ -318,7 +319,6 @@ class MarketDataCache:
                         continue
                     if market.get("active") is False:
                         continue
-                    # فقط اسپات
                     if market.get("type") != "spot":
                         continue
                     selected[code] = symbol
@@ -356,7 +356,6 @@ class MarketDataCache:
         df = df.dropna(subset=required).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df if not df.empty else None
 
-    # ---------- دریافت قیمت از مکس (Max) ----------
     def _get_max_prices(self, codes):
         prices = {}
         try:
@@ -378,7 +377,6 @@ class MarketDataCache:
             symbols = [max_symbol_map[code] for code in codes if code in max_symbol_map]
             if not symbols:
                 return prices
-            
             url = "https://api.max-api.com/api/v2/markets/tickers"
             r = requests.get(url, timeout=8)
             r.raise_for_status()
@@ -445,7 +443,6 @@ class MarketDataCache:
         new_prices = {}
         price_sources.clear()
 
-        # ۱. کوکوین اسپات
         try:
             symbols = [f"{code}/USDT" for code in target_codes]
             tickers = await asyncio.to_thread(exchange_spot_kucoin.fetch_tickers, symbols)
@@ -460,7 +457,6 @@ class MarketDataCache:
         except Exception as e:
             logger.warning("KuCoin spot fetch_tickers failed: %s", e)
 
-        # ۲. درخواست تکی برای ارزهای missing
         missing = [code for code in target_codes if code not in new_prices]
         for code in missing:
             try:
@@ -474,7 +470,6 @@ class MarketDataCache:
             except Exception as e:
                 logger.debug(f"Individual ticker failed for {code}: {e}")
 
-        # ۳. پشتیبان مکس
         still_missing = [code for code in target_codes if code not in new_prices]
         if still_missing:
             try:
@@ -486,7 +481,6 @@ class MarketDataCache:
             except Exception as e:
                 logger.warning("Max fallback failed: %s", e)
 
-        # ۴. پشتیبان CoinGecko
         final_missing = [code for code in target_codes if code not in new_prices]
         if final_missing:
             try:
@@ -505,13 +499,10 @@ class MarketDataCache:
         logger.info("Prices loaded: %s/%s", len(self.prices), len(COIN_CODES))
         return self.prices
 
-    # ---------- لایه‌های جدید ----------
     def _get_market_breadth(self):
-        """محاسبه تنوع بازار: درصد ارزهای بالای EMA20"""
         now = time.time()
         if self._breadth_cache["value"] is not None and now - self._breadth_cache["ts"] < 60:
             return self._breadth_cache["value"]
-        
         count_above = 0
         total = 0
         for code in self.valid_codes:
@@ -523,13 +514,11 @@ class MarketDataCache:
                     if close.iloc[-1] > ema20.iloc[-1]:
                         count_above += 1
                     total += 1
-        
         breadth = count_above / total * 100 if total > 0 else 50
         self._breadth_cache = {"value": breadth, "ts": now}
         return breadth
 
     async def _get_order_flow(self, code):
-        """جریان سفارشات: نسبت سفارشات خرید به فروش از Order Book"""
         try:
             symbol = self.symbol_for_code(code)
             if not symbol:
@@ -540,33 +529,26 @@ class MarketDataCache:
             if asks_volume == 0:
                 return 0.0
             ratio = bids_volume / asks_volume
-            return min(2.0, ratio)  # محدود کردن بین ۰ تا ۲
+            return min(2.0, ratio)
         except Exception as e:
             logger.debug(f"Order flow failed for {code}: {e}")
             return 0.0
 
     def _calculate_sentiment_score(self, code, ind):
-        """محاسبه نمره احساسات ترکیبی (جایگزین فاندینگ)"""
-        # ۱. تغییر قیمت وزنی
         price_change_1h = 0
         price_change_4h = 0
         price_change_24h = 0
-        
         df_1h = self.ohlcv.get("1h", {}).get(code)
         df_4h = self.ohlcv.get("4h", {}).get(code)
         df_1d = self.ohlcv.get("1d", {}).get(code)
-        
         if df_1h is not None and len(df_1h) > 2:
             price_change_1h = (df_1h["close"].iloc[-1] / df_1h["close"].iloc[-2] - 1) * 100
         if df_4h is not None and len(df_4h) > 2:
             price_change_4h = (df_4h["close"].iloc[-1] / df_4h["close"].iloc[-2] - 1) * 100
         if df_1d is not None and len(df_1d) > 2:
             price_change_24h = (df_1d["close"].iloc[-1] / df_1d["close"].iloc[-2] - 1) * 100
-        
         weighted_price_change = (price_change_1h * 0.5) + (price_change_4h * 0.3) + (price_change_24h * 0.2)
-        price_score = max(-1, min(1, weighted_price_change / 5))  # نرمال‌سازی بین -۱ تا +۱
-        
-        # ۲. نسبت جهش حجم
+        price_score = max(-1, min(1, weighted_price_change / 5))
         volume_ratio = ind.get("volume_ratio", 1.0)
         if volume_ratio > 2.0:
             volume_score = 1.0
@@ -576,31 +558,25 @@ class MarketDataCache:
             volume_score = -0.5
         else:
             volume_score = 0.0
-        
-        # ۳. شاخص ترس و طمع
         fg_value, _ = get_fear_greed()
         if fg_value is not None:
-            fg_score = (fg_value - 50) / 50  # نرمال‌سازی بین -۱ تا +۱
+            fg_score = (fg_value - 50) / 50
             fg_score = max(-1, min(1, fg_score))
         else:
             fg_score = 0.0
-        
-        # نمره نهایی
         sentiment_score = (price_score * 0.4) + (volume_score * 0.4) + (fg_score * 0.2)
         return max(-1, min(1, sentiment_score))
 
     def _get_smart_volatility(self, ind):
-        """نوسان‌پذیری هوشمند: موقعیت قیمت در باند بولینگر"""
         bb_percent = ind.get("bb_percent", 0.5)
         if bb_percent > 0.8:
-            return 0.7   # نزدیک به بالای باند (اشباع خرید)
+            return 0.7
         elif bb_percent < 0.2:
-            return -0.7  # نزدیک به پایین باند (اشباع فروش)
+            return -0.7
         else:
-            return 0.0   # خنثی
+            return 0.0
 
     def _get_complementary_trend(self, ind):
-        """قدرت روند مکمل: اختلاف +DI و -DI"""
         plus_di = ind.get("plus_di", 0)
         minus_di = ind.get("minus_di", 0)
         diff = plus_di - minus_di
@@ -611,7 +587,6 @@ class MarketDataCache:
         else:
             return 0.0
 
-    # ---------- دریافت OHLCV از اسپات ----------
     async def _fetch_ohlcv_symbol(self, code, timeframe, limit=500):
         symbol = self.symbol_for_code(code)
         if not symbol:
@@ -662,7 +637,6 @@ class MarketDataCache:
             self.last_full_ohlcv_update = time.time()
             logger.info("OHLCV refresh complete: %s", {tf: len(self.ohlcv.get(tf, {})) for tf in TIMEFRAMES})
 
-    # ---------- شاخص‌های اصلی ----------
     async def get_indicators(self, code, mode="standard"):
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
         main_tf = config["main_tf"]
@@ -962,7 +936,277 @@ async def get_fear_greed():
         fear_greed_cache.update(value=value, classification=classification, ts=now)
     return value, classification
 
-# ---------- توابع تحلیل لایه‌ها (۱۰ لایه) ----------
+# ---------- Events ----------
+def fetch_upcoming_events():
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/events?upcoming=true", timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        events = []
+        for ev in data:
+            name = ev.get("title") or ev.get("name", "رویداد")
+            date_str = ev.get("date", "")
+            if not date_str:
+                continue
+            try:
+                event_time = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            except:
+                continue
+            importance = "medium"
+            if "hard fork" in name.lower() or "upgrade" in name.lower() or "ethereum" in name.lower():
+                importance = "high"
+            description = ev.get("description", "")[:200]
+            events.append({
+                "name": name,
+                "time": event_time,
+                "importance": importance,
+                "description": description,
+                "impact": "مشخص نیست"
+            })
+        return events
+    except Exception as e:
+        logger.warning("Events fetch failed: %s", e)
+        return []
+
+async def get_upcoming_events(force=False):
+    now = time.time()
+    if not force and upcoming_events_cache["events"] and now - upcoming_events_cache["ts"] < EVENTS_CHECK_SECONDS:
+        return upcoming_events_cache["events"]
+    events = fetch_upcoming_events()
+    if events:
+        upcoming_events_cache.update(events=events, ts=now)
+    return events
+
+async def check_and_notify_events(app):
+    events = await get_upcoming_events(force=True)
+    now_utc = datetime.now(tz=TEHRAN_TZ) if TEHRAN_TZ else datetime.now()
+    upcoming = []
+    for ev in events:
+        event_time = ev["time"]
+        if event_time.tzinfo is None:
+            event_time = event_time.replace(tzinfo=TEHRAN_TZ)
+        delta = event_time - now_utc
+        if timedelta(0) <= delta <= timedelta(hours=24):
+            upcoming.append(ev)
+    if upcoming:
+        for chat_id in subscribed_chat_ids:
+            text = "📅 *رویدادهای مهم کریپتو در ۲۴ ساعت آینده:*\n" + DIVIDER + "\n"
+            for ev in upcoming[:5]:
+                importance_emoji = "🔴" if ev.get("importance") == "high" else "🟡" if ev.get("importance") == "medium" else "🟢"
+                text += f"{importance_emoji} *{ev['name']}*\n"
+                text += f"🕒 {shamsi_date(ev['time'])} {ev['time'].strftime('%H:%M')}\n"
+                if ev.get("description"):
+                    text += f"📝 {ev['description'][:100]}...\n"
+                if ev.get("impact"):
+                    text += f"📊 تأثیر مورد انتظار: {ev['impact']}\n"
+                text += "\n"
+            try:
+                msg = await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
+                asyncio.create_task(delete_news_messages_after_delay(app, chat_id, msg.message_id))
+            except Exception as e:
+                logger.warning("Event notify failed: %s", e)
+
+# ---------- Whale Alerts ----------
+def fetch_whale_alerts():
+    try:
+        if WHALE_ALERT_API_KEY:
+            url = f"https://api.whale-alert.io/v1/transactions?api_key={WHALE_ALERT_API_KEY}&min_value={WHALE_MIN_AMOUNT_BTC * 1000000}&limit=10"
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            data = r.json().get("transactions", [])
+            alerts = []
+            for tx in data:
+                amount_btc = float(tx.get("amount", 0))
+                symbol = tx.get("symbol", "BTC")
+                from_address = tx.get("from", {}).get("address", "")
+                to_address = tx.get("to", {}).get("address", "")
+                from_owner = tx.get("from", {}).get("owner_type", "")
+                to_owner = tx.get("to", {}).get("owner_type", "")
+                exchange_keywords = ["exchange", "wallet", "binance", "coinbase", "kraken", "okx", "bybit"]
+                from_is_exchange = any(kw in from_owner.lower() for kw in exchange_keywords) if from_owner else False
+                to_is_exchange = any(kw in to_owner.lower() for kw in exchange_keywords) if to_owner else False
+                flow_type = "unknown"
+                if from_is_exchange and not to_is_exchange:
+                    flow_type = "خروج از صرافی (احتمال فروش)"
+                elif not from_is_exchange and to_is_exchange:
+                    flow_type = "ورود به صرافی (احتمال فروش)"
+                elif from_is_exchange and to_is_exchange:
+                    flow_type = "انتقال بین صرافی‌ها"
+                else:
+                    flow_type = "انتقال بین کیف‌پول‌ها"
+                impact = "خنثی"
+                if flow_type == "خروج از صرافی" and amount_btc > 2000:
+                    impact = "نزولی 📉 (احتمال فروش)"
+                elif flow_type == "ورود به صرافی" and amount_btc > 2000:
+                    impact = "نزولی 📉 (احتمال فروش)"
+                elif amount_btc > 5000:
+                    impact = "صعودی 📈 (انباشت نهنگ)"
+                alerts.append({
+                    "amount_btc": amount_btc,
+                    "symbol": symbol,
+                    "timestamp": time.time(),
+                    "from_address": from_address[:10] + "...",
+                    "to_address": to_address[:10] + "...",
+                    "from_owner": from_owner or "ناشناس",
+                    "to_owner": to_owner or "ناشناس",
+                    "flow_type": flow_type,
+                    "impact": impact,
+                    "value_usd": amount_btc * cache.prices.get("BTC", 0)
+                })
+            return alerts
+        else:
+            url = "https://blockchain.info/unconfirmed-transactions?format=json"
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            txs = r.json().get("txs", [])
+            alerts = []
+            for tx in txs:
+                total_out = sum(out.get("value", 0) for out in tx.get("out", [])) / 1e8
+                if total_out >= WHALE_MIN_AMOUNT_BTC:
+                    alerts.append({
+                        "amount_btc": total_out,
+                        "symbol": "BTC",
+                        "timestamp": time.time(),
+                        "from_address": "مشخص نیست",
+                        "to_address": "مشخص نیست",
+                        "from_owner": "ناشناس",
+                        "to_owner": "ناشناس",
+                        "flow_type": "نامشخص",
+                        "impact": "مشخص نیست",
+                        "value_usd": total_out * cache.prices.get("BTC", 0)
+                    })
+            return alerts[:5]
+    except Exception as e:
+        logger.warning("Whale alert fetch failed: %s", e)
+        return []
+
+async def whale_monitor_loop(app):
+    await asyncio.sleep(60)
+    while True:
+        try:
+            if subscribed_chat_ids:
+                alerts = fetch_whale_alerts()
+                if alerts:
+                    for alert in alerts[:5]:
+                        amount = alert["amount_btc"]
+                        symbol = alert["symbol"]
+                        flow = alert["flow_type"]
+                        impact = alert["impact"]
+                        value_usd = alert.get("value_usd", 0)
+                        from_addr = alert.get("from_address", "نامشخص")
+                        to_addr = alert.get("to_address", "نامشخص")
+                        from_owner = alert.get("from_owner", "ناشناس")
+                        to_owner = alert.get("to_owner", "ناشناس")
+                        whale_emoji = "🐋" if amount > 5000 else "🐳"
+                        text = (
+                            f"{whale_emoji} *حرکت نهنگ بزرگ*\n"
+                            f"💰 مقدار: **{amount:,.0f} {symbol}** (~{value_usd:,.0f} دلار)\n"
+                            f"🔗 شبکه: {symbol}\n"
+                            f"📌 از آدرس: `{from_addr}`\n"
+                            f"📌 به آدرس: `{to_addr}`\n"
+                            f"🏷️ برچسب مبدأ: {from_owner}\n"
+                            f"🏷️ برچسب مقصد: {to_owner}\n"
+                            f"📊 نوع تراکنش: {flow}\n"
+                            f"📈 تأثیر احتمالی: {impact}\n"
+                            f"🕒 {shamsi_now()}"
+                        )
+                        add_news_alert(text, importance="high", impact=impact, details=alert)
+                    
+                    for chat_id in subscribed_chat_ids:
+                        latest = news_history[-1] if news_history else None
+                        if latest and latest.get("importance") == "high":
+                            msg = await app.bot.send_message(chat_id=chat_id, text=rtl_lines(latest["text"]), parse_mode="Markdown")
+                            asyncio.create_task(delete_news_messages_after_delay(app, chat_id, msg.message_id))
+        except Exception as e:
+            logger.exception("Whale monitor error: %s", e)
+        await asyncio.sleep(WHALE_CHECK_SECONDS)
+
+# ---------- Macro event monitor ----------
+async def fetch_macro_events():
+    return []
+
+async def macro_event_monitor_loop(app):
+    await asyncio.sleep(120)
+    while True:
+        try:
+            if subscribed_chat_ids:
+                events = await fetch_macro_events()
+                for ev in events:
+                    text = (
+                        f"📰 *رویداد کلان اقتصادی*\n"
+                        f"{ev.get('title', 'رویداد')}\n"
+                        f"🕒 {shamsi_now()}\n"
+                        f"📊 سطح اهمیت: {ev.get('importance', 'medium')}\n"
+                        f"📈 تأثیر مورد انتظار: {ev.get('impact', 'نامشخص')}\n"
+                        f"📝 {ev.get('description', '')[:200]}"
+                    )
+                    add_news_alert(text, importance=ev.get('importance', 'medium'), impact=ev.get('impact', ''))
+                    for chat_id in subscribed_chat_ids:
+                        msg = await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
+                        asyncio.create_task(delete_news_messages_after_delay(app, chat_id, msg.message_id))
+        except Exception as e:
+            logger.exception("Macro event monitor error: %s", e)
+        await asyncio.sleep(6 * 3600)
+
+# ---------- Advanced Reporting ----------
+def compute_advanced_stats(signal_history, mode=None):
+    filtered = [r for r in signal_history if mode is None or r.get("mode") == mode]
+    if not filtered:
+        return {
+            "sharpe": 0, "max_drawdown": 0, "expectancy": 0,
+            "risk_of_ruin": 0, "total_trades": 0, "win_rate": 0,
+            "profit_factor": 0, "avg_confidence": 0,
+            "wins": 0, "losses": 0
+        }
+    returns = []
+    wins = 0
+    losses = 0
+    for rec in filtered:
+        if rec["status"] == "tp3_hit":
+            returns.append(3 * (rec["tp_prices"][2] - rec["entry_price"]))
+            wins += 1
+        elif rec["status"] == "tp2_hit":
+            returns.append(2 * (rec["tp_prices"][1] - rec["entry_price"]))
+            wins += 1
+        elif rec["status"] == "tp1_hit":
+            returns.append(1 * (rec["tp_prices"][0] - rec["entry_price"]))
+            wins += 1
+        elif rec["status"] == "sl_hit":
+            returns.append(rec["entry_price"] - rec["sl_price"])
+            losses += 1
+    if not returns:
+        return {
+            "sharpe": 0, "max_drawdown": 0, "expectancy": 0,
+            "risk_of_ruin": 0, "total_trades": 0, "win_rate": 0,
+            "profit_factor": 0, "avg_confidence": 0,
+            "wins": 0, "losses": 0
+        }
+    returns = np.array(returns)
+    win_rate = wins / len(returns) * 100
+    avg_return = np.mean(returns)
+    std_return = np.std(returns) if len(returns) > 1 else 1e-9
+    sharpe = (avg_return / std_return) * np.sqrt(365) if std_return != 0 else 0
+    cumulative = np.cumsum(returns)
+    max_dd = 0
+    peak = cumulative[0]
+    for val in cumulative:
+        if val > peak:
+            peak = val
+        dd = peak - val
+        if dd > max_dd:
+            max_dd = dd
+    expectancy = avg_return
+    risk_of_ruin = (1 - (wins / len(returns))) ** 10 * 100
+    profit_factor = (sum(r for r in returns if r > 0) / abs(sum(r for r in returns if r <= 0))) if losses else 999
+    avg_confidence = np.mean([rec["confidence"] for rec in filtered]) if filtered else 0
+    return {
+        "sharpe": sharpe, "max_drawdown": max_dd, "expectancy": expectancy,
+        "risk_of_ruin": risk_of_ruin, "total_trades": len(returns),
+        "win_rate": win_rate, "profit_factor": profit_factor,
+        "avg_confidence": avg_confidence, "wins": wins, "losses": losses,
+    }
+
+# ---------- توابع تحلیل لایه‌ها ----------
 async def analyze_layers(code, direction, ind, mode, cache_obj):
     config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
     df = cache_obj.ohlcv.get(config["main_tf"], {}).get(code)
@@ -1060,9 +1304,9 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
     # ۹. نوسان‌پذیری هوشمند
     smart_vol = cache_obj._get_smart_volatility(ind)
     if direction == "LONG":
-        results["smart_vol"] = smart_vol < -0.3  # نزدیک به پایین باند (فرصت خرید)
+        results["smart_vol"] = smart_vol < -0.3
     else:
-        results["smart_vol"] = smart_vol > 0.3   # نزدیک به بالای باند (فرصت فروش)
+        results["smart_vol"] = smart_vol > 0.3
     
     # ۱۰. قدرت روند مکمل
     comp_trend = cache_obj._get_complementary_trend(ind)
@@ -1073,7 +1317,7 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
     
     return results
 
-# ---------- تولید سیگنال جدید (۱۰ لایه) ----------
+# ---------- تولید سیگنال جدید ----------
 async def generate_trade_plan_v2(code, mode="standard"):
     try:
         await cache.update_prices(force=True, codes=[code])
@@ -1087,7 +1331,6 @@ async def generate_trade_plan_v2(code, mode="standard"):
         long_layers = await analyze_layers(code, "LONG", ind, mode, cache)
         short_layers = await analyze_layers(code, "SHORT", ind, mode, cache)
         
-        # محاسبه امتیاز وزنی برای هر جهت
         long_score = 0
         short_score = 0
         long_confirmed = 0
@@ -1130,9 +1373,7 @@ async def generate_trade_plan_v2(code, mode="standard"):
             logger.info(f"RR too low for {code}: {levels['rr']:.2f} < {config['min_rr']}")
             return None
         
-        # فاندینگ حذف شده - از sentiment_score استفاده می‌شود
         funding = 0.0
-        
         fg_value, _ = await get_fear_greed()
         if fg_value is not None:
             if direction == "LONG" and fg_value > 80:
@@ -1156,7 +1397,6 @@ async def generate_trade_plan_v2(code, mode="standard"):
             leverage = 1
         
         win_rate_est = get_win_rate_estimate()
-        
         entry_avg = levels["avg_entry"]
         liq = calc_liquidation_price(direction, entry_avg, leverage)
         reasons, warnings = signal_reasons(direction, ind, mode)
@@ -1325,7 +1565,6 @@ def format_main_signal_v2(plan, code, chat_id):
     direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
     mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
     
-    # نمایش ۱۰ لایه
     layers_text = ""
     for layer, ok in plan.layer_results.items():
         emoji = "✅" if ok else "❌"
@@ -1474,7 +1713,7 @@ async def generate_weekly_summary_async(code, chat_id):
     ret_24h = float(returns.iloc[-1]) if not returns.empty else 0
     best_date = shamsi_date(week_df.loc[best_idx, "timestamp"]) if best_idx in week_df.index else "-"
     worst_date = shamsi_date(week_df.loc[worst_idx, "timestamp"]) if worst_idx in week_df.index else "-"
-    funding = 0.0  # حذف فاندینگ
+    funding = 0.0
     fg_value, fg_class = await get_fear_greed()
     text = (
         f"📊 *تحلیل جامع ارز* {code}\n"
@@ -1571,7 +1810,7 @@ async def clear_overlay(context, chat_id):
 # ---------- کیبوردها ----------
 def build_grid_keyboard(buttons, columns):
     rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
-    return rows  # بدون noop
+    return rows
 
 def kb_currency():
     return InlineKeyboardMarkup([
@@ -2687,6 +2926,7 @@ async def post_init(app):
         BotCommand("report", "گزارش دوره‌ای"),
         BotCommand("stop", "توقف ربات"),
     ])
+    # ایجاد تسک‌های پس‌زمینه با مدیریت صحیح
     app.create_task(auto_report_loop(app))
     app.create_task(trailing_monitor_loop(app))
     app.create_task(news_monitor_loop(app))
