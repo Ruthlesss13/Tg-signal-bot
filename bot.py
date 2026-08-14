@@ -1,8 +1,8 @@
 """
-Telegram Signal Bot V54 - Institutional Grade (10 Layers, Gate.io + KuCoin Spot)
-- Gate.io به عنوان منبع اصلی OHLCV و قیمت
-- کوکوین اسپات به عنوان پشتیبان
-- حذف CoinGecko به دلیل عدم پشتیبانی ccxt
+Telegram Signal Bot V55 - Institutional Grade (10 Layers, Gate.io + KuCoin Spot)
+- اصلاح دریافت قیمت و OHLCV از Gate.io با سمبل‌های صحیح
+- اضافه شدن مپ سمبل‌ها برای Gate.io
+- پشتیبان کوکوین اسپات برای ارزهای پشتیبانی‌نشده
 - اضافه شدن ارز TON
 - کش ۱۸۰ ثانیه و بهینه‌سازی سرعت
 """
@@ -121,6 +121,28 @@ exchange_gateio = ccxt.gateio({
 exchange_spot_kucoin = ccxt.kucoin({
     "enableRateLimit": True,
 })
+
+# ---------- مپ سمبل‌های Gate.io ----------
+# Gate.io از فرمت BTC_USDT استفاده می‌کند، نه BTC/USDT
+GATEIO_SYMBOL_MAP = {
+    "AAVE": "AAVE_USDT", "ADA": "ADA_USDT", "ALGO": "ALGO_USDT",
+    "APE": "APE_USDT", "APT": "APT_USDT", "AR": "AR_USDT",
+    "ARB": "ARB_USDT", "ATOM": "ATOM_USDT", "AVAX": "AVAX_USDT",
+    "BCH": "BCH_USDT", "BLUR": "BLUR_USDT", "BTC": "BTC_USDT",
+    "COMP": "COMP_USDT", "DOGE": "DOGE_USDT", "DOT": "DOT_USDT",
+    "EGLD": "EGLD_USDT", "ETC": "ETC_USDT", "ETH": "ETH_USDT",
+    "FET": "FET_USDT", "FIL": "FIL_USDT", "FLOW": "FLOW_USDT",
+    "GALA": "GALA_USDT", "GRT": "GRT_USDT", "ICP": "ICP_USDT",
+    "INJ": "INJ_USDT", "KAS": "KAS_USDT", "KAVA": "KAVA_USDT",
+    "KSM": "KSM_USDT", "LINK": "LINK_USDT", "LTC": "LTC_USDT",
+    "LUNC": "LUNC_USDT", "MANA": "MANA_USDT", "MINA": "MINA_USDT",
+    "NEAR": "NEAR_USDT", "NEO": "NEO_USDT", "OP": "OP_USDT",
+    "POL": "POL_USDT", "RUNE": "RUNE_USDT", "SAND": "SAND_USDT",
+    "SHIB": "SHIB_USDT", "SOL": "SOL_USDT", "STX": "STX_USDT",
+    "SUI": "SUI_USDT", "TON": "TON_USDT", "TRX": "TRX_USDT",
+    "UNI": "UNI_USDT", "VET": "VET_USDT", "XLM": "XLM_USDT",
+    "XMR": "XMR_USDT", "XRP": "XRP_USDT",
+}
 
 # ---------- متغیرهای سراسری ----------
 last_plans = {}
@@ -314,25 +336,26 @@ class MarketDataCache:
             sources = {}
             for code in COIN_CODES:
                 found = False
-                for symbol, market in gateio_markets.items():
-                    if market.get("base") == code and market.get("quote") == "USDT":
-                        if market.get("active") is not False and market.get("type") == "spot":
-                            selected[code] = symbol
-                            sources[code] = "gateio"
-                            self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None, "source": "gateio"}
-                            found = True
-                            break
+                # استفاده از مپ سمبل‌ها برای Gate.io
+                gateio_symbol = GATEIO_SYMBOL_MAP.get(code)
+                if gateio_symbol and gateio_symbol in gateio_markets:
+                    market = gateio_markets[gateio_symbol]
+                    if market.get("active") is not False and market.get("type") == "spot":
+                        selected[code] = gateio_symbol
+                        sources[code] = "gateio"
+                        self.market_status[code] = {"status": "SWAP OK", "symbol": gateio_symbol, "error": None, "source": "gateio"}
+                        found = True
                 if not found:
                     try:
                         kucoin_markets = exchange_spot_kucoin.load_markets()
-                        for symbol, market in kucoin_markets.items():
-                            if market.get("base") == code and market.get("quote") == "USDT":
-                                if market.get("active") is not False and market.get("type") == "spot":
-                                    selected[code] = symbol
-                                    sources[code] = "kucoin"
-                                    self.market_status[code] = {"status": "SWAP OK", "symbol": symbol, "error": None, "source": "kucoin"}
-                                    found = True
-                                    break
+                        kucoin_symbol = f"{code}/USDT"
+                        if kucoin_symbol in kucoin_markets:
+                            market = kucoin_markets[kucoin_symbol]
+                            if market.get("active") is not False and market.get("type") == "spot":
+                                selected[code] = kucoin_symbol
+                                sources[code] = "kucoin"
+                                self.market_status[code] = {"status": "SWAP OK", "symbol": kucoin_symbol, "error": None, "source": "kucoin"}
+                                found = True
                     except Exception as e:
                         logger.debug(f"KuCoin load markets failed: {e}")
                 if not found:
@@ -381,20 +404,24 @@ class MarketDataCache:
         new_prices = {}
         price_sources.clear()
 
-        try:
-            symbols = [f"{code}/USDT" for code in target_codes]
-            tickers = await asyncio.to_thread(exchange_gateio.fetch_tickers, symbols)
-            for code in target_codes:
-                sym = f"{code}/USDT"
-                if sym in tickers:
-                    ticker = tickers[sym]
-                    price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
-                    if price and price > 0:
-                        new_prices[code] = float(price)
-                        price_sources[code] = "G"
-        except Exception as e:
-            logger.warning("Gate.io fetch_tickers failed: %s", e)
+        # ۱. Gate.io با سمبل‌های صحیح
+        gateio_codes = [code for code in target_codes if GATEIO_SYMBOL_MAP.get(code)]
+        if gateio_codes:
+            try:
+                symbols = [GATEIO_SYMBOL_MAP[code] for code in gateio_codes]
+                tickers = await asyncio.to_thread(exchange_gateio.fetch_tickers, symbols)
+                for code in gateio_codes:
+                    sym = GATEIO_SYMBOL_MAP.get(code)
+                    if sym in tickers:
+                        ticker = tickers[sym]
+                        price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
+                        if price and price > 0:
+                            new_prices[code] = float(price)
+                            price_sources[code] = "G"
+            except Exception as e:
+                logger.warning(f"Gate.io fetch_tickers failed: {e}")
 
+        # ۲. کوکوین اسپات برای ارزهای باقی‌مانده
         missing = [code for code in target_codes if code not in new_prices]
         if missing:
             try:
@@ -409,7 +436,30 @@ class MarketDataCache:
                             new_prices[code] = float(price)
                             price_sources[code] = "K"
             except Exception as e:
-                logger.warning("KuCoin fallback fetch_tickers failed: %s", e)
+                logger.warning(f"KuCoin fetch_tickers failed: {e}")
+
+        # ۳. درخواست تکی برای ارزهای باقی‌مانده (در صورت نیاز)
+        still_missing = [code for code in target_codes if code not in new_prices]
+        for code in still_missing:
+            try:
+                # تلاش با Gate.io
+                gateio_sym = GATEIO_SYMBOL_MAP.get(code)
+                if gateio_sym:
+                    ticker = await asyncio.to_thread(exchange_gateio.fetch_ticker, gateio_sym)
+                    price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
+                    if price and price > 0:
+                        new_prices[code] = float(price)
+                        price_sources[code] = "G"
+                        continue
+                # تلاش با کوکوین
+                ticker = await asyncio.to_thread(exchange_spot_kucoin.fetch_ticker, f"{code}/USDT")
+                price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
+                if price and price > 0:
+                    new_prices[code] = float(price)
+                    price_sources[code] = "K"
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.debug(f"Individual ticker failed for {code}: {e}")
 
         for code in target_codes:
             if code in new_prices:
@@ -517,15 +567,16 @@ class MarketDataCache:
         if not symbol:
             return None
         source = self.source_for_code(code)
-        exchanges = []
-        if source == "gateio":
-            exchanges = [(exchange_gateio, "gateio")]
-        elif source == "kucoin":
-            exchanges = [(exchange_spot_kucoin, "kucoin")]
-        else:
-            exchanges = [(exchange_gateio, "gateio"), (exchange_spot_kucoin, "kucoin")]
-
+        
         async with self._sem:
+            # اولویت با منبع اصلی
+            if source == "gateio":
+                exchanges = [(exchange_gateio, "gateio")]
+            elif source == "kucoin":
+                exchanges = [(exchange_spot_kucoin, "kucoin")]
+            else:
+                exchanges = [(exchange_gateio, "gateio"), (exchange_spot_kucoin, "kucoin")]
+
             for ex, name in exchanges:
                 for attempt in range(3):
                     try:
@@ -2938,7 +2989,7 @@ async def post_init(app):
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
     app.create_task(macro_event_monitor_loop(app))
-    logger.info("Signal Bot V54 (Gate.io + KuCoin, No CoinGecko) started")
+    logger.info("Signal Bot V55 (Gate.io + KuCoin, Symbol Fix) started")
 
 def main():
     if not BOT_TOKEN:
