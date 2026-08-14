@@ -1,4 +1,4 @@
-"""
+""" 
 Telegram Signal Bot V50 - Institutional Grade (10 Layers, Spot Only)
 - حذف کامل فیوچرز و استفاده فقط از اسپات (رفع خطای ۴۲۹)
 - جایگزینی فاندینگ با شاخص احساسات ترکیبی (Sentiment Score)
