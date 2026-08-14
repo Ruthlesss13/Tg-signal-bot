@@ -1,10 +1,10 @@
 """
-Telegram Signal Bot V56 - Institutional Grade (10 Layers, Gate.io + KuCoin + CoinGecko)
-- رفع خطای await در get_fear_greed
-- اصلاح سمبل‌ها برای Gate.io و کوکوین
-- اضافه شدن ارزهای GALA و TON
-- پشتیبان کامل CoinGecko برای ارزهای پشتیبانی‌نشده
-- نمایش اطلاعات کامل در وضعیت لحظه‌ای
+Telegram Signal Bot V57 - Institutional Grade (10 Layers, Gate.io + KuCoin + CoinGecko)
+- حذف ارزهای GALA و TON (بدون داده)
+- کاهش سخت‌گیری سیگنال‌ها برای تولید بیشتر
+- دکمه «📊 تحلیل جامع» در پنل مدیریت
+- بهبود ایموجی‌ها و متن‌های فارسی
+- رفع خطای KeyError در signal_reasons
 """
 
 import asyncio
@@ -55,21 +55,21 @@ ALWAYS_ALLOWED_USER_IDS = {
 }
 WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 
-# ---------- لیست ارزها (GALA و TON اضافه شدند) ----------
+# ---------- لیست ارزها (بدون GALA و TON) ----------
 COIN_ICONS = {
     "AAVE": "AAVE", "ADA": "ADA", "ALGO": "ALGO", "APE": "APE",
     "APT": "APT", "AR": "AR", "ARB": "ARB", "ATOM": "ATOM",
     "AVAX": "AVAX", "BCH": "BCH", "BLUR": "BLUR", "BTC": "BTC",
     "COMP": "COMP", "DOGE": "DOGE", "DOT": "DOT", "EGLD": "EGLD",
     "ETC": "ETC", "ETH": "ETH", "FET": "FET", "FIL": "FIL",
-    "FLOW": "FLOW", "GALA": "GALA", "GRT": "GRT", "ICP": "ICP",
+    "FLOW": "FLOW", "GRT": "GRT", "ICP": "ICP",
     "INJ": "INJ", "KAS": "KAS", "KAVA": "KAVA", "KSM": "KSM",
     "LINK": "LINK", "LTC": "LTC", "LUNC": "LUNC", "MANA": "MANA",
     "MINA": "MINA", "NEAR": "NEAR", "NEO": "NEO", "OP": "OP",
     "POL": "POL", "RUNE": "RUNE", "SAND": "SAND", "SHIB": "SHIB",
-    "SOL": "SOL", "STX": "STX", "SUI": "SUI", "TON": "TON",
-    "TRX": "TRX", "UNI": "UNI", "VET": "VET", "XLM": "XLM",
-    "XMR": "XMR", "XRP": "XRP",
+    "SOL": "SOL", "STX": "STX", "SUI": "SUI", "TRX": "TRX",
+    "UNI": "UNI", "VET": "VET", "XLM": "XLM", "XMR": "XMR",
+    "XRP": "XRP",
 }
 COIN_CODES = sorted(list(COIN_ICONS.keys()))
 
@@ -132,14 +132,14 @@ GATEIO_SYMBOL_MAP = {
     "COMP": "COMP_USDT", "DOGE": "DOGE_USDT", "DOT": "DOT_USDT",
     "EGLD": "EGLD_USDT", "ETC": "ETC_USDT", "ETH": "ETH_USDT",
     "FET": "FET_USDT", "FIL": "FIL_USDT", "FLOW": "FLOW_USDT",
-    "GALA": "GALA_USDT", "GRT": "GRT_USDT", "ICP": "ICP_USDT",
+    "GRT": "GRT_USDT", "ICP": "ICP_USDT",
     "INJ": "INJ_USDT", "KAS": "KAS_USDT", "KAVA": "KAVA_USDT",
     "KSM": "KSM_USDT", "LINK": "LINK_USDT", "LTC": "LTC_USDT",
     "LUNC": "LUNC_USDT", "MANA": "MANA_USDT", "MINA": "MINA_USDT",
     "NEAR": "NEAR_USDT", "NEO": "NEO_USDT", "OP": "OP_USDT",
     "POL": "POL_USDT", "RUNE": "RUNE_USDT", "SAND": "SAND_USDT",
     "SHIB": "SHIB_USDT", "SOL": "SOL_USDT", "STX": "STX_USDT",
-    "SUI": "SUI_USDT", "TON": "TON_USDT", "TRX": "TRX_USDT",
+    "SUI": "SUI_USDT", "TRX": "TRX_USDT",
     "UNI": "UNI_USDT", "VET": "VET_USDT", "XLM": "XLM_USDT",
     "XMR": "XMR_USDT", "XRP": "XRP_USDT",
 }
@@ -171,61 +171,62 @@ last_check_time = {}
 last_sent_signals = {}
 price_sources = {}
 
-MIN_SIGNAL_CONFIDENCE = 35
+# ========== تنظیمات سخت‌گیری کاهش‌یافته ==========
+MIN_SIGNAL_CONFIDENCE = 30
 MIN_DIRECTION_GAP = 5
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 
 MODE_CONFIGS = {
     "fast": {
-        "label": "⚡ سریع",
+        "label": "سریع ⚡",
         "main_tf": "5m",
         "confirm_tfs": ["15m", "1h"],
         "entry_ladder_atr": [0.0, 0.2, 0.4],
         "tp_multipliers": [0.4, 0.8, 1.2],
         "sl_atr_mult": 0.8,
         "max_leverage": 10,
-        "min_rr": 0.8,
+        "min_rr": 0.5,
         "adx_min": 10,
         "min_confirmations": 3,
         "check_interval": 5 * 60,
     },
     "semi_fast": {
-        "label": "🔥 نیمه‌سریع",
+        "label": "نیمه‌سریع 🔥",
         "main_tf": "15m",
         "confirm_tfs": ["1h", "4h"],
         "entry_ladder_atr": [0.0, 0.3, 0.6],
         "tp_multipliers": [0.6, 1.2, 1.8],
         "sl_atr_mult": 1.0,
         "max_leverage": 7,
-        "min_rr": 1.0,
+        "min_rr": 0.6,
         "adx_min": 13,
         "min_confirmations": 4,
         "check_interval": 10 * 60,
     },
     "standard": {
-        "label": "📊 استاندارد",
+        "label": "استاندارد 📊",
         "main_tf": "1h",
         "confirm_tfs": ["4h", "1d"],
         "entry_ladder_atr": [0.0, 0.4, 0.8],
         "tp_multipliers": [0.8, 1.5, 2.5],
         "sl_atr_mult": 1.2,
         "max_leverage": 5,
-        "min_rr": 1.2,
+        "min_rr": 0.6,
         "adx_min": 14,
-        "min_confirmations": 4,
+        "min_confirmations": 3,
         "check_interval": 30 * 60,
     },
     "conservative": {
-        "label": "🛡️ محافظه‌کار",
+        "label": "محافظه‌کار 🛡️",
         "main_tf": "4h",
         "confirm_tfs": ["1d", "1d"],
         "entry_ladder_atr": [0.0, 0.6, 1.2],
         "tp_multipliers": [1.5, 2.5, 4.0],
         "sl_atr_mult": 2.0,
         "max_leverage": 3,
-        "min_rr": 1.5,
+        "min_rr": 0.8,
         "adx_min": 18,
-        "min_confirmations": 5,
+        "min_confirmations": 4,
         "check_interval": 60 * 60,
     },
 }
@@ -247,13 +248,13 @@ LAYER_NAMES = {
     "structure": "ساختار بازار",
     "mtf": "هم‌گرایی تایم‌فریم",
     "momentum": "مومنتوم",
-    "volume": "حجم معاملات",
+    "volume": "حجم",
     "sentiment": "احساسات بازار",
     "trend": "روند",
     "order_flow": "جریان سفارشات",
     "breadth": "تنوع بازار",
-    "smart_vol": "نوسان‌پذیری هوشمند",
-    "comp_trend": "قدرت روند مکمل",
+    "smart_vol": "نوسان‌پذیری",
+    "comp_trend": "قدرت روند",
 }
 
 @dataclass
@@ -358,14 +359,14 @@ class MarketDataCache:
                     except Exception as e:
                         logger.debug(f"KuCoin load markets failed: {e}")
                 if not found:
-                    logger.warning(f"ارز {code} در Gate.io و KuCoin یافت نشد، از CoinGecko استفاده خواهد شد.")
+                    logger.warning(f"ارز {code} در Gate.io و KuCoin یافت نشد.")
                     selected[code] = code
-                    sources[code] = "coingecko"
-                    self.market_status[code] = {"status": "SWAP OK", "symbol": code, "error": None, "source": "coingecko"}
+                    sources[code] = "unknown"
+                    self.market_status[code] = {"status": "NO SWAP", "symbol": code, "error": "Not found", "source": "unknown"}
             self.exchange_symbols = selected
             self.symbol_sources = sources
-            self.valid_codes = list(selected.keys())
-            logger.info("Markets loaded: %s/%s from Gate.io + KuCoin + CoinGecko", len(self.valid_codes), len(COIN_CODES))
+            self.valid_codes = [code for code in COIN_CODES if sources.get(code) != "unknown"]
+            logger.info("Markets loaded: %s/%s from Gate.io + KuCoin", len(self.valid_codes), len(COIN_CODES))
         except Exception as e:
             logger.exception("load_markets failed: %s", e)
 
@@ -397,7 +398,7 @@ class MarketDataCache:
         df = df.dropna(subset=required).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df if not df.empty else None
 
-    # ---------- قیمت از CoinGecko (پشتیبان نهایی) ----------
+    # ---------- قیمت از CoinGecko (پشتیبان) ----------
     def _get_coingecko_prices(self, codes):
         prices = {}
         try:
@@ -407,14 +408,14 @@ class MarketDataCache:
                 "AVAX": "avalanche-2", "BCH": "bitcoin-cash", "BLUR": "blur", "BTC": "bitcoin",
                 "COMP": "compound-governance-token", "DOGE": "dogecoin", "DOT": "polkadot",
                 "EGLD": "elrond-erd-2", "ETC": "ethereum-classic", "ETH": "ethereum",
-                "FET": "fetch-ai", "FIL": "filecoin", "FLOW": "flow", "GALA": "gala",
+                "FET": "fetch-ai", "FIL": "filecoin", "FLOW": "flow",
                 "GRT": "the-graph", "ICP": "internet-computer", "INJ": "injective-protocol",
                 "KAS": "kaspa", "KAVA": "kava", "KSM": "kusama", "LINK": "chainlink",
                 "LTC": "litecoin", "LUNC": "terra-luna-classic", "MANA": "decentraland",
                 "MINA": "mina-protocol", "NEAR": "near", "NEO": "neo", "OP": "optimism",
                 "POL": "polygon-ecosystem-token", "RUNE": "thorchain", "SAND": "the-sandbox",
                 "SHIB": "shiba-inu", "SOL": "solana", "STX": "blockstack", "SUI": "sui",
-                "TON": "the-open-network", "TRX": "tron", "UNI": "uniswap",
+                "TRX": "tron", "UNI": "uniswap",
                 "VET": "vechain", "XLM": "stellar", "XMR": "monero", "XRP": "ripple",
             }
             ids = [ids_map[code] for code in codes if code in ids_map]
@@ -540,7 +541,6 @@ class MarketDataCache:
             return 0.0
 
     async def _calculate_sentiment_score(self, code, ind):
-        """محاسبه نمره احساسات ترکیبی (جایگزین فاندینگ) با await صحیح"""
         price_change_1h = 0
         price_change_4h = 0
         price_change_24h = 0
@@ -564,7 +564,7 @@ class MarketDataCache:
             volume_score = -0.5
         else:
             volume_score = 0.0
-        fg_value, _ = await get_fear_greed()  # ← await اضافه شد
+        fg_value, _ = await get_fear_greed()
         if fg_value is not None:
             fg_score = (fg_value - 50) / 50
             fg_score = max(-1, min(1, fg_score))
@@ -600,16 +600,13 @@ class MarketDataCache:
         source = self.source_for_code(code)
 
         async with self._sem:
-            # انتخاب صرافی بر اساس منبع
             exchanges = []
             if source == "gateio":
                 exchanges = [(exchange_gateio, "gateio")]
             elif source == "kucoin":
                 exchanges = [(exchange_spot_kucoin, "kucoin")]
-            elif source == "coingecko":
-                exchanges = []  # CoinGecko از طریق API جداگانه
             else:
-                exchanges = [(exchange_gateio, "gateio"), (exchange_spot_kucoin, "kucoin")]
+                return None
 
             for ex, name in exchanges:
                 for attempt in range(3):
@@ -626,29 +623,6 @@ class MarketDataCache:
                         wait = 2 ** attempt
                         logger.warning(f"OHLCV {code} {timeframe} from {name} attempt {attempt} failed: {e}, wait {wait}s")
                         await asyncio.sleep(wait)
-
-            # Fallback برای CoinGecko (فقط برای تایم‌فریم‌های خاص)
-            if source == "coingecko" or (source not in ["gateio", "kucoin"]):
-                try:
-                    url = f"https://api.coingecko.com/api/v3/coins/{code}/market_chart"
-                    days_map = {"5m": 1, "15m": 1, "1h": 7, "4h": 14, "1d": 30}
-                    days = days_map.get(timeframe, 7)
-                    r = requests.get(url, params={"vs_currency": "usd", "days": days}, timeout=10)
-                    if r.status_code == 200:
-                        data = r.json()
-                        prices = data.get("prices", [])
-                        if len(prices) > 10:
-                            df = pd.DataFrame(prices, columns=["timestamp", "close"])
-                            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-                            df["open"] = df["close"]
-                            df["high"] = df["close"]
-                            df["low"] = df["close"]
-                            df["volume"] = 0
-                            df = df[["timestamp", "open", "high", "low", "close", "volume"]]
-                            return df
-                except Exception as e:
-                    logger.warning(f"CoinGecko OHLCV fallback failed for {code}: {e}")
-
             logger.warning(f"OHLCV {code} {timeframe} failed from all sources")
             return None
 
@@ -782,7 +756,7 @@ class MarketDataCache:
                 "ema20": ema20_value, "ema50": ema50_value, "ema200": ema200_value,
                 "price_above_ema20": price > ema20_value,
                 "price_above_ema50": price > ema50_value,
-                "price_above_trend": price > ema200_value,
+                "price_above_ema200": price > ema200_value,  # ← اضافه شد
                 "price_ema50_pct": price_ema50_pct,
                 "price_ema200_pct": price_ema200_pct,
                 "ema20_above_ema50": ema20_value > ema50_value,
@@ -946,14 +920,14 @@ def rtl_lines(text):
     return "\n".join((RLM + line) if line.strip() else line for line in text.split("\n"))
 
 def confidence_badge(confidence):
-    if confidence >= 90: return "🔥🔥 فوق‌العاده قوی"
-    if confidence >= 85: return "🔥 خیلی قوی"
-    if confidence >= 80: return "⚡ قوی"
-    if confidence >= 75: return "✨ نسبتاً قوی"
-    if confidence >= 70: return "💫 متوسط رو به بالا"
-    if confidence >= 65: return "🌤 متوسط"
-    if confidence >= 60: return "🌥 قابل بررسی"
-    return "💤 ضعیف"
+    if confidence >= 90: return "فوق‌العاده قوی 🔥🔥"
+    if confidence >= 85: return "خیلی قوی 🔥"
+    if confidence >= 80: return "قوی ⚡"
+    if confidence >= 75: return "نسبتاً قوی ✨"
+    if confidence >= 70: return "متوسط رو به بالا 💫"
+    if confidence >= 65: return "متوسط 🌤"
+    if confidence >= 60: return "قابل بررسی 🌥"
+    return "ضعیف 💤"
 
 def signal_grade(confidence):
     if confidence >= 85: return "A (بسیار قوی)"
@@ -1319,7 +1293,7 @@ async def analyze_layers(code, direction, ind, mode, cache_obj):
     # ۴. حجم
     results["volume"] = ind["volume_ratio"] >= 1.5 or ind["volume_spike"]
 
-    # ۵. احساسات بازار (جایگزین فاندینگ) - با await صحیح
+    # ۵. احساسات بازار (جایگزین فاندینگ)
     sentiment_score = await cache_obj._calculate_sentiment_score(code, ind)
     if direction == "LONG":
         results["sentiment"] = sentiment_score > 0.2
@@ -1524,41 +1498,41 @@ def calc_liquidation_price(direction, entry, leverage):
 def signal_reasons(direction, ind, mode):
     reasons, warnings = [], []
     if direction == "LONG":
-        if ind["price_above_ema200"]: reasons.append("قیمت بالای EMA200")
-        if ind["ema20_above_ema50"]: reasons.append("EMA20 بالای EMA50")
-        if ind["ema20_bullish_cross"]: reasons.append("کراس صعودی EMA20/EMA50")
-        if ind["macd_hist"] > 0: reasons.append("MACD مثبت")
-        if ind["plus_di"] > ind["minus_di"]: reasons.append("+DI > -DI")
-        if ind["adx"] >= 25: reasons.append(f"ADX = {ind['adx']:.1f}")
-        if ind["volume_ratio"] >= 1.5: reasons.append(f"حجم غیرعادی = {ind['volume_ratio']:.1f}×")
-        elif ind["volume_ratio"] >= 1: reasons.append(f"حجم = {ind['volume_ratio']:.1f}× میانگین")
-        if ind["higher_tf_trend_up"]: reasons.append("تأیید تایم‌فریم بالاتر")
-        if ind["price_above_vwap"]: reasons.append("قیمت بالای VWAP")
-        if ind["roc"] > 0: reasons.append("ROC مثبت")
-        if ind["cci"] > 0: reasons.append("CCI مثبت")
-        if ind["breakout_up"]: reasons.append("شکست مقاومت (Breakout)")
-        if ind["bullish_div"]: reasons.append("واگرایی مثبت RSI")
-        if ind["macd_bullish_div"]: reasons.append("واگرایی مثبت MACD")
-        if ind["rsi"] >= 68: warnings.append(f"RSI = {ind['rsi']:.1f} — نزدیک اشباع خرید")
-        if ind["williams_r"] > -20: warnings.append(f"Williams %R = {ind['williams_r']:.1f} — اشباع خرید")
+        if ind.get("price_above_ema200", False): reasons.append("قیمت بالای EMA200")
+        if ind.get("ema20_above_ema50", False): reasons.append("EMA20 بالای EMA50")
+        if ind.get("ema20_bullish_cross", False): reasons.append("کراس صعودی EMA20/EMA50")
+        if ind.get("macd_hist", 0) > 0: reasons.append("MACD مثبت")
+        if ind.get("plus_di", 0) > ind.get("minus_di", 0): reasons.append("+DI > -DI")
+        if ind.get("adx", 0) >= 25: reasons.append(f"ADX = {ind['adx']:.1f}")
+        if ind.get("volume_ratio", 1) >= 1.5: reasons.append(f"حجم غیرعادی = {ind['volume_ratio']:.1f}×")
+        elif ind.get("volume_ratio", 1) >= 1: reasons.append(f"حجم = {ind['volume_ratio']:.1f}× میانگین")
+        if ind.get("higher_tf_trend_up", False): reasons.append("تأیید تایم‌فریم بالاتر")
+        if ind.get("price_above_vwap", False): reasons.append("قیمت بالای VWAP")
+        if ind.get("roc", 0) > 0: reasons.append("ROC مثبت")
+        if ind.get("cci", 0) > 0: reasons.append("CCI مثبت")
+        if ind.get("breakout_up", False): reasons.append("شکست مقاومت")
+        if ind.get("bullish_div", False): reasons.append("واگرایی مثبت RSI")
+        if ind.get("macd_bullish_div", False): reasons.append("واگرایی مثبت MACD")
+        if ind.get("rsi", 0) >= 68: warnings.append(f"RSI = {ind['rsi']:.1f} — نزدیک اشباع خرید")
+        if ind.get("williams_r", 0) > -20: warnings.append(f"Williams %R = {ind['williams_r']:.1f} — اشباع خرید")
     else:
-        if not ind["price_above_ema200"]: reasons.append("قیمت زیر EMA200")
-        if not ind["ema20_above_ema50"]: reasons.append("EMA20 زیر EMA50")
-        if ind["ema20_bearish_cross"]: reasons.append("کراس نزولی EMA20/EMA50")
-        if ind["macd_hist"] < 0: reasons.append("MACD منفی")
-        if ind["minus_di"] > ind["plus_di"]: reasons.append("-DI > +DI")
-        if ind["adx"] >= 25: reasons.append(f"ADX = {ind['adx']:.1f}")
-        if ind["volume_ratio"] >= 1.5: reasons.append(f"حجم غیرعادی = {ind['volume_ratio']:.1f}×")
-        elif ind["volume_ratio"] >= 1: reasons.append(f"حجم = {ind['volume_ratio']:.1f}× میانگین")
-        if ind["higher_tf_trend_down"]: reasons.append("تأیید تایم‌فریم بالاتر")
-        if not ind["price_above_vwap"]: reasons.append("قیمت زیر VWAP")
-        if ind["roc"] < 0: reasons.append("ROC منفی")
-        if ind["cci"] < 0: reasons.append("CCI منفی")
-        if ind["breakout_down"]: reasons.append("شکست حمایت (Breakdown)")
-        if ind["bearish_div"]: reasons.append("واگرایی منفی RSI")
-        if ind["macd_bearish_div"]: reasons.append("واگرایی منفی MACD")
-        if ind["rsi"] <= 32: warnings.append(f"RSI = {ind['rsi']:.1f} — نزدیک اشباع فروش")
-        if ind["williams_r"] < -80: warnings.append(f"Williams %R = {ind['williams_r']:.1f} — اشباع فروش")
+        if not ind.get("price_above_ema200", True): reasons.append("قیمت زیر EMA200")
+        if not ind.get("ema20_above_ema50", True): reasons.append("EMA20 زیر EMA50")
+        if ind.get("ema20_bearish_cross", False): reasons.append("کراس نزولی EMA20/EMA50")
+        if ind.get("macd_hist", 0) < 0: reasons.append("MACD منفی")
+        if ind.get("minus_di", 0) > ind.get("plus_di", 0): reasons.append("-DI > +DI")
+        if ind.get("adx", 0) >= 25: reasons.append(f"ADX = {ind['adx']:.1f}")
+        if ind.get("volume_ratio", 1) >= 1.5: reasons.append(f"حجم غیرعادی = {ind['volume_ratio']:.1f}×")
+        elif ind.get("volume_ratio", 1) >= 1: reasons.append(f"حجم = {ind['volume_ratio']:.1f}× میانگین")
+        if ind.get("higher_tf_trend_down", False): reasons.append("تأیید تایم‌فریم بالاتر")
+        if not ind.get("price_above_vwap", True): reasons.append("قیمت زیر VWAP")
+        if ind.get("roc", 0) < 0: reasons.append("ROC منفی")
+        if ind.get("cci", 0) < 0: reasons.append("CCI منفی")
+        if ind.get("breakout_down", False): reasons.append("شکست حمایت")
+        if ind.get("bearish_div", False): reasons.append("واگرایی منفی RSI")
+        if ind.get("macd_bearish_div", False): reasons.append("واگرایی منفی MACD")
+        if ind.get("rsi", 0) <= 32: warnings.append(f"RSI = {ind['rsi']:.1f} — نزدیک اشباع فروش")
+        if ind.get("williams_r", 0) < -80: warnings.append(f"Williams %R = {ind['williams_r']:.1f} — اشباع فروش")
     return reasons, warnings
 
 def record_signal(plan):
@@ -1607,7 +1581,7 @@ def update_signal_status(symbol, current_price):
 
 # ---------- فرمت‌سازی ----------
 def format_main_signal_v2(plan, code, chat_id):
-    direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
+    direction = "لانگ 🟢" if plan.direction == "LONG" else "شورت 🔴"
     mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
 
     layers_text = ""
@@ -1618,13 +1592,13 @@ def format_main_signal_v2(plan, code, chat_id):
     grade_emoji = {"A": "🔥", "B": "⚡", "C": "📊", "D": "💤"}.get(plan.signal_grade[:1], "📊")
 
     text = (
-        f"{grade_emoji} *سیگنال نهادی {direction}* | {code}/USDT\n"
+        f"{grade_emoji} *سیگنال نهادی* | {code}/USDT | {direction}\n"
         f"🕒 {shamsi_now()}\n"
         f"🛠️ حالت: {mode_label} | درجه: {plan.signal_grade}\n"
         f"{DIVIDER}\n"
         f"🧩 *تحلیل ۱۰ لایه‌ای:*\n{layers_text}\n"
         f"🎯 *اطمینان:* {plan.confidence:.0f}٪ ({confidence_badge(plan.confidence)})\n"
-        f"📊 *نرخ موفقیت تخمینی:* {plan.win_rate_estimate:.1f}٪\n"
+        f"📊 *نرخ موفقیت:* {plan.win_rate_estimate:.1f}٪\n"
         f"📐 *نسبت ریسک به بازده:* 1:{plan.rr:.2f}\n"
         f"{DIVIDER}\n"
         f"📥 *ورود پله‌ای:*\n"
@@ -1641,7 +1615,7 @@ def format_main_signal_v2(plan, code, chat_id):
         f"💰 *مدیریت ریسک:* حداکثر ۱.۲٪ سرمایه\n"
         f"🔔 *نکته:* پس از رسیدن به TP1، حد ضرر را به Entry منتقل کنید.\n"
         f"{DIVIDER}\n"
-        f"⚠️ این تحلیل تکنیکال است و تضمین سود یا توصیه مالی نمی‌باشد."
+        f"⚠️ تحلیل تکنیکال است و تضمین سود یا توصیه مالی نیست."
     )
     return rtl_lines(text)
 
@@ -1687,21 +1661,21 @@ def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, sh
             short_weight = sum(LAYER_WEIGHTS.get(layer, 0) for layer, ok in short_layers.items() if ok)
             layers_summary = (
                 f"📋 *خلاصه تحلیل لایه‌ها:*\n"
-                f"🟢 لانگ: {long_confirmed} لایه تأیید | امتیاز وزنی: {long_weight}%\n"
-                f"🔴 شورت: {short_confirmed} لایه تأیید | امتیاز وزنی: {short_weight}%\n"
-                f"📊 اختلاف امتیاز: {abs(long_weight - short_weight):.0f}%\n"
+                f"🟢 لانگ: {long_confirmed} لایه تأیید | امتیاز: {long_weight}%\n"
+                f"🔴 شورت: {short_confirmed} لایه تأیید | امتیاز: {short_weight}%\n"
+                f"📊 اختلاف: {abs(long_weight - short_weight):.0f}%\n"
             )
             reasons_no_signal = []
             if ind['adx'] < config['adx_min']:
                 reasons_no_signal.append(f"⚠️ ADX پایین است ({ind['adx']:.1f} < {config['adx_min']})")
             if long_confirmed < config['min_confirmations'] and short_confirmed < config['min_confirmations']:
-                reasons_no_signal.append(f"⚠️ تعداد لایه‌های تأییدشده کمتر از حداقل مورد نیاز ({config['min_confirmations']}) است")
+                reasons_no_signal.append(f"⚠️ تعداد لایه‌ها کمتر از حد نیاز ({config['min_confirmations']}) است")
             if abs(long_weight - short_weight) < MIN_DIRECTION_GAP:
                 reasons_no_signal.append(f"⚠️ اختلاف امتیاز دو جهت کمتر از {MIN_DIRECTION_GAP} است")
             if reasons_no_signal:
                 layers_summary += f"\n💡 *دلایل عدم سیگنال:*\n" + "\n".join(reasons_no_signal)
             else:
-                layers_summary += f"\n💡 *وضعیت:* شرایط برای سیگنال‌دهی مناسب نیست (احتمالاً بازار رنج)"
+                layers_summary += f"\n💡 *وضعیت:* شرایط برای سیگنال‌دهی مناسب نیست"
         else:
             layers_summary = "📋 در حال تحلیل لایه‌ها..."
 
@@ -1709,33 +1683,32 @@ def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, sh
     price_text = (
         f"💰 قیمت: {fmt_amount(price, chat_id)}\n"
         f"📊 تغییرات ۲۴h: {change_24h:+.2f}%\n"
-        f"📈 بالاترین ۲۴h: {fmt_amount(high_24h, chat_id)} | 📉 پایین‌ترین ۲۴h: {fmt_amount(low_24h, chat_id)}\n"
+        f"📈 بالا: {fmt_amount(high_24h, chat_id)} | 📉 پایین: {fmt_amount(low_24h, chat_id)}\n"
         f"{DIVIDER}\n"
-        f"📈 روند EMA200: {ind['trend_label']}\n"
+        f"📈 روند: {ind['trend_label']}\n"
         f"📊 قیمت نسبت به EMA20: {ema20_pos} | EMA50: {ema50_pos}\n"
         f"🎯 RSI: {ind['rsi']:.1f}\n"
         f"💪 ADX: {ind['adx']:.1f}\n"
         f"📊 MACD: {macd_status}\n"
-        f"📊 حجم معاملات: {ind['volume_ratio']:.2f}× میانگین {' 🔊' if ind['volume_spike'] else ''}\n"
+        f"📊 حجم: {ind['volume_ratio']:.2f}× میانگین {' 🔊' if ind['volume_spike'] else ''}\n"
         f"{DIVIDER}\n"
-        f"📊 حمایت نزدیک: {fmt_amount(support, chat_id)} | مقاومت نزدیک: {fmt_amount(resistance, chat_id)}\n"
-        f"📊 حمایت دوم: {fmt_amount(support_2, chat_id)} | مقاومت دوم: {fmt_amount(resistance_2, chat_id)}\n"
+        f"📊 حمایت: {fmt_amount(support, chat_id)} | مقاومت: {fmt_amount(resistance, chat_id)}\n"
     )
 
     if plan and plan.confidence >= MIN_SIGNAL_CONFIDENCE:
         footer = (
             f"\n{DIVIDER}\n"
             f"🎯 اطمینان: {plan.confidence:.0f}٪\n"
-            f"⚡ اهرم پیشنهادی: {plan.leverage}x\n"
-            f"📐 نسبت ریسک به بازده: 1:{plan.rr:.2f}\n"
-            f"📊 نرخ موفقیت تخمینی: {plan.win_rate_estimate:.1f}٪\n"
+            f"⚡ اهرم: {plan.leverage}x\n"
+            f"📐 RR: 1:{plan.rr:.2f}\n"
+            f"📊 نرخ موفقیت: {plan.win_rate_estimate:.1f}٪\n"
             f"{DIVIDER}\n"
-            f"⚠️ مدیریت ریسک: حد ضرر را روی {fmt_amount(plan.sl_price, chat_id)} قرار دهید."
+            f"⚠️ حد ضرر: {fmt_amount(plan.sl_price, chat_id)}"
         )
     else:
         footer = f"\n{DIVIDER}\n💤 در حال حاضر سیگنال نهایی وجود ندارد."
 
-    return rtl_lines(header + price_text + layers_summary + footer + f"\n{DIVIDER}\n⚠️ این تحلیل تکنیکال است و تضمین سود نیست.")
+    return rtl_lines(header + price_text + layers_summary + footer + f"\n{DIVIDER}\n⚠️ تحلیل تکنیکال است و تضمین سود نیست.")
 
 # ---------- توابع اصلی ----------
 async def generate_trade_plan(code, mode="standard"):
@@ -1880,6 +1853,104 @@ def format_prices_pretty(prices, chat_id):
             lines.append(f"{code} ⚠️ قیمت در دسترس نیست")
     return rtl_lines("\n".join(lines))
 
+# ---------- دکمه جدید «تحلیل جامع» برای ادمین ----------
+async def comprehensive_analysis(update, context):
+    """تحلیل همه ارزها و نمایش سیگنال‌های فعال"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not is_admin_role(chat_id):
+        await query.answer("⛔️ فقط ادمین.", show_alert=True)
+        return
+
+    await query.edit_message_text("⏳ در حال تحلیل همه ارزها...")
+
+    try:
+        # دریافت داده‌های مورد نیاز
+        await cache.update_prices(force=True)
+        await cache.update_ohlcv(force=True)
+
+        active_signals_list = []
+        mode = "standard"  # حالت پیش‌فرض برای تحلیل جامع
+
+        for code in COIN_CODES:
+            try:
+                ind = await cache.get_indicators(code, mode)
+                if not ind:
+                    continue
+
+                plan = await generate_trade_plan_v2(code, mode)
+                if plan and plan.confidence >= MIN_SIGNAL_CONFIDENCE:
+                    active_signals_list.append({
+                        "code": code,
+                        "direction": plan.direction,
+                        "confidence": plan.confidence,
+                        "rr": plan.rr,
+                        "mode": plan.mode,
+                        "entry": plan.entry_price,
+                        "sl": plan.sl_price,
+                        "tp1": plan.take_profits[0] if plan.take_profits else 0,
+                    })
+                await asyncio.sleep(0.2)  # جلوگیری از Rate Limit
+            except Exception as e:
+                logger.debug(f"Comprehensive analysis error for {code}: {e}")
+                continue
+
+        if not active_signals_list:
+            await query.edit_message_text(
+                "📊 *تحلیل جامع ارزها*\n"
+                f"{DIVIDER}\n"
+                "💤 هیچ سیگنال فعالی یافت نشد.\n\n"
+                "دلایل احتمالی:\n"
+                "• ADX پایین (بازار رنج)\n"
+                "• تعداد لایه‌های تأییدشده کمتر از حد نیاز\n"
+                "• نسبت ریسک به بازده پایین",
+                reply_markup=kb_back_main(),
+                parse_mode="Markdown"
+            )
+            return
+
+        # ساخت خروجی
+        text = "📊 *تحلیل جامع ارزها*\n"
+        text += f"🕒 {shamsi_now()}\n{DIVIDER}\n"
+
+        long_count = 0
+        short_count = 0
+
+        for signal in active_signals_list:
+            direction_emoji = "🟢" if signal["direction"] == "LONG" else "🔴"
+            direction_text = "لانگ" if signal["direction"] == "LONG" else "شورت"
+            mode_label = MODE_CONFIGS.get(signal["mode"], MODE_CONFIGS["standard"])["label"]
+
+            if signal["direction"] == "LONG":
+                long_count += 1
+            else:
+                short_count += 1
+
+            text += (
+                f"{direction_emoji} {signal['code']} | {direction_text}\n"
+                f"   اطمینان: {signal['confidence']:.0f}% | RR: {signal['rr']:.2f} | {mode_label}\n"
+                f"   📥 ورود: {fmt_amount(signal['entry'], chat_id)}\n"
+                f"   🛑 حد ضرر: {fmt_amount(signal['sl'], chat_id)}\n"
+                f"   🎯 TP1: {fmt_amount(signal['tp1'], chat_id)}\n"
+                f"{DIVIDER}\n"
+            )
+
+        text += f"📊 جمع‌بندی: {len(active_signals_list)} سیگنال فعال\n"
+        text += f"🟢 لانگ: {long_count} | 🔴 شورت: {short_count}"
+
+        # ارسال با دکمه بازگشت
+        chunks = split_long_message(text)
+        await query.edit_message_text(chunks[0], reply_markup=kb_back_main(), parse_mode="Markdown")
+        for chunk in chunks[1:]:
+            await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.exception(f"Comprehensive analysis error: {e}")
+        await query.edit_message_text(f"❌ خطا در تحلیل جامع:\n{str(e)}", reply_markup=kb_back_main())
+
+# ---------- ادامه کدهای قبلی (کیبوردها، منوها، هندلرها) ----------
 def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
     if len(text) <= limit:
         return [text]
@@ -1924,31 +1995,31 @@ def build_grid_keyboard(buttons, columns):
 
 def kb_currency():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💵 دلار (USDT)", callback_data="cur_USDT")],
-        [InlineKeyboardButton("💴 تومان (IRT)", callback_data="cur_IRT")],
-        [InlineKeyboardButton("💱 هر دو", callback_data="cur_BOTH")],
+        [InlineKeyboardButton("دلار (USDT) 💵", callback_data="cur_USDT")],
+        [InlineKeyboardButton("تومان (IRT) 💴", callback_data="cur_IRT")],
+        [InlineKeyboardButton("هر دو 💱", callback_data="cur_BOTH")],
     ])
 
 def kb_role_selection():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👑 ادمین", callback_data="role_admin")],
-        [InlineKeyboardButton("👤 کاربر عادی", callback_data="role_user")],
+        [InlineKeyboardButton("ادمین 👑", callback_data="role_admin")],
+        [InlineKeyboardButton("کاربر عادی 👤", callback_data="role_user")],
     ])
 
 def kb_mode_selection():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ سریع", callback_data="mode_fast")],
-        [InlineKeyboardButton("🔥 نیمه‌سریع", callback_data="mode_semi_fast")],
-        [InlineKeyboardButton("📊 استاندارد", callback_data="mode_standard")],
-        [InlineKeyboardButton("🛡️ محافظه‌کار", callback_data="mode_conservative")],
+        [InlineKeyboardButton("سریع ⚡", callback_data="mode_fast")],
+        [InlineKeyboardButton("نیمه‌سریع 🔥", callback_data="mode_semi_fast")],
+        [InlineKeyboardButton("استاندارد 📊", callback_data="mode_standard")],
+        [InlineKeyboardButton("محافظه‌کار 🛡️", callback_data="mode_conservative")],
     ])
 
 def kb_mode_selection_for_action(action, code):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚡ سریع", callback_data=f"run_{action}_{code}_fast")],
-        [InlineKeyboardButton("🔥 نیمه‌سریع", callback_data=f"run_{action}_{code}_semi_fast")],
-        [InlineKeyboardButton("📊 استاندارد", callback_data=f"run_{action}_{code}_standard")],
-        [InlineKeyboardButton("🛡️ محافظه‌کار", callback_data=f"run_{action}_{code}_conservative")],
+        [InlineKeyboardButton("سریع ⚡", callback_data=f"run_{action}_{code}_fast")],
+        [InlineKeyboardButton("نیمه‌سریع 🔥", callback_data=f"run_{action}_{code}_semi_fast")],
+        [InlineKeyboardButton("استاندارد 📊", callback_data=f"run_{action}_{code}_standard")],
+        [InlineKeyboardButton("محافظه‌کار 🛡️", callback_data=f"run_{action}_{code}_conservative")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data=f"coin_{code}")],
     ])
 
@@ -1974,6 +2045,7 @@ def kb_main(user_id, mode="standard"):
 
 def kb_admin_panel():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 تحلیل جامع", callback_data="comprehensive_analysis")],
         [InlineKeyboardButton("🔄 بروزرسانی کامل", callback_data="menu_all")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")],
     ])
@@ -2210,7 +2282,6 @@ async def trailing_monitor_loop(app):
                             elif source == "kucoin":
                                 ticker = await asyncio.to_thread(exchange_spot_kucoin.fetch_ticker, cache.symbol_for_code(code))
                             else:
-                                # CoinGecko برای قیمت لحظه‌ای مناسب نیست، از قیمت کش استفاده کنید
                                 current = cache.prices.get(code, 0)
                                 if current > 0:
                                     update_signal_status(code, current)
@@ -2474,6 +2545,11 @@ async def button_handler(update, context):
     query = update.callback_query; await query.answer()
     data = query.data; chat_id = update.effective_chat.id; user_id = update.effective_user.id
     if data == "noop": return
+
+    # دکمه جدید تحلیل جامع
+    if data == "comprehensive_analysis":
+        await comprehensive_analysis(update, context)
+        return
 
     if data == "role_admin":
         user_role[chat_id] = "admin"
@@ -2950,7 +3026,7 @@ async def button_handler(update, context):
         return
 
 def format_technical_details(code, plan, ind, chat_id):
-    direction = "🟢 لانگ (خرید)" if plan.direction == "LONG" else "🔴 شورت (فروش)"
+    direction = "لانگ 🟢" if plan.direction == "LONG" else "شورت 🔴"
     reasons_text = "\n".join(f" ✅ {x}" for x in plan.reasons[:15])
     warnings_text = "\n" + "\n".join(f" ⚠️ {x}" for x in plan.warnings) if plan.warnings else ""
     text = (
@@ -2979,7 +3055,7 @@ def format_technical_details(code, plan, ind, chat_id):
         f"ATR: {fmt_amount(ind['atr'], chat_id)} ({ind['atr_pct']:.2f}%)\n"
         f"حمایت: {fmt_amount(ind['support'], chat_id)} | مقاومت: {fmt_amount(ind['resistance'], chat_id)}\n"
         f"{DIVIDER}\n"
-        f"⚠️ این تحلیل تکنیکال است و تضمین سود نیست."
+        f"⚠️ تحلیل تکنیکال است و تضمین سود نیست."
     )
     return rtl_lines(text)
 
@@ -3053,7 +3129,7 @@ async def post_init(app):
     app.create_task(news_monitor_loop(app))
     app.create_task(whale_monitor_loop(app))
     app.create_task(macro_event_monitor_loop(app))
-    logger.info("Signal Bot V56 (Gate.io + KuCoin + CoinGecko, Fixed await) started")
+    logger.info("Signal Bot V57 (Comprehensive Analysis) started")
 
 def main():
     if not BOT_TOKEN:
