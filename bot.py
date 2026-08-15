@@ -2,7 +2,7 @@
 Telegram Signal Bot V60 - Institutional Grade with Intelligence Center
 - کانال تلگرام + ارسال خودکار سیگنال‌ها
 - لایه واکنش سریع برای جلوگیری از فرصت‌سوزی در بازار فیوچرز
-- دکمه دریافت سیگنال‌های فعال برای همه کاربران
+- دکمه دریافت سیگنال‌های فعال + آمار سیگنال‌ها
 - رفع Rate Limit و XMR
 - سیگنال‌دهی متعادل برای تمام رژیم‌های بازار
 - حذف پیام‌های تأیید پس از انتخاب واحد پولی/حالت معاملاتی
@@ -1466,8 +1466,7 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
         results["comp_trend"] = ind["minus_di"] > ind["plus_di"]
 
     return results
-
-# ---------- تولید سیگنال جدید ----------
+    # ---------- تولید سیگنال جدید ----------
 async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False):
     global app
     try:
@@ -1730,8 +1729,7 @@ def update_signal_status(symbol, current_price):
         if rec["status"] != old_status:
             changed.append(rec["signal_id"])
     return changed
-
-# ---------- فرمت‌سازی ----------
+    # ---------- فرمت‌سازی ----------
 def format_main_signal_v2(plan, code, chat_id):
     direction = "لانگ 🟢" if plan.direction == "LONG" else "شورت 🔴"
     mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
@@ -2109,8 +2107,7 @@ async def send_high_importance_news_to_channel(news_text):
         logger.info("High importance news sent to channel")
     except Exception as e:
         logger.error(f"Failed to send news to channel: {e}")
-
-# ---------- حلقه مستقل کانال ----------
+        # ---------- حلقه مستقل کانال ----------
 async def channel_broadcast_loop(app):
     await asyncio.sleep(20)
     interval = int(os.getenv("CHANNEL_BROADCAST_INTERVAL", "300"))
@@ -2185,6 +2182,167 @@ async def trigger_scanner_loop(app):
         except Exception as e:
             logger.exception("Trigger scanner error: %s", e)
         await asyncio.sleep(TRIGGER_SCAN_INTERVAL)
+
+# ---------- توابع آمار سیگنال‌ها ----------
+def format_signal_history_page(filter_type: str, page: int = 0, per_page: int = 20):
+    """filter_type: 'success' یا 'failed'"""
+    if filter_type == "success":
+        records = [r for r in signal_history if r["status"].startswith("tp")]
+        title = "✅ *تاریخچه سیگنال‌های موفق*"
+    else:
+        records = [r for r in signal_history if r["status"] == "sl_hit"]
+        title = "❌ *تاریخچه سیگنال‌های ناموفق*"
+
+    records = sorted(records, key=lambda x: x["timestamp"], reverse=True)
+    total = len(records)
+    total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+    page = max(0, min(page, total_pages - 1))
+    start = page * per_page
+    end = start + per_page
+    page_records = records[start:end]
+
+    if not page_records:
+        text = f"{title}\n\nهیچ سیگنالی ثبت نشده است."
+    else:
+        text = f"{title}\n{DIVIDER}\n"
+        for rec in page_records:
+            date_str = shamsi_date(datetime.fromtimestamp(rec["timestamp"]))
+            symbol = rec["symbol"]
+            direction = "لانگ 🟢" if rec["direction"] == "LONG" else "شورت 🔴"
+            status = "TP1" if rec["status"] == "tp1_hit" else "TP2" if rec["status"] == "tp2_hit" else "TP3" if rec["status"] == "tp3_hit" else "SL"
+            mode_label = MODE_CONFIGS.get(rec["mode"], MODE_CONFIGS["standard"])["label"]
+            if rec["status"].startswith("tp"):
+                # تعیین قیمت تارگت خورده
+                if rec["status"] == "tp1_hit":
+                    price_hit = rec["tp_prices"][0]
+                elif rec["status"] == "tp2_hit":
+                    price_hit = rec["tp_prices"][1]
+                else:
+                    price_hit = rec["tp_prices"][2]
+                price_text = format_channel_price(price_hit)
+            else:
+                price_text = format_channel_price(rec["sl_price"])
+            text += (
+                f"{symbol} | {direction} | {mode_label}\n"
+                f"   تاریخ: {date_str}\n"
+                f"   وضعیت: {status} @ {price_text}\n"
+                f"{DIVIDER}\n"
+            )
+
+    buttons = []
+    if page > 0:
+        buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"stats_{filter_type}_page_{page-1}"))
+    if page < total_pages - 1:
+        buttons.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"stats_{filter_type}_page_{page+1}"))
+    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="stats_history_menu")])
+    keyboard = InlineKeyboardMarkup(rows)
+    return text, keyboard
+
+def format_coin_ranking(success: bool = True, top_n: int = 20):
+    if success:
+        records = [r for r in signal_history if r["status"].startswith("tp")]
+        title = "🏆 *بیشترین ارزهای موفق*"
+    else:
+        records = [r for r in signal_history if r["status"] == "sl_hit"]
+        title = "💔 *بیشترین ارزهای ناموفق*"
+
+    counts = {}
+    for rec in records:
+        sym = rec["symbol"]
+        counts[sym] = counts.get(sym, 0) + 1
+
+    sorted_coins = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    if not sorted_coins:
+        text = f"{title}\n\nهیچ داده‌ای موجود نیست."
+    else:
+        text = f"{title}\n{DIVIDER}\n"
+        for i, (sym, cnt) in enumerate(sorted_coins, 1):
+            text += f"{i}. {sym} — {cnt} سیگنال\n"
+        text += f"{DIVIDER}\n"
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="stats_menu")]
+    ])
+    return text, keyboard
+
+# ---------- توابع منوهای آمار ----------
+async def stats_menu(update, context):
+    query = update.callback_query
+    await query.answer()
+    text = "📊 *آمار سیگنال‌ها*\n" + DIVIDER + "\n" + MENU_PROMPT
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏆 بیشترین ارزها", callback_data="stats_top_coins_menu")],
+        [InlineKeyboardButton("📋 آخرین سیگنال‌ها", callback_data="stats_recent_signals_menu")],
+        [InlineKeyboardButton("📜 تاریخچه سیگنال‌ها", callback_data="stats_history_menu")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")],
+    ])
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    set_interactive_screen(query.message.chat_id, [query.message.message_id])
+
+async def stats_top_coins_menu(update, context):
+    query = update.callback_query
+    await query.answer()
+    text = "🏆 *بیشترین ارزها*\n" + DIVIDER + "\n" + MENU_PROMPT
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏆 ارزهای موفق", callback_data="stats_success_coins")],
+        [InlineKeyboardButton("💔 ارزهای ناموفق", callback_data="stats_failed_coins")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="stats_menu")],
+    ])
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    set_interactive_screen(query.message.chat_id, [query.message.message_id])
+
+async def stats_recent_signals_menu(update, context):
+    query = update.callback_query
+    await query.answer()
+    text = "📋 *آخرین سیگنال‌ها*\n" + DIVIDER + "\n" + MENU_PROMPT
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ سیگنال‌های موفق", callback_data="stats_recent_success_page_0")],
+        [InlineKeyboardButton("❌ سیگنال‌های ناموفق", callback_data="stats_recent_failed_page_0")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="stats_menu")],
+    ])
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    set_interactive_screen(query.message.chat_id, [query.message.message_id])
+
+async def stats_history_menu(update, context):
+    query = update.callback_query
+    await query.answer()
+    text = "📜 *تاریخچه سیگنال‌ها*\n" + DIVIDER + "\n" + MENU_PROMPT
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ سیگنال‌های موفق", callback_data="stats_success_page_0")],
+        [InlineKeyboardButton("❌ سیگنال‌های ناموفق", callback_data="stats_failed_page_0")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="stats_menu")],
+    ])
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    set_interactive_screen(query.message.chat_id, [query.message.message_id])
+
+async def stats_success_signals(update, context, page=0, recent=False):
+    query = update.callback_query
+    await query.answer()
+    text, keyboard = format_signal_history_page("success", page)
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    set_interactive_screen(query.message.chat_id, [query.message.message_id])
+
+async def stats_failed_signals(update, context, page=0, recent=False):
+    query = update.callback_query
+    await query.answer()
+    text, keyboard = format_signal_history_page("failed", page)
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    set_interactive_screen(query.message.chat_id, [query.message.message_id])
+
+async def stats_success_coins(update, context):
+    query = update.callback_query
+    await query.answer()
+    text, keyboard = format_coin_ranking(success=True)
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    set_interactive_screen(query.message.chat_id, [query.message.message_id])
+
+async def stats_failed_coins(update, context):
+    query = update.callback_query
+    await query.answer()
+    text, keyboard = format_coin_ranking(success=False)
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    set_interactive_screen(query.message.chat_id, [query.message.message_id])
 
 # ---------- مرکز هوشمندسازی ----------
 async def optimization_center(update, context):
@@ -2515,8 +2673,8 @@ def kb_coins(page=0):
     if nav_row:
         rows.append(nav_row)
 
-    # دکمه دریافت سیگنال‌های فعال بعد از پیمایش و قبل از بازگشت
     rows.append([InlineKeyboardButton("📡 دریافت سیگنال‌های فعال", callback_data="active_signals_all")])
+    rows.append([InlineKeyboardButton("📊 آمار سیگنال‌ها", callback_data="stats_menu")])
     rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
@@ -2755,8 +2913,7 @@ async def trailing_monitor_loop(app):
         except Exception as e:
             logger.exception("Trailing loop error | error=%s", e)
         await asyncio.sleep(TRAILING_CHECK_SECONDS)
-
-# ---------- Event/News monitor ----------
+        # ---------- Event/News monitor ----------
 async def news_monitor_loop(app):
     await asyncio.sleep(30)
     while True:
@@ -2994,8 +3151,6 @@ async def auto_report_loop(app):
                     for code, direction in current_signals.items():
                         prev = prev_signals.get(code)
                         if prev is None or prev["direction"] != direction:
-                            # Plan already generated in current_signals loop
-                            # We need to send to user but avoid duplicate channel send
                             plan = await generate_trade_plan_v2(code, mode, send_to_channel=False)
                             if plan:
                                 main_text = format_main_signal_v2(plan, code, chat_id)
@@ -3146,7 +3301,6 @@ async def periodic_report_command(update, context):
         return
     await update.message.reply_text("📊 لطفاً دوره‌ی گزارش را انتخاب کنید:", reply_markup=kb_periodic_report())
 
-# ---------- ذخیره و بارگذاری ----------
 def save_state():
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -3202,6 +3356,41 @@ async def button_handler(update, context):
     query = update.callback_query; await query.answer()
     data = query.data; chat_id = update.effective_chat.id; user_id = update.effective_user.id
     if data == "noop": return
+
+    if data == "stats_menu":
+        await stats_menu(update, context)
+        return
+    if data == "stats_top_coins_menu":
+        await stats_top_coins_menu(update, context)
+        return
+    if data == "stats_recent_signals_menu":
+        await stats_recent_signals_menu(update, context)
+        return
+    if data == "stats_history_menu":
+        await stats_history_menu(update, context)
+        return
+    if data.startswith("stats_success_page_"):
+        page = int(data.split("_")[-1])
+        await stats_success_signals(update, context, page)
+        return
+    if data.startswith("stats_failed_page_"):
+        page = int(data.split("_")[-1])
+        await stats_failed_signals(update, context, page)
+        return
+    if data.startswith("stats_recent_success_page_"):
+        page = int(data.split("_")[-1])
+        await stats_success_signals(update, context, page, recent=True)
+        return
+    if data.startswith("stats_recent_failed_page_"):
+        page = int(data.split("_")[-1])
+        await stats_failed_signals(update, context, page, recent=True)
+        return
+    if data == "stats_success_coins":
+        await stats_success_coins(update, context)
+        return
+    if data == "stats_failed_coins":
+        await stats_failed_coins(update, context)
+        return
 
     if data == "optimization_center":
         await optimization_center(update, context)
@@ -3719,7 +3908,7 @@ async def button_handler(update, context):
         if not recent_signals:
             text = "📡 *سیگنال‌های فعال*\n\nهنوز سیگنالی ثبت نشده است."
         else:
-            text = "📡 *سیگنال‌های فعال (آخرین ۲۰)*\n" + DIVIDER + "\n"
+            text = "📡 *سیگنال‌های فعال*\n" + DIVIDER + "\n"
             for rec in reversed(recent_signals):
                 direction_emoji = "🟢" if rec["direction"] == "LONG" else "🔴"
                 mode_label = MODE_CONFIGS.get(rec["mode"], MODE_CONFIGS["standard"])["label"]
@@ -3799,7 +3988,7 @@ async def post_init(app):
     app.create_task(optimization_loop(app))
     app.create_task(channel_broadcast_loop(app))
     app.create_task(trigger_scanner_loop(app))
-    logger.info("Signal Bot V60 (Channel + Trigger Scanner) started")
+    logger.info("Signal Bot V60 (Channel + Stats + Trigger Scanner) started")
 
 def main():
     global app
