@@ -1,12 +1,15 @@
 """
 Telegram Signal Bot V60 - Institutional Grade with Intelligence Center
-- کانال تلگرام + ارسال خودکار سیگنال‌ها
-- لایه واکنش سریع برای جلوگیری از فرصت‌سوزی در بازار فیوچرز
-- دکمه دریافت سیگنال‌های فعال + آمار سیگنال‌ها
+- کانال تلگرام + ارسال خودکار سیگنال‌ها (پویا بر اساس check_interval)
+- لایه واکنش سریع برای جلوگیری از فرصت‌سوزی
+- مدیریت پیام کانال: یک پیام فعال برای هر ارز/حالت، ویرایش به‌هنگام تغییر، برچسب سیگنال اصلاح‌شده
+- دکمه دریافت سیگنال‌های فعال + آمار سیگنال‌ها (با احترام به واحد پولی کاربر)
+- جلوگیری از ثبت تکراری سیگنال در signal_history
 - رفع Rate Limit و XMR
 - سیگنال‌دهی متعادل برای تمام رژیم‌های بازار
 - حذف پیام‌های تأیید پس از انتخاب واحد پولی/حالت معاملاتی
 - نمایش قیمت تومان در کانال
+- راهنمای بروز شامل بخش‌های جدید
 """
 
 import asyncio
@@ -108,9 +111,9 @@ WEIGHT_COMP_TREND = 10
 OHLCV_TTL_SECONDS = 180
 PRICE_TTL_SECONDS = 30
 FULL_REFRESH_TTL_SECONDS = 120
-MAX_OHLCV_CONCURRENCY = 2
+MAX_OHLCV_CONCURRENCY = 4
 MAX_SIGNAL_CONCURRENCY = 4
-MAX_PRICE_CONCURRENCY = 4
+MAX_PRICE_CONCURRENCY = 6
 RLM = "\u200f"
 
 DATA_DIR = os.getenv("DATA_DIR", "/data")
@@ -816,6 +819,7 @@ class MarketDataCache:
         return week if len(week) >= 2 else None
 
 cache = MarketDataCache()
+
 # ---------- متغیرهای سراسری ----------
 app = None
 last_plans = {}
@@ -841,11 +845,13 @@ news_history: List[Dict] = []
 news_message_ids: Dict[int, List[int]] = {}
 suggestion_history: List[Dict] = []
 
-channel_signal_messages: Dict[str, int] = {}
+channel_signal_messages: Dict[str, int] = {}  # signal_id -> message_id
+channel_message_map: Dict[Tuple[str, str], Dict] = {}  # (symbol, mode) -> {signal_id, message_id, last_hash}
 
 last_check_time = {}
 last_sent_signals = {}
 price_sources = {}
+last_mode_broadcast_time = {}
 
 # ---------- توابع کمکی ----------
 def is_allowed(user_id):
@@ -1466,7 +1472,8 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
         results["comp_trend"] = ind["minus_di"] > ind["plus_di"]
 
     return results
-    # ---------- تولید سیگنال جدید ----------
+
+# ---------- تولید سیگنال جدید ----------
 async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False):
     global app
     try:
@@ -1591,7 +1598,35 @@ async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False):
             market_condition="trending" if ind["adx"] >= 25 else "ranging",
             rr=levels["rr"]
         )
-        signal_id = record_signal(plan)
+        # جلوگیری از ثبت تکراری: بررسی وجود سیگنال باز برای همین ارز و حالت
+        existing_signal = next((r for r in signal_history if r["symbol"] == code and r["mode"] == mode and r["status"] == "open"), None)
+        if existing_signal:
+            # مقایسه کلیدی: اگر جهت یا قیمت‌ها تغییر معنادار نداشتند، از ثبت جدید صرف‌نظر می‌کنیم
+            if (existing_signal["direction"] == direction and
+                abs(existing_signal["entry_price"] - entry_avg) / entry_avg < 0.002 and
+                abs(existing_signal["sl_price"] - levels["stop_losses"][0]) / levels["stop_losses"][0] < 0.002):
+                # بدون تغییر مهم، فقط timestamp را به‌روز می‌کنیم و برمی‌گردیم
+                existing_signal["timestamp"] = time.time()
+                signal_id = existing_signal["signal_id"]
+            else:
+                # تغییر معنادار: رکورد قبلی را به‌روزرسانی می‌کنیم
+                existing_signal.update({
+                    "direction": direction,
+                    "entry_price": entry_avg,
+                    "sl_price": levels["stop_losses"][0],
+                    "tp_prices": levels["take_profits"],
+                    "confidence": confidence,
+                    "timestamp": time.time(),
+                    "win_rate_estimate": win_rate_est,
+                    "signal_grade": grade,
+                    "rr": levels["rr"],
+                    "adx_at_time": ind["adx"],
+                    "rsi_at_time": ind["rsi"],
+                    "market_condition": "trending" if ind["adx"] >= 25 else "ranging",
+                })
+                signal_id = existing_signal["signal_id"]
+        else:
+            signal_id = record_signal(plan)
         if send_to_channel:
             await send_signal_to_channel(plan, signal_id)
         return plan
@@ -1729,7 +1764,8 @@ def update_signal_status(symbol, current_price):
         if rec["status"] != old_status:
             changed.append(rec["signal_id"])
     return changed
-    # ---------- فرمت‌سازی ----------
+
+# ---------- فرمت‌سازی ----------
 def format_main_signal_v2(plan, code, chat_id):
     direction = "لانگ 🟢" if plan.direction == "LONG" else "شورت 🔴"
     mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
@@ -2018,33 +2054,85 @@ def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
     return parts
 
 # ---------- توابع ارسال به کانال ----------
+def calculate_signal_hash(symbol, mode, direction, entry, sl, tps):
+    return f"{symbol}|{mode}|{direction}|{entry:.6f}|{sl:.6f}|{tps[0]:.6f}|{tps[1]:.6f}|{tps[2]:.6f}"
+
 async def send_signal_to_channel(plan, signal_id):
     if not CHANNEL_ID:
         return
-    direction_emoji = "🟢" if plan.direction == "LONG" else "🔴"
-    mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
-    text = (
-        f"🔔 سیگنال جدید | {plan.symbol}/USDT\n"
-        f"📈 جهت: {plan.direction} {direction_emoji}\n"
-        f"🛠️ حالت: {mode_label}\n"
-        f"🎯 اطمینان: {plan.confidence:.0f}٪\n"
-        f"📐 RR: 1:{plan.rr:.2f}\n\n"
-        f"📥 ورود: {format_channel_price(plan.entry_price)}\n"
-        f"🛑 حد ضرر: {format_channel_price(plan.sl_price)}\n"
-        f"🎯 اهداف:\n"
-        f"1️⃣ {format_channel_price(plan.take_profits[0])}\n"
-        f"2️⃣ {format_channel_price(plan.take_profits[1])}\n"
-        f"3️⃣ {format_channel_price(plan.take_profits[2])}\n\n"
-        f"⚡ اهرم پیشنهادی: {plan.leverage}x\n"
-        f"🕒 {shamsi_now()}"
-    )
-    try:
-        msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(text), parse_mode="Markdown")
-        channel_signal_messages[signal_id] = msg.message_id
-        save_state()
-        logger.info(f"Signal sent to channel for {plan.symbol} (signal_id {signal_id})")
-    except Exception as e:
-        logger.error(f"Failed to send signal to channel: {e}")
+    key = (plan.symbol, plan.mode)
+    new_hash = calculate_signal_hash(plan.symbol, plan.mode, plan.direction, plan.entry_price, plan.sl_price, plan.tp_prices)
+
+    existing = channel_message_map.get(key)
+    if existing:
+        # پیام فعال وجود دارد
+        old_hash = existing.get("hash")
+        if old_hash == new_hash:
+            # تغییری نکرده، هیچ اقدامی نمی‌کنیم
+            logger.debug(f"No change for {key}, skipping channel message")
+            return
+        # تغییر کرده، پیام قبلی را ویرایش می‌کنیم
+        direction_emoji = "🟢" if plan.direction == "LONG" else "🔴"
+        mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
+        text = (
+            f"🔄 سیگنال اصلاح شد | {plan.symbol}/USDT\n"
+            f"📈 جهت: {plan.direction} {direction_emoji}\n"
+            f"🛠️ حالت: {mode_label}\n"
+            f"🎯 اطمینان: {plan.confidence:.0f}٪\n"
+            f"📐 RR: 1:{plan.rr:.2f}\n\n"
+            f"📥 ورود: {format_channel_price(plan.entry_price)}\n"
+            f"🛑 حد ضرر: {format_channel_price(plan.sl_price)}\n"
+            f"🎯 اهداف:\n"
+            f"1️⃣ {format_channel_price(plan.tp_prices[0])}\n"
+            f"2️⃣ {format_channel_price(plan.tp_prices[1])}\n"
+            f"3️⃣ {format_channel_price(plan.tp_prices[2])}\n\n"
+            f"⚡ اهرم پیشنهادی: {plan.leverage}x\n"
+            f"🕒 بروزرسانی: {shamsi_now()}\n\n"
+            f"⚠️ سیگنال قبلی با داده‌های جدید اصلاح شد."
+        )
+        try:
+            await app.bot.edit_message_text(
+                chat_id=CHANNEL_ID,
+                message_id=existing["message_id"],
+                text=rtl_lines(text),
+                parse_mode="Markdown"
+            )
+            existing["hash"] = new_hash
+            existing["signal_id"] = signal_id
+            logger.info(f"Channel message updated for {key}")
+        except Exception as e:
+            logger.error(f"Failed to edit channel message for {key}: {e}")
+    else:
+        # پیام جدید
+        direction_emoji = "🟢" if plan.direction == "LONG" else "🔴"
+        mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
+        text = (
+            f"🔔 سیگنال جدید | {plan.symbol}/USDT\n"
+            f"📈 جهت: {plan.direction} {direction_emoji}\n"
+            f"🛠️ حالت: {mode_label}\n"
+            f"🎯 اطمینان: {plan.confidence:.0f}٪\n"
+            f"📐 RR: 1:{plan.rr:.2f}\n\n"
+            f"📥 ورود: {format_channel_price(plan.entry_price)}\n"
+            f"🛑 حد ضرر: {format_channel_price(plan.sl_price)}\n"
+            f"🎯 اهداف:\n"
+            f"1️⃣ {format_channel_price(plan.tp_prices[0])}\n"
+            f"2️⃣ {format_channel_price(plan.tp_prices[1])}\n"
+            f"3️⃣ {format_channel_price(plan.tp_prices[2])}\n\n"
+            f"⚡ اهرم پیشنهادی: {plan.leverage}x\n"
+            f"🕒 {shamsi_now()}"
+        )
+        try:
+            msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(text), parse_mode="Markdown")
+            channel_message_map[key] = {
+                "signal_id": signal_id,
+                "message_id": msg.message_id,
+                "hash": new_hash
+            }
+            channel_signal_messages[signal_id] = msg.message_id
+            save_state()
+            logger.info(f"Signal sent to channel for {plan.symbol} (signal_id {signal_id})")
+        except Exception as e:
+            logger.error(f"Failed to send signal to channel: {e}")
 
 def build_signal_update_text_from_record(rec):
     direction_emoji = "🟢" if rec["direction"] == "LONG" else "🔴"
@@ -2096,6 +2184,10 @@ async def update_channel_signal_message(signal_id):
             text=rtl_lines(new_text),
             parse_mode="Markdown"
         )
+        # حذف از نگاشت پس از بسته‌شدن
+        key = (rec["symbol"], rec["mode"])
+        if key in channel_message_map:
+            del channel_message_map[key]
     except Exception as e:
         logger.error(f"Failed to update channel message for signal {signal_id}: {e}")
 
@@ -2107,23 +2199,24 @@ async def send_high_importance_news_to_channel(news_text):
         logger.info("High importance news sent to channel")
     except Exception as e:
         logger.error(f"Failed to send news to channel: {e}")
-        # ---------- حلقه مستقل کانال ----------
+
+# ---------- حلقه مستقل کانال (پویا) ----------
 async def channel_broadcast_loop(app):
     await asyncio.sleep(20)
-    interval = int(os.getenv("CHANNEL_BROADCAST_INTERVAL", "300"))
-    lock = asyncio.Lock()
     while True:
         try:
             if not CHANNEL_ID:
                 await asyncio.sleep(60)
                 continue
 
-            async with lock:
-                logger.info("Channel broadcast: updating data and generating signals...")
-                await cache.update_prices(force=False)
-                await cache.update_ohlcv(force=False)
-
-                for mode in MODE_CONFIGS.keys():
+            now = time.time()
+            for mode, config in MODE_CONFIGS.items():
+                interval = config["check_interval"]
+                last_time = last_mode_broadcast_time.get(mode, 0)
+                if now - last_time >= interval:
+                    logger.info(f"Channel broadcast for mode {mode} started")
+                    await cache.update_prices(force=False)
+                    await cache.update_ohlcv(force=False)
                     for code in cache.valid_codes:
                         try:
                             plan = await generate_trade_plan_v2(code, mode, send_to_channel=True)
@@ -2132,10 +2225,11 @@ async def channel_broadcast_loop(app):
                         except Exception as e:
                             logger.debug(f"Error generating {code} {mode}: {e}")
                         await asyncio.sleep(0.05)
-                logger.info("Channel broadcast completed")
+                    last_mode_broadcast_time[mode] = now
+                    logger.info(f"Channel broadcast for mode {mode} completed")
         except Exception as e:
             logger.exception("Channel broadcast error: %s", e)
-        await asyncio.sleep(interval)
+        await asyncio.sleep(60)
 
 # ---------- حلقه واکنش سریع ----------
 trigger_last_prices = {}
@@ -2184,7 +2278,7 @@ async def trigger_scanner_loop(app):
         await asyncio.sleep(TRIGGER_SCAN_INTERVAL)
 
 # ---------- توابع آمار سیگنال‌ها ----------
-def format_signal_history_page(filter_type: str, page: int = 0, per_page: int = 20):
+def format_signal_history_page(filter_type: str, page: int = 0, per_page: int = 20, chat_id: int = None):
     """filter_type: 'success' یا 'failed'"""
     if filter_type == "success":
         records = [r for r in signal_history if r["status"].startswith("tp")]
@@ -2212,16 +2306,15 @@ def format_signal_history_page(filter_type: str, page: int = 0, per_page: int = 
             status = "TP1" if rec["status"] == "tp1_hit" else "TP2" if rec["status"] == "tp2_hit" else "TP3" if rec["status"] == "tp3_hit" else "SL"
             mode_label = MODE_CONFIGS.get(rec["mode"], MODE_CONFIGS["standard"])["label"]
             if rec["status"].startswith("tp"):
-                # تعیین قیمت تارگت خورده
                 if rec["status"] == "tp1_hit":
                     price_hit = rec["tp_prices"][0]
                 elif rec["status"] == "tp2_hit":
                     price_hit = rec["tp_prices"][1]
                 else:
                     price_hit = rec["tp_prices"][2]
-                price_text = format_channel_price(price_hit)
+                price_text = fmt_amount(price_hit, chat_id) if chat_id else format_channel_price(price_hit)
             else:
-                price_text = format_channel_price(rec["sl_price"])
+                price_text = fmt_amount(rec["sl_price"], chat_id) if chat_id else format_channel_price(rec["sl_price"])
             text += (
                 f"{symbol} | {direction} | {mode_label}\n"
                 f"   تاریخ: {date_str}\n"
@@ -2319,16 +2412,31 @@ async def stats_history_menu(update, context):
 async def stats_success_signals(update, context, page=0, recent=False):
     query = update.callback_query
     await query.answer()
-    text, keyboard = format_signal_history_page("success", page)
+    chat_id = query.message.chat_id
+    text, keyboard = format_signal_history_page("success", page, chat_id=chat_id)
+    if recent:
+        # تغییر بازگشت به منوی آخرین سیگنال‌ها
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ قبلی", callback_data=f"stats_recent_success_page_{page-1}")] if page > 0 else [],
+            [InlineKeyboardButton("بعدی ➡️", callback_data=f"stats_recent_success_page_{page+1}")] if (page < (len([r for r in signal_history if r["status"].startswith("tp")]) // 20)) else [],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="stats_recent_signals_menu")]
+        ])
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-    set_interactive_screen(query.message.chat_id, [query.message.message_id])
+    set_interactive_screen(chat_id, [query.message.message_id])
 
 async def stats_failed_signals(update, context, page=0, recent=False):
     query = update.callback_query
     await query.answer()
-    text, keyboard = format_signal_history_page("failed", page)
+    chat_id = query.message.chat_id
+    text, keyboard = format_signal_history_page("failed", page, chat_id=chat_id)
+    if recent:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ قبلی", callback_data=f"stats_recent_failed_page_{page-1}")] if page > 0 else [],
+            [InlineKeyboardButton("بعدی ➡️", callback_data=f"stats_recent_failed_page_{page+1}")] if (page < (len([r for r in signal_history if r["status"] == "sl_hit"]) // 20)) else [],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="stats_recent_signals_menu")]
+        ])
     await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-    set_interactive_screen(query.message.chat_id, [query.message.message_id])
+    set_interactive_screen(chat_id, [query.message.message_id])
 
 async def stats_success_coins(update, context):
     query = update.callback_query
@@ -2452,7 +2560,8 @@ async def optimization_history(update, context):
         reply_markup=kb_back_to_optimization(),
         parse_mode="Markdown"
     )
-    # ---------- دکمه تحلیل جامع ----------
+
+# ---------- دکمه تحلیل جامع ----------
 async def comprehensive_analysis(update, context):
     query = update.callback_query
     chat_id = update.effective_chat.id
@@ -2480,7 +2589,7 @@ async def comprehensive_analysis(update, context):
                         "mode": plan.mode,
                         "entry": plan.entry_price,
                         "sl": plan.sl_price,
-                        "tp1": plan.take_profits[0] if plan.take_profits else 0,
+                        "tp1": plan.tp_prices[0] if plan.tp_prices else 0,
                     })
                 await asyncio.sleep(0.2)
             except Exception as e:
@@ -2913,7 +3022,8 @@ async def trailing_monitor_loop(app):
         except Exception as e:
             logger.exception("Trailing loop error | error=%s", e)
         await asyncio.sleep(TRAILING_CHECK_SECONDS)
-        # ---------- Event/News monitor ----------
+
+# ---------- Event/News monitor ----------
 async def news_monitor_loop(app):
     await asyncio.sleep(30)
     while True:
@@ -3316,13 +3426,15 @@ def save_state():
                 "signal_history": signal_history[-200:],
                 "suggestion_history": suggestion_history[-20:],
                 "channel_signal_messages": {str(k): v for k, v in channel_signal_messages.items()},
+                "channel_message_map": {f"{k[0]}|{k[1]}": v for k, v in channel_message_map.items()},
+                "last_mode_broadcast_time": last_mode_broadcast_time,
             }, f, ensure_ascii=False)
         os.replace(tmp, STATE_FILE)
     except Exception as e:
         logger.warning("State save failed: %s", e)
 
 def load_state():
-    global subscribed_chat_ids, user_currency, user_trading_mode, user_favorites, user_role, news_history, signal_history, suggestion_history, channel_signal_messages
+    global subscribed_chat_ids, user_currency, user_trading_mode, user_favorites, user_role, news_history, signal_history, suggestion_history, channel_signal_messages, channel_message_map, last_mode_broadcast_time
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -3335,6 +3447,8 @@ def load_state():
         signal_history = data.get("signal_history", [])
         suggestion_history = data.get("suggestion_history", [])
         channel_signal_messages = {str(k): int(v) for k, v in data.get("channel_signal_messages", {}).items()}
+        channel_message_map = {tuple(k.split("|")): v for k, v in data.get("channel_message_map", {}).items()}
+        last_mode_broadcast_time = data.get("last_mode_broadcast_time", {})
         logger.info("State restored: %s users, %s signals, %s suggestions, %s channel messages",
                     len(subscribed_chat_ids), len(signal_history), len(suggestion_history), len(channel_signal_messages))
     except FileNotFoundError:
@@ -3343,12 +3457,16 @@ def load_state():
         signal_history = []
         suggestion_history = []
         channel_signal_messages = {}
+        channel_message_map = {}
+        last_mode_broadcast_time = {}
     except Exception as e:
         logger.warning("State load failed: %s", e)
         news_history = []
         signal_history = []
         suggestion_history = []
         channel_signal_messages = {}
+        channel_message_map = {}
+        last_mode_broadcast_time = {}
 
 # ---------- Button handler ----------
 async def button_handler(update, context):
@@ -3916,8 +4034,8 @@ async def button_handler(update, context):
                 text += (
                     f"{rec['symbol']} | {rec['direction']} {direction_emoji} | {mode_label}\n"
                     f"   اطمینان: {rec['confidence']:.0f}٪ | RR: {rec['rr']:.2f} | وضعیت: {status_text}\n"
-                    f"   ورود: {rec['entry_price']:.4f} | SL: {rec['sl_price']:.4f}\n"
-                    f"   TP1: {rec['tp_prices'][0]:.4f} | TP2: {rec['tp_prices'][1]:.4f} | TP3: {rec['tp_prices'][2]:.4f}\n"
+                    f"   ورود: {fmt_amount(rec['entry_price'], chat_id)} | SL: {fmt_amount(rec['sl_price'], chat_id)}\n"
+                    f"   TP1: {fmt_amount(rec['tp_prices'][0], chat_id)} | TP2: {fmt_amount(rec['tp_prices'][1], chat_id)} | TP3: {fmt_amount(rec['tp_prices'][2], chat_id)}\n"
                     f"{DIVIDER}\n"
                 )
         await query.edit_message_text(
