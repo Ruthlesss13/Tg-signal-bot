@@ -1,12 +1,9 @@
 """
 Telegram Signal Bot V59 - Institutional Grade with Intelligence Center
+- کانال تلگرام + ارسال خودکار سیگنال‌ها
+- دکمه دریافت سیگنال‌های فعال برای همه کاربران
+- رفع Rate Limit و XMR
 - سیگنال‌دهی متعادل برای تمام رژیم‌های بازار
-- رفع باگ بحرانی عدم صدور سیگنال (فیلد rr)
-- ارسال خودکار سیگنال به کانال تلگرام
-- بروزرسانی همان پیام کانال در TP/SL
-- ارسال اخبار High به کانال
-- دکمه بازگشت تحلیل جامع به پنل مدیریت
-- اصلاح دکمه بازگشت مرکز هوشمند
 """
 
 import asyncio
@@ -108,9 +105,9 @@ WEIGHT_COMP_TREND = 10
 OHLCV_TTL_SECONDS = 180
 PRICE_TTL_SECONDS = 30
 FULL_REFRESH_TTL_SECONDS = 120
-MAX_OHLCV_CONCURRENCY = 8
+MAX_OHLCV_CONCURRENCY = 2
 MAX_SIGNAL_CONCURRENCY = 4
-MAX_PRICE_CONCURRENCY = 8
+MAX_PRICE_CONCURRENCY = 4
 RLM = "\u200f"
 
 DATA_DIR = os.getenv("DATA_DIR", "/data")
@@ -147,7 +144,7 @@ GATEIO_SYMBOL_MAP = {
     "SHIB": "SHIB/USDT", "SOL": "SOL/USDT", "STX": "STX/USDT",
     "SUI": "SUI/USDT", "TRX": "TRX/USDT",
     "UNI": "UNI/USDT", "VET": "VET/USDT", "XLM": "XLM/USDT",
-    "XMR": "XMR/USDT", "XRP": "XRP/USDT",
+    "XRP": "XRP/USDT",
 }
 
 # ========== تنظیمات سیگنال‌دهی متعادل ==========
@@ -457,16 +454,19 @@ class MarketDataCache:
         gateio_codes = [code for code in target_codes if GATEIO_SYMBOL_MAP.get(code)]
         if gateio_codes:
             try:
-                symbols = [GATEIO_SYMBOL_MAP[code] for code in gateio_codes]
-                tickers = await asyncio.to_thread(exchange_gateio.fetch_tickers, symbols)
-                for code in gateio_codes:
-                    sym = GATEIO_SYMBOL_MAP.get(code)
-                    if sym in tickers:
-                        ticker = tickers[sym]
-                        price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
-                        if price and price > 0:
-                            new_prices[code] = float(price)
-                            price_sources[code] = "G"
+                # فقط سمبل‌هایی که واقعاً در بازارهای Gate.io موجودند
+                valid_gateio_codes = [c for c in gateio_codes if GATEIO_SYMBOL_MAP[c] in exchange_gateio.markets]
+                symbols = [GATEIO_SYMBOL_MAP[c] for c in valid_gateio_codes]
+                if symbols:
+                    tickers = await asyncio.to_thread(exchange_gateio.fetch_tickers, symbols)
+                    for code in valid_gateio_codes:
+                        sym = GATEIO_SYMBOL_MAP.get(code)
+                        if sym in tickers:
+                            ticker = tickers[sym]
+                            price = ticker.get("last") or ticker.get("close") or ticker.get("bid") or ticker.get("ask")
+                            if price and price > 0:
+                                new_prices[code] = float(price)
+                                price_sources[code] = "G"
             except Exception as e:
                 logger.warning(f"Gate.io fetch_tickers failed: {e}")
 
@@ -605,19 +605,20 @@ class MarketDataCache:
             return None
         source = self.source_for_code(code)
 
-        async with self._sem:
-            exchanges = []
-            if source == "gateio":
-                exchanges = [(exchange_gateio, "gateio")]
-            elif source == "kucoin":
-                exchanges = [(exchange_spot_kucoin, "kucoin")]
-            else:
-                return None
+        exchanges = []
+        if source == "gateio":
+            exchanges.append((exchange_gateio, "gateio", symbol))
+            exchanges.append((exchange_spot_kucoin, "kucoin", f"{code}/USDT"))
+        elif source == "kucoin":
+            exchanges.append((exchange_spot_kucoin, "kucoin", f"{code}/USDT"))
+        else:
+            return None
 
-            for ex, name in exchanges:
+        async with self._sem:
+            for ex, name, sym in exchanges:
                 for attempt in range(3):
                     try:
-                        raw = await asyncio.to_thread(ex.fetch_ohlcv, symbol, timeframe, None, limit)
+                        raw = await asyncio.to_thread(ex.fetch_ohlcv, sym, timeframe, None, limit)
                         df = self._to_dataframe(raw)
                         if df is None or len(df) < 10:
                             logger.debug(f"OHLCV {code} {timeframe} from {name}: insufficient rows {len(df) if df is not None else 0}")
@@ -629,6 +630,7 @@ class MarketDataCache:
                         wait = 2 ** attempt
                         logger.warning(f"OHLCV {code} {timeframe} from {name} attempt {attempt} failed: {e}, wait {wait}s")
                         await asyncio.sleep(wait)
+                logger.warning(f"OHLCV {code} {timeframe} failed from {name}")
             logger.warning(f"OHLCV {code} {timeframe} failed from all sources")
             return None
 
@@ -838,7 +840,7 @@ news_history: List[Dict] = []
 news_message_ids: Dict[int, List[int]] = {}
 suggestion_history: List[Dict] = []
 
-channel_signal_messages: Dict[str, int] = {}  # signal_id -> channel_message_id
+channel_signal_messages: Dict[str, int] = {}
 
 last_check_time = {}
 last_sent_signals = {}
@@ -2073,7 +2075,6 @@ def build_signal_update_text_from_record(rec):
 async def update_channel_signal_message(signal_id):
     if signal_id not in channel_signal_messages:
         return
-    # پیدا کردن رکورد
     rec = next((r for r in signal_history if r.get("signal_id") == signal_id), None)
     if not rec:
         return
@@ -2099,6 +2100,39 @@ async def send_high_importance_news_to_channel(news_text):
         logger.info("High importance news sent to channel")
     except Exception as e:
         logger.error(f"Failed to send news to channel: {e}")
+
+# ---------- حلقه مستقل کانال ----------
+async def channel_broadcast_loop(app):
+    await asyncio.sleep(20)
+    interval = int(os.getenv("CHANNEL_BROADCAST_INTERVAL", "1800"))  # 30 دقیقه
+    while True:
+        try:
+            if not CHANNEL_ID:
+                logger.warning("CHANNEL_ID not set, channel broadcasting disabled")
+                await asyncio.sleep(60)
+                continue
+
+            logger.info("Channel broadcast: generating signals for all modes...")
+            await cache.update_prices(force=True)
+            await cache.update_ohlcv(force=True)
+
+            for mode in MODE_CONFIGS.keys():
+                signals_for_mode = []
+                for code in cache.valid_codes:
+                    try:
+                        plan = await generate_trade_plan_v2(code, mode, send_to_channel=True)
+                        if plan:
+                            signals_for_mode.append(plan)
+                    except Exception as e:
+                        logger.debug(f"Error generating {code} {mode}: {e}")
+                    await asyncio.sleep(0.1)
+                # مرتب‌سازی بر اساس اطمینان و ارسال بهترین‌ها (چون در تولید ارسال شده، اینجا فقط لاگ)
+                signals_for_mode.sort(key=lambda p: p.confidence, reverse=True)
+                logger.info(f"Channel broadcast {mode}: {len(signals_for_mode)} signals, top: {signals_for_mode[:3]}")
+            logger.info("Channel broadcast completed")
+        except Exception as e:
+            logger.exception("Channel broadcast error: %s", e)
+        await asyncio.sleep(interval)
 
 # ---------- مرکز هوشمندسازی ----------
 async def optimization_center(update, context):
@@ -2423,6 +2457,10 @@ def kb_coins(page=0):
             label = f"{code} ⚪"
         buttons.append(InlineKeyboardButton(label, callback_data=f"coin_{code}"))
     rows = build_grid_keyboard(buttons, COINS_GRID_COLUMNS)
+
+    # دکمه جدید "دریافت سیگنال های فعال" قبل از ناوبری و بازگشت
+    rows.append([InlineKeyboardButton("📡 دریافت سیگنال‌های فعال", callback_data="active_signals_all")])
+
     nav_row = []
     total_pages = (len(COIN_CODES) + PER_PAGE - 1) // PER_PAGE
     if page > 0:
@@ -2908,9 +2946,9 @@ async def auto_report_loop(app):
                     for code, direction in current_signals.items():
                         prev = prev_signals.get(code)
                         if prev is None or prev["direction"] != direction:
-                            # The plan was already generated in current_signals loop
-                            # But we need to send message to user; we can fetch plan again or use stored plan
-                            plan = await generate_trade_plan_v2(code, mode, send_to_channel=False)  # avoid duplicate channel send
+                            # Plan already generated in current_signals loop
+                            # We need to send to user but avoid duplicate channel send
+                            plan = await generate_trade_plan_v2(code, mode, send_to_channel=False)
                             if plan:
                                 main_text = format_main_signal_v2(plan, code, chat_id)
                                 msg = await app.bot.send_message(chat_id=chat_id, text=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
@@ -3615,6 +3653,34 @@ async def button_handler(update, context):
             set_interactive_screen(chat_id, new_ids)
         return
 
+    # دکمه جدید: نمایش همه سیگنال‌های فعال
+    if data == "active_signals_all":
+        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
+        # دریافت آخرین سیگنال‌ها از signal_history (تا ۲۰ مورد)
+        recent_signals = signal_history[-20:]
+        if not recent_signals:
+            text = "📡 *سیگنال‌های فعال*\n\nهنوز سیگنالی ثبت نشده است."
+        else:
+            text = "📡 *سیگنال‌های فعال (آخرین ۲۰)*\n" + DIVIDER + "\n"
+            for rec in reversed(recent_signals):
+                direction_emoji = "🟢" if rec["direction"] == "LONG" else "🔴"
+                mode_label = MODE_CONFIGS.get(rec["mode"], MODE_CONFIGS["standard"])["label"]
+                status_text = "باز" if rec["status"] == "open" else rec["status"]
+                text += (
+                    f"{rec['symbol']} | {rec['direction']} {direction_emoji} | {mode_label}\n"
+                    f"   اطمینان: {rec['confidence']:.0f}٪ | RR: {rec['rr']:.2f} | وضعیت: {status_text}\n"
+                    f"   ورود: {rec['entry_price']:.4f} | SL: {rec['sl_price']:.4f}\n"
+                    f"   TP1: {rec['tp_prices'][0]:.4f} | TP2: {rec['tp_prices'][1]:.4f} | TP3: {rec['tp_prices'][2]:.4f}\n"
+                    f"{DIVIDER}\n"
+                )
+        await query.edit_message_text(
+            rtl_lines(text),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")]]),
+            parse_mode="Markdown"
+        )
+        set_interactive_screen(chat_id, [query.message.message_id])
+        return
+
 def format_technical_details(code, plan, ind, chat_id):
     direction = "لانگ 🟢" if plan.direction == "LONG" else "شورت 🔴"
     reasons_text = "\n".join(f" ✅ {x}" for x in plan.reasons[:15])
@@ -3673,7 +3739,8 @@ async def post_init(app):
     app.create_task(macro_event_monitor_loop(app))
     app.create_task(macro_data_loop(app))
     app.create_task(optimization_loop(app))
-    logger.info("Signal Bot V59 (Channel Integration) started")
+    app.create_task(channel_broadcast_loop(app))
+    logger.info("Signal Bot V59 (Channel + Active Signals) started")
 
 def main():
     global app
