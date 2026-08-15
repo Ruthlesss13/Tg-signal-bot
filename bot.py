@@ -1,11 +1,8 @@
 """
 Telegram Signal Bot V59 - Institutional Grade with Intelligence Center
-- کاهش شدید سخت‌گیری برای تولید سیگنال در بازار رنج
-- مرکز هوشمندسازی با دو بخش مجزا (پیشنهادات فعال + تاریخچه)
-- بهبود دکمه‌های بازگشت
-- سیستم یادگیری خودکار و بهینه‌سازی تنظیمات
-- اخبار مهم بازار (نهنگ‌ها + اخبار کریپتو)
-- داده‌های کلان بازار (سلطه BTC، حجم کل)
+- رفع باگ بحرانی عدم صدور سیگنال (فیلد rr)
+- تنظیم لایه‌ها برای صدور سیگنال در تمام رژیم‌های بازار (رنج، صعودی، نزولی، پرنوسان)
+- بهینه‌سازی دریافت داده و کش
 """
 
 import asyncio
@@ -87,7 +84,7 @@ EVENTS_CHECK_SECONDS = 6 * 3600
 WHALE_CHECK_SECONDS = 30 * 60
 WHALE_MIN_AMOUNT_BTC = 1000
 NEWS_AUTO_DELETE_SECONDS = 3600
-OPTIMIZATION_CHECK_SECONDS = 6 * 3600  # هر ۶ ساعت
+OPTIMIZATION_CHECK_SECONDS = 6 * 3600
 MACRO_CHECK_SECONDS = 6 * 3600
 
 PER_PAGE = 12
@@ -127,7 +124,6 @@ exchange_spot_kucoin = ccxt.kucoin({
     "enableRateLimit": True,
 })
 
-# ---------- مپ سمبل‌های Gate.io ----------
 GATEIO_SYMBOL_MAP = {
     "AAVE": "AAVE_USDT", "ADA": "ADA_USDT", "ALGO": "ALGO_USDT",
     "APE": "APE_USDT", "APT": "APT_USDT", "AR": "AR_USDT",
@@ -150,7 +146,7 @@ GATEIO_SYMBOL_MAP = {
 
 # ========== تنظیمات سخت‌گیری بسیار کاهش‌یافته ==========
 MIN_SIGNAL_CONFIDENCE = 10
-MIN_DIRECTION_GAP = 1
+MIN_DIRECTION_GAP = 0          # <-- حذف شکاف اجباری، انتخاب جهت با امتیاز بالاتر
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 
 MODE_CONFIGS = {
@@ -271,6 +267,7 @@ class TradePlan:
     adx_at_time: float = 0.0
     rsi_at_time: float = 0.0
     market_condition: str = ""
+    rr: float = 0.0          # <-- فیلد حیاتی اضافه شد
 
 class MarketDataCache:
     _instance = None
@@ -315,7 +312,7 @@ class MarketDataCache:
     def _load_markets(self):
         try:
             gateio_markets = exchange_gateio.load_markets()
-            kucoin_markets = None  # بارگذاری تنبل - فقط یک‌بار
+            kucoin_markets = None
             selected = {}
             sources = {}
             for code in COIN_CODES:
@@ -654,7 +651,6 @@ class MarketDataCache:
             if not self.valid_codes:
                 return
             target_codes = list(codes if codes is not None else self.valid_codes)
-            # اجرای هم‌زمان درخواست‌ها با محدودیت semaphore
             tasks = [self.ensure_symbol_data(code, TIMEFRAMES, force=force) for code in target_codes]
             await asyncio.gather(*tasks)
             self.last_full_ohlcv_update = time.time()
@@ -667,7 +663,10 @@ class MarketDataCache:
         needed = [main_tf] + confirm_tfs
         ok = await self.ensure_symbol_data(code, needed)
         if not ok:
-            return None
+            # تلاش دوباره با force
+            ok = await self.ensure_symbol_data(code, needed, force=True)
+            if not ok:
+                return None
         df = self.ohlcv.get(main_tf, {}).get(code)
         if df is None or len(df) < 210:
             await self.ensure_symbol_data(code, [main_tf], force=True)
@@ -1352,6 +1351,8 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
     config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
     df = cache_obj.ohlcv.get(config["main_tf"], {}).get(code)
     results = {}
+
+    # 1) ساختار بازار
     if df is not None and len(df) > 30:
         high = df["high"].iloc[-20:]
         low = df["low"].iloc[-20:]
@@ -1359,24 +1360,26 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
         prev_high = float(high.max())
         prev_low = float(low.min())
         if direction == "LONG":
+            # در رنج و صعودی: قیمت بالای کف ۲۰ کندلی
             structure_ok = price > prev_low * 0.999
             last = df.iloc[-1]
             if not structure_ok and last["close"] > last["open"] and (last["close"] - last["low"]) > 2 * (last["high"] - last["close"]):
                 structure_ok = True
-            # اجازه در بازار رنج: قیمت در نیمه پایینی محدوده ۲۰ کندلی
             if not structure_ok and price <= (prev_high + prev_low) / 2:
                 structure_ok = True
         else:
+            # در رنج و نزولی: قیمت زیر سقف ۲۰ کندلی
             structure_ok = price < prev_high * 1.001
             last = df.iloc[-1]
             if not structure_ok and last["close"] < last["open"] and (last["high"] - last["close"]) > 2 * (last["close"] - last["low"]):
                 structure_ok = True
-            # اجازه در بازار رنج: قیمت در نیمه بالایی محدوده
             if not structure_ok and price >= (prev_high + prev_low) / 2:
                 structure_ok = True
         results["structure"] = structure_ok
     else:
         results["structure"] = False
+
+    # 2) هم‌گرایی تایم‌فریم
     main_tf = config["main_tf"]
     confirm_tfs = config["confirm_tfs"]
     mtf_count = 0
@@ -1398,6 +1401,8 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
             elif direction == "SHORT" and price < ema200:
                 mtf_count += 1
     results["mtf"] = mtf_count >= 1
+
+    # 3) مومنتوم
     momentum_score = 0
     if direction == "LONG":
         if ind["macd_hist"] > 0: momentum_score += 1
@@ -1409,38 +1414,50 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
         if ind["rsi"] < 50: momentum_score += 1
         if ind["roc"] < 0: momentum_score += 1
         if ind["bearish_div"] or ind["macd_bearish_div"]: momentum_score += 1
-    results["momentum"] = momentum_score >= 2
-    results["volume"] = ind["volume_ratio"] >= 1.0 or ind["volume_spike"]
+    results["momentum"] = momentum_score >= 1   # <-- آستانه کاهش یافت
+
+    # 4) حجم
+    results["volume"] = ind["volume_ratio"] >= 0.8 or ind["volume_spike"] or ind["volume_trend_up"]
+
+    # 5) احساسات بازار
     sentiment_score = await cache_obj._calculate_sentiment_score(code, ind)
     if direction == "LONG":
-        results["sentiment"] = sentiment_score > 0
+        results["sentiment"] = sentiment_score > -0.2     # خنثی هم تأیید می‌شود
     else:
-        results["sentiment"] = sentiment_score < 0
+        results["sentiment"] = sentiment_score < 0.2
+
+    # 6) روند
     results["trend"] = ind["price_above_ema200"] if direction == "LONG" else not ind["price_above_ema200"]
+
+    # 7) جریان سفارشات
     if order_flow is None:
         order_flow = await cache_obj._get_order_flow(code)
-    if order_flow > 0:
+    if order_flow == 0 or (0.9 <= order_flow <= 1.1):
+        results["order_flow"] = True    # حالت خنثی تأیید می‌شود
+    else:
         if direction == "LONG":
             results["order_flow"] = order_flow > 1.1
         else:
             results["order_flow"] = order_flow < 0.9
-    else:
-        results["order_flow"] = False
+
+    # 8) تنوع بازار
     breadth = cache_obj._get_market_breadth()
     sample_count = getattr(cache_obj, "_breadth_sample_count", 0)
     if direction == "LONG":
-        results["breadth"] = (breadth > 55) if sample_count >= 5 else True
+        results["breadth"] = (breadth >= 45) if sample_count >= 5 else True
     else:
-        results["breadth"] = (breadth < 45) if sample_count >= 5 else True
-    smart_vol = cache_obj._get_smart_volatility(ind)
-    if direction == "LONG":
-        results["smart_vol"] = smart_vol < 0
-    else:
-        results["smart_vol"] = smart_vol > 0
+        results["breadth"] = (breadth <= 55) if sample_count >= 5 else True
+
+    # 9) نوسان‌پذیری هوشمند
+    bb_percent = ind.get("bb_percent", 0.5)
+    results["smart_vol"] = 0.1 <= bb_percent <= 0.9   # حالت خنثی در رنج
+
+    # 10) قدرت روند مکمل
     if direction == "LONG":
         results["comp_trend"] = ind["plus_di"] > ind["minus_di"]
     else:
         results["comp_trend"] = ind["minus_di"] > ind["plus_di"]
+
     return results
 
 # ---------- تولید سیگنال جدید ----------
@@ -1452,10 +1469,10 @@ async def generate_trade_plan_v2(code, mode="standard"):
             logger.info(f"No indicators for {code}")
             return None
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
-        # دریافت یک‌باره order_flow برای هر دو جهت
         order_flow = await cache._get_order_flow(code)
         long_layers = await analyze_layers(code, "LONG", ind, mode, cache, order_flow)
         short_layers = await analyze_layers(code, "SHORT", ind, mode, cache, order_flow)
+
         long_score = 0
         short_score = 0
         long_confirmed = 0
@@ -1467,9 +1484,12 @@ async def generate_trade_plan_v2(code, mode="standard"):
             if short_layers.get(layer, False):
                 short_score += weight
                 short_confirmed += 1
+
         direction = None
         confidence = 0
         layers = {}
+
+        # انتخاب جهت: امتیاز بالاتر، در تساوی بر اساس RSI و روند
         if long_confirmed >= config["min_confirmations"] and long_score >= short_score + MIN_DIRECTION_GAP:
             direction = "LONG"
             confidence = long_score
@@ -1479,15 +1499,28 @@ async def generate_trade_plan_v2(code, mode="standard"):
             confidence = short_score
             layers = short_layers
         else:
-            logger.info(f"No direction for {code}: long_conf={long_confirmed}, short_conf={short_confirmed}, gap={abs(long_score-short_score)}")
-            return None
+            # اگر هیچ‌کدام حداقل تأیید را نداشتند
+            if long_confirmed >= config["min_confirmations"] and long_score >= short_score:
+                direction = "LONG"
+                confidence = long_score
+                layers = long_layers
+            elif short_confirmed >= config["min_confirmations"] and short_score >= long_score:
+                direction = "SHORT"
+                confidence = short_score
+                layers = short_layers
+            else:
+                logger.info(f"No direction for {code}: long_conf={long_confirmed}, short_conf={short_confirmed}, gap={abs(long_score-short_score)}")
+                return None
+
         if confidence < MIN_SIGNAL_CONFIDENCE:
             logger.info(f"Confidence too low for {code}: {confidence:.1f} < {MIN_SIGNAL_CONFIDENCE}")
             return None
+
         levels = build_ladder_weighted(ind, direction, mode)
         if levels["rr"] < config["min_rr"]:
             logger.info(f"RR too low for {code}: {levels['rr']:.2f} < {config['min_rr']}")
             return None
+
         funding = 0.0
         fg_value, _ = await get_fear_greed()
         if fg_value is not None:
@@ -1497,6 +1530,7 @@ async def generate_trade_plan_v2(code, mode="standard"):
                 confidence -= 5
         confidence = max(0, min(100, confidence))
         confidence = float(confidence)
+
         max_lev = config["max_leverage"]
         if confidence >= 90:
             leverage = max_lev
@@ -1508,11 +1542,13 @@ async def generate_trade_plan_v2(code, mode="standard"):
             leverage = max(1, max_lev - 3)
         else:
             leverage = 1
+
         win_rate_est = get_win_rate_estimate()
         entry_avg = levels["avg_entry"]
         liq = calc_liquidation_price(direction, entry_avg, leverage)
         reasons, warnings = signal_reasons(direction, ind, mode)
         grade = signal_grade(confidence)
+
         plan = TradePlan(
             symbol=code,
             direction=direction,
@@ -1547,7 +1583,8 @@ async def generate_trade_plan_v2(code, mode="standard"):
             signal_grade=grade,
             adx_at_time=ind["adx"],
             rsi_at_time=ind["rsi"],
-            market_condition="trending" if ind["adx"] >= 25 else "ranging"
+            market_condition="trending" if ind["adx"] >= 25 else "ranging",
+            rr=levels["rr"]               # <-- مقدار RR حتماً ست می‌شود
         )
         record_signal(plan)
         return plan
@@ -1643,7 +1680,7 @@ def record_signal(plan):
         "mode": plan.mode,
         "win_rate_estimate": plan.win_rate_estimate,
         "signal_grade": plan.signal_grade,
-        "rr": plan.rr,
+        "rr": plan.rr,          # <-- حالا بدون خطا
         "adx_at_time": plan.adx_at_time,
         "rsi_at_time": plan.rsi_at_time,
         "market_condition": plan.market_condition,
@@ -1968,7 +2005,6 @@ def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
 
 # ---------- مرکز هوشمندسازی ----------
 async def optimization_center(update, context):
-    """صفحه اصلی مرکز هوشمندسازی با دو بخش"""
     query = update.callback_query
     chat_id = update.effective_chat.id
     if not is_admin_role(chat_id):
@@ -1985,7 +2021,6 @@ async def optimization_center(update, context):
     )
 
 async def optimization_active(update, context):
-    """نمایش آخرین پیشنهاد فعال"""
     query = update.callback_query
     chat_id = update.effective_chat.id
     if not is_admin_role(chat_id):
@@ -2039,7 +2074,6 @@ async def optimization_active(update, context):
     )
 
 async def optimization_history(update, context):
-    """نمایش تاریخچه کامل پیشنهادات"""
     query = update.callback_query
     chat_id = update.effective_chat.id
     if not is_admin_role(chat_id):
@@ -2969,7 +3003,6 @@ async def button_handler(update, context):
     data = query.data; chat_id = update.effective_chat.id; user_id = update.effective_user.id
     if data == "noop": return
 
-    # دکمه‌های مرکز هوشمندسازی
     if data == "optimization_center":
         await optimization_center(update, context)
         return
@@ -2980,12 +3013,10 @@ async def button_handler(update, context):
         await optimization_history(update, context)
         return
 
-    # دکمه‌های پیشنهادات
     if data.startswith("apply_suggestion_") or data.startswith("reject_suggestion_") or data.startswith("details_suggestion_"):
         await handle_suggestion_action(update, context)
         return
 
-    # دکمه تحلیل جامع
     if data == "comprehensive_analysis":
         await comprehensive_analysis(update, context)
         return
