@@ -2,6 +2,9 @@
 Telegram Signal Bot V59 - Institutional Grade with Intelligence Center
 - سیگنال‌دهی متعادل برای تمام رژیم‌های بازار
 - رفع باگ بحرانی عدم صدور سیگنال (فیلد rr)
+- ارسال خودکار سیگنال به کانال تلگرام
+- بروزرسانی همان پیام کانال در TP/SL
+- ارسال اخبار High به کانال
 - دکمه بازگشت تحلیل جامع به پنل مدیریت
 - اصلاح دکمه بازگشت مرکز هوشمند
 """
@@ -11,6 +14,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Set, Tuple
@@ -54,6 +58,7 @@ ALWAYS_ALLOWED_USER_IDS = {
 }
 WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
 CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "")
+CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 
 # ---------- لیست ارزها ----------
 COIN_ICONS = {
@@ -126,28 +131,28 @@ exchange_spot_kucoin = ccxt.kucoin({
 })
 
 GATEIO_SYMBOL_MAP = {
-    "AAVE": "AAVE_USDT", "ADA": "ADA_USDT", "ALGO": "ALGO_USDT",
-    "APE": "APE_USDT", "APT": "APT_USDT", "AR": "AR_USDT",
-    "ARB": "ARB_USDT", "ATOM": "ATOM_USDT", "AVAX": "AVAX_USDT",
-    "BCH": "BCH_USDT", "BLUR": "BLUR_USDT", "BTC": "BTC_USDT",
-    "COMP": "COMP_USDT", "DOGE": "DOGE_USDT", "DOT": "DOT_USDT",
-    "EGLD": "EGLD_USDT", "ETC": "ETC_USDT", "ETH": "ETH_USDT",
-    "FET": "FET_USDT", "FIL": "FIL_USDT", "FLOW": "FLOW_USDT",
-    "GRT": "GRT_USDT", "ICP": "ICP_USDT",
-    "INJ": "INJ_USDT", "KAS": "KAS_USDT", "KAVA": "KAVA_USDT",
-    "KSM": "KSM_USDT", "LINK": "LINK_USDT", "LTC": "LTC_USDT",
-    "LUNC": "LUNC_USDT", "MANA": "MANA_USDT", "MINA": "MINA_USDT",
-    "NEAR": "NEAR_USDT", "NEO": "NEO_USDT", "OP": "OP_USDT",
-    "POL": "POL_USDT", "RUNE": "RUNE_USDT", "SAND": "SAND_USDT",
-    "SHIB": "SHIB_USDT", "SOL": "SOL_USDT", "STX": "STX_USDT",
-    "SUI": "SUI_USDT", "TRX": "TRX_USDT",
-    "UNI": "UNI_USDT", "VET": "VET_USDT", "XLM": "XLM_USDT",
-    "XMR": "XMR_USDT", "XRP": "XRP_USDT",
+    "AAVE": "AAVE/USDT", "ADA": "ADA/USDT", "ALGO": "ALGO/USDT",
+    "APE": "APE/USDT", "APT": "APT/USDT", "AR": "AR/USDT",
+    "ARB": "ARB/USDT", "ATOM": "ATOM/USDT", "AVAX": "AVAX/USDT",
+    "BCH": "BCH/USDT", "BLUR": "BLUR/USDT", "BTC": "BTC/USDT",
+    "COMP": "COMP/USDT", "DOGE": "DOGE/USDT", "DOT": "DOT/USDT",
+    "EGLD": "EGLD/USDT", "ETC": "ETC/USDT", "ETH": "ETH/USDT",
+    "FET": "FET/USDT", "FIL": "FIL/USDT", "FLOW": "FLOW/USDT",
+    "GRT": "GRT/USDT", "ICP": "ICP/USDT",
+    "INJ": "INJ/USDT", "KAS": "KAS/USDT", "KAVA": "KAVA/USDT",
+    "KSM": "KSM/USDT", "LINK": "LINK/USDT", "LTC": "LTC/USDT",
+    "LUNC": "LUNC/USDT", "MANA": "MANA/USDT", "MINA": "MINA/USDT",
+    "NEAR": "NEAR/USDT", "NEO": "NEO/USDT", "OP": "OP/USDT",
+    "POL": "POL/USDT", "RUNE": "RUNE/USDT", "SAND": "SAND/USDT",
+    "SHIB": "SHIB/USDT", "SOL": "SOL/USDT", "STX": "STX/USDT",
+    "SUI": "SUI/USDT", "TRX": "TRX/USDT",
+    "UNI": "UNI/USDT", "VET": "VET/USDT", "XLM": "XLM/USDT",
+    "XMR": "XMR/USDT", "XRP": "XRP/USDT",
 }
 
 # ========== تنظیمات سیگنال‌دهی متعادل ==========
-MIN_SIGNAL_CONFIDENCE = 40          # حداقل اطمینان قابل قبول
-MIN_DIRECTION_GAP = 6               # حداقل اختلاف امتیاز جهت
+MIN_SIGNAL_CONFIDENCE = 40
+MIN_DIRECTION_GAP = 6
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 
 MODE_CONFIGS = {
@@ -809,6 +814,7 @@ class MarketDataCache:
 cache = MarketDataCache()
 
 # ---------- متغیرهای سراسری ----------
+app = None
 last_plans = {}
 subscribed_chat_ids = set()
 user_currency = {}
@@ -831,6 +837,8 @@ whale_alert_cache = {"last_id": None, "ts": 0.0}
 news_history: List[Dict] = []
 news_message_ids: Dict[int, List[int]] = {}
 suggestion_history: List[Dict] = []
+
+channel_signal_messages: Dict[str, int] = {}  # signal_id -> channel_message_id
 
 last_check_time = {}
 last_sent_signals = {}
@@ -1352,7 +1360,6 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
     df = cache_obj.ohlcv.get(config["main_tf"], {}).get(code)
     results = {}
 
-    # 1) ساختار بازار
     if df is not None and len(df) > 30:
         high = df["high"].iloc[-20:]
         low = df["low"].iloc[-20:]
@@ -1377,7 +1384,6 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
     else:
         results["structure"] = False
 
-    # 2) هم‌گرایی تایم‌فریم
     main_tf = config["main_tf"]
     confirm_tfs = config["confirm_tfs"]
     mtf_count = 0
@@ -1400,7 +1406,6 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
                 mtf_count += 1
     results["mtf"] = mtf_count >= 1
 
-    # 3) مومنتوم
     momentum_score = 0
     if direction == "LONG":
         if ind["macd_hist"] > 0: momentum_score += 1
@@ -1414,20 +1419,16 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
         if ind["bearish_div"] or ind["macd_bearish_div"]: momentum_score += 1
     results["momentum"] = momentum_score >= 1
 
-    # 4) حجم
     results["volume"] = ind["volume_ratio"] >= 0.8 or ind["volume_spike"] or ind["volume_trend_up"]
 
-    # 5) احساسات بازار
     sentiment_score = await cache_obj._calculate_sentiment_score(code, ind)
     if direction == "LONG":
         results["sentiment"] = sentiment_score > -0.2
     else:
         results["sentiment"] = sentiment_score < 0.2
 
-    # 6) روند
     results["trend"] = ind["price_above_ema200"] if direction == "LONG" else not ind["price_above_ema200"]
 
-    # 7) جریان سفارشات
     if order_flow is None:
         order_flow = await cache_obj._get_order_flow(code)
     if order_flow == 0 or (0.9 <= order_flow <= 1.1):
@@ -1438,7 +1439,6 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
         else:
             results["order_flow"] = order_flow < 0.9
 
-    # 8) تنوع بازار
     breadth = cache_obj._get_market_breadth()
     sample_count = getattr(cache_obj, "_breadth_sample_count", 0)
     if direction == "LONG":
@@ -1446,11 +1446,9 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
     else:
         results["breadth"] = (breadth <= 55) if sample_count >= 5 else True
 
-    # 9) نوسان‌پذیری هوشمند
     bb_percent = ind.get("bb_percent", 0.5)
     results["smart_vol"] = 0.1 <= bb_percent <= 0.9
 
-    # 10) قدرت روند مکمل
     if direction == "LONG":
         results["comp_trend"] = ind["plus_di"] > ind["minus_di"]
     else:
@@ -1459,7 +1457,8 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
     return results
 
 # ---------- تولید سیگنال جدید ----------
-async def generate_trade_plan_v2(code, mode="standard"):
+async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False):
+    global app
     try:
         await cache.update_prices(force=True, codes=[code])
         ind = await cache.get_indicators(code, mode)
@@ -1582,7 +1581,9 @@ async def generate_trade_plan_v2(code, mode="standard"):
             market_condition="trending" if ind["adx"] >= 25 else "ranging",
             rr=levels["rr"]
         )
-        record_signal(plan)
+        signal_id = record_signal(plan)
+        if send_to_channel:
+            await send_signal_to_channel(plan, signal_id)
         return plan
     except Exception as e:
         logger.exception(f"generate_trade_plan_v2 error for {code}: {e}")
@@ -1664,7 +1665,9 @@ def signal_reasons(direction, ind, mode):
     return reasons, warnings
 
 def record_signal(plan):
+    signal_id = uuid.uuid4().hex[:10]
     record = {
+        "signal_id": signal_id,
         "symbol": plan.symbol,
         "direction": plan.direction,
         "entry_price": plan.entry_price,
@@ -1684,14 +1687,17 @@ def record_signal(plan):
     signal_history.append(record)
     if len(signal_history) > 200:
         signal_history.pop(0)
+    return signal_id
 
 def update_signal_status(symbol, current_price):
-    for rec in signal_history:
+    changed = []
+    for idx, rec in enumerate(signal_history):
         if rec["status"] != "open":
             continue
         if rec["symbol"] != symbol:
             continue
         direction = rec["direction"]
+        old_status = rec["status"]
         if direction == "LONG":
             if current_price <= rec["sl_price"]:
                 rec["status"] = "sl_hit"
@@ -1710,6 +1716,9 @@ def update_signal_status(symbol, current_price):
                 rec["status"] = "tp2_hit"
             elif current_price <= rec["tp_prices"][0]:
                 rec["status"] = "tp1_hit"
+        if rec["status"] != old_status:
+            changed.append(rec["signal_id"])
+    return changed
 
 # ---------- فرمت‌سازی ----------
 def format_main_signal_v2(plan, code, chat_id):
@@ -1998,6 +2007,98 @@ def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
     if current:
         parts.append(current.strip())
     return parts
+
+# ---------- توابع ارسال به کانال ----------
+async def send_signal_to_channel(plan, signal_id):
+    if not CHANNEL_ID:
+        return
+    direction_emoji = "🟢" if plan.direction == "LONG" else "🔴"
+    mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
+    text = (
+        f"🔔 سیگنال جدید | {plan.symbol}/USDT\n"
+        f"📈 جهت: {plan.direction} {direction_emoji}\n"
+        f"🛠️ حالت: {mode_label}\n"
+        f"🎯 اطمینان: {plan.confidence:.0f}٪\n"
+        f"📐 RR: 1:{plan.rr:.2f}\n\n"
+        f"📥 ورود: {plan.entry_price:.4f}\n"
+        f"🛑 حد ضرر: {plan.sl_price:.4f}\n"
+        f"🎯 اهداف:\n"
+        f"1️⃣ {plan.take_profits[0]:.4f}\n"
+        f"2️⃣ {plan.take_profits[1]:.4f}\n"
+        f"3️⃣ {plan.take_profits[2]:.4f}\n\n"
+        f"⚡ اهرم پیشنهادی: {plan.leverage}x\n"
+        f"🕒 {shamsi_now()}"
+    )
+    try:
+        msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(text), parse_mode="Markdown")
+        channel_signal_messages[signal_id] = msg.message_id
+        save_state()
+        logger.info(f"Signal sent to channel for {plan.symbol} (signal_id {signal_id})")
+    except Exception as e:
+        logger.error(f"Failed to send signal to channel: {e}")
+
+def build_signal_update_text_from_record(rec):
+    direction_emoji = "🟢" if rec["direction"] == "LONG" else "🔴"
+    mode_label = MODE_CONFIGS.get(rec["mode"], MODE_CONFIGS["standard"])["label"]
+    if rec["status"] == "tp1_hit":
+        status_text = "✅ TP1 زده شد"
+        sl_text = f"🛑 حد ضرر به Entry منتقل شد\n📥 ورود: {rec['entry_price']:.4f}"
+        targets = f"🎯 اهداف بعدی:\n2️⃣ {rec['tp_prices'][1]:.4f}\n3️⃣ {rec['tp_prices'][2]:.4f}"
+    elif rec["status"] == "tp2_hit":
+        status_text = "✅ TP2 زده شد"
+        sl_text = f"🛑 حد ضرر به TP1 منتقل شد\n🎯 هدف بعدی:\n3️⃣ {rec['tp_prices'][2]:.4f}"
+        targets = ""
+    elif rec["status"] == "tp3_hit":
+        status_text = "✅ TP3 زده شد"
+        sl_text = "🎯 سیگنال با موفقیت بسته شد"
+        targets = ""
+    elif rec["status"] == "sl_hit":
+        status_text = "❌ حد ضرر زده شد"
+        sl_text = f"🛑 قیمت به {rec['sl_price']:.4f} رسید"
+        targets = ""
+    else:
+        return ""
+
+    text = (
+        f"🔔 سیگنال | {rec['symbol']}/USDT\n"
+        f"📈 جهت: {rec['direction']} {direction_emoji}\n"
+        f"🛠️ حالت: {mode_label}\n\n"
+        f"{status_text}\n"
+        f"{sl_text}\n"
+        f"{targets}\n"
+        f"🕒 بروزرسانی: {shamsi_now()}"
+    )
+    return text
+
+async def update_channel_signal_message(signal_id):
+    if signal_id not in channel_signal_messages:
+        return
+    # پیدا کردن رکورد
+    rec = next((r for r in signal_history if r.get("signal_id") == signal_id), None)
+    if not rec:
+        return
+    new_text = build_signal_update_text_from_record(rec)
+    if not new_text:
+        return
+    message_id = channel_signal_messages[signal_id]
+    try:
+        await app.bot.edit_message_text(
+            chat_id=CHANNEL_ID,
+            message_id=message_id,
+            text=rtl_lines(new_text),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Failed to update channel message for signal {signal_id}: {e}")
+
+async def send_high_importance_news_to_channel(news_text):
+    if not CHANNEL_ID:
+        return
+    try:
+        await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(news_text), parse_mode="Markdown")
+        logger.info("High importance news sent to channel")
+    except Exception as e:
+        logger.error(f"Failed to send news to channel: {e}")
 
 # ---------- مرکز هوشمندسازی ----------
 async def optimization_center(update, context):
@@ -2528,14 +2629,18 @@ async def trailing_monitor_loop(app):
                             else:
                                 current = cache.prices.get(code, 0)
                                 if current > 0:
-                                    update_signal_status(code, current)
+                                    changed = update_signal_status(code, current)
+                                    for sid in changed:
+                                        await update_channel_signal_message(sid)
                                 continue
                             current = float(ticker.get("last") or ticker.get("close") or 0)
                         except Exception as e:
                             logger.debug("Trailing price fetch failed | code=%s | error=%s", code, e)
                             continue
                         if current <= 0: continue
-                        update_signal_status(code, current)
+                        changed = update_signal_status(code, current)
+                        for sid in changed:
+                            await update_channel_signal_message(sid)
                         tp1, tp2, tp3 = plan.take_profits[0], plan.take_profits[1], plan.take_profits[2]
                         if plan.direction == "LONG":
                             hit_tp1, hit_tp2, hit_tp3 = current >= tp1, current >= tp2, current >= tp3
@@ -2574,6 +2679,8 @@ async def news_monitor_loop(app):
                 important_news = await fetch_important_news()
                 for news in important_news:
                     add_news_alert(news["text"], importance="high", impact=news["impact"], details={"source": news.get("source", "")})
+                    if news.get("importance") == "high":
+                        await send_high_importance_news_to_channel(news["text"])
                 await check_and_notify_events(app)
         except Exception as e:
             logger.exception("News monitor error: %s", e)
@@ -2641,11 +2748,9 @@ async def whale_monitor_loop(app):
                                 f"🕒 {shamsi_now()}"
                             )
                             add_news_alert(text, importance="high", impact=impact, details=alert)
-                    for chat_id in subscribed_chat_ids:
-                        latest = news_history[-1] if news_history else None
-                        if latest and latest.get("importance") == "high":
-                            msg = await app.bot.send_message(chat_id=chat_id, text=rtl_lines(latest["text"]), parse_mode="Markdown")
-                            asyncio.create_task(delete_news_messages_after_delay(app, chat_id, msg.message_id))
+                    latest = news_history[-1] if news_history else None
+                    if latest and latest.get("importance") == "high":
+                        await send_high_importance_news_to_channel(latest["text"])
         except Exception as e:
             logger.exception("Whale monitor error: %s", e)
         await asyncio.sleep(WHALE_CHECK_SECONDS)
@@ -2795,7 +2900,7 @@ async def auto_report_loop(app):
                         continue
                     current_signals = {}
                     for code in favs:
-                        plan = await generate_trade_plan_v2(code, mode)
+                        plan = await generate_trade_plan_v2(code, mode, send_to_channel=True)
                         if plan:
                             current_signals[code] = plan.direction
                         await asyncio.sleep(0.5)
@@ -2803,7 +2908,9 @@ async def auto_report_loop(app):
                     for code, direction in current_signals.items():
                         prev = prev_signals.get(code)
                         if prev is None or prev["direction"] != direction:
-                            plan = await generate_trade_plan_v2(code, mode)
+                            # The plan was already generated in current_signals loop
+                            # But we need to send message to user; we can fetch plan again or use stored plan
+                            plan = await generate_trade_plan_v2(code, mode, send_to_channel=False)  # avoid duplicate channel send
                             if plan:
                                 main_text = format_main_signal_v2(plan, code, chat_id)
                                 msg = await app.bot.send_message(chat_id=chat_id, text=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
@@ -2967,13 +3074,14 @@ def save_state():
                 "news_history": news_history[-20:],
                 "signal_history": signal_history[-200:],
                 "suggestion_history": suggestion_history[-20:],
+                "channel_signal_messages": {str(k): v for k, v in channel_signal_messages.items()},
             }, f, ensure_ascii=False)
         os.replace(tmp, STATE_FILE)
     except Exception as e:
         logger.warning("State save failed: %s", e)
 
 def load_state():
-    global subscribed_chat_ids, user_currency, user_trading_mode, user_favorites, user_role, news_history, signal_history, suggestion_history
+    global subscribed_chat_ids, user_currency, user_trading_mode, user_favorites, user_role, news_history, signal_history, suggestion_history, channel_signal_messages
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -2985,17 +3093,21 @@ def load_state():
         news_history = data.get("news_history", [])
         signal_history = data.get("signal_history", [])
         suggestion_history = data.get("suggestion_history", [])
-        logger.info("State restored: %s users, %s signals, %s suggestions", len(subscribed_chat_ids), len(signal_history), len(suggestion_history))
+        channel_signal_messages = {str(k): int(v) for k, v in data.get("channel_signal_messages", {}).items()}
+        logger.info("State restored: %s users, %s signals, %s suggestions, %s channel messages",
+                    len(subscribed_chat_ids), len(signal_history), len(suggestion_history), len(channel_signal_messages))
     except FileNotFoundError:
         logger.info("No state file; starting fresh.")
         news_history = []
         signal_history = []
         suggestion_history = []
+        channel_signal_messages = {}
     except Exception as e:
         logger.warning("State load failed: %s", e)
         news_history = []
         signal_history = []
         suggestion_history = []
+        channel_signal_messages = {}
 
 # ---------- Button handler ----------
 async def button_handler(update, context):
@@ -3561,9 +3673,10 @@ async def post_init(app):
     app.create_task(macro_event_monitor_loop(app))
     app.create_task(macro_data_loop(app))
     app.create_task(optimization_loop(app))
-    logger.info("Signal Bot V59 (Balanced Signals) started")
+    logger.info("Signal Bot V59 (Channel Integration) started")
 
 def main():
+    global app
     if not BOT_TOKEN:
         raise RuntimeError("❌ BOT_TOKEN در .env تنظیم نشده است.")
     if not ALLOWED_USER_IDS:
