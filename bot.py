@@ -1,8 +1,9 @@
 """
 Telegram Signal Bot V59 - Institutional Grade with Intelligence Center
+- سیگنال‌دهی متعادل برای تمام رژیم‌های بازار
 - رفع باگ بحرانی عدم صدور سیگنال (فیلد rr)
-- تنظیم لایه‌ها برای صدور سیگنال در تمام رژیم‌های بازار (رنج، صعودی، نزولی، پرنوسان)
-- بهینه‌سازی دریافت داده و کش
+- دکمه بازگشت تحلیل جامع به پنل مدیریت
+- اصلاح دکمه بازگشت مرکز هوشمند
 """
 
 import asyncio
@@ -144,9 +145,9 @@ GATEIO_SYMBOL_MAP = {
     "XMR": "XMR_USDT", "XRP": "XRP_USDT",
 }
 
-# ========== تنظیمات سخت‌گیری بسیار کاهش‌یافته ==========
-MIN_SIGNAL_CONFIDENCE = 10
-MIN_DIRECTION_GAP = 0          # <-- حذف شکاف اجباری، انتخاب جهت با امتیاز بالاتر
+# ========== تنظیمات سیگنال‌دهی متعادل ==========
+MIN_SIGNAL_CONFIDENCE = 40          # حداقل اطمینان قابل قبول
+MIN_DIRECTION_GAP = 6               # حداقل اختلاف امتیاز جهت
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 
 MODE_CONFIGS = {
@@ -158,9 +159,9 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.4, 0.8, 1.2],
         "sl_atr_mult": 0.8,
         "max_leverage": 10,
-        "min_rr": 0.05,
+        "min_rr": 0.50,
         "adx_min": 5,
-        "min_confirmations": 1,
+        "min_confirmations": 3,
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -171,9 +172,9 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.6, 1.2, 1.8],
         "sl_atr_mult": 1.0,
         "max_leverage": 7,
-        "min_rr": 0.08,
+        "min_rr": 0.80,
         "adx_min": 7,
-        "min_confirmations": 2,
+        "min_confirmations": 4,
         "check_interval": 10 * 60,
     },
     "standard": {
@@ -184,9 +185,9 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.8, 1.5, 2.5],
         "sl_atr_mult": 1.2,
         "max_leverage": 5,
-        "min_rr": 0.10,
+        "min_rr": 1.20,
         "adx_min": 8,
-        "min_confirmations": 2,
+        "min_confirmations": 5,
         "check_interval": 30 * 60,
     },
     "conservative": {
@@ -197,9 +198,9 @@ MODE_CONFIGS = {
         "tp_multipliers": [1.5, 2.5, 4.0],
         "sl_atr_mult": 2.0,
         "max_leverage": 3,
-        "min_rr": 0.15,
+        "min_rr": 1.50,
         "adx_min": 10,
-        "min_confirmations": 3,
+        "min_confirmations": 6,
         "check_interval": 60 * 60,
     },
 }
@@ -267,7 +268,7 @@ class TradePlan:
     adx_at_time: float = 0.0
     rsi_at_time: float = 0.0
     market_condition: str = ""
-    rr: float = 0.0          # <-- فیلد حیاتی اضافه شد
+    rr: float = 0.0
 
 class MarketDataCache:
     _instance = None
@@ -663,7 +664,6 @@ class MarketDataCache:
         needed = [main_tf] + confirm_tfs
         ok = await self.ensure_symbol_data(code, needed)
         if not ok:
-            # تلاش دوباره با force
             ok = await self.ensure_symbol_data(code, needed, force=True)
             if not ok:
                 return None
@@ -1360,7 +1360,6 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
         prev_high = float(high.max())
         prev_low = float(low.min())
         if direction == "LONG":
-            # در رنج و صعودی: قیمت بالای کف ۲۰ کندلی
             structure_ok = price > prev_low * 0.999
             last = df.iloc[-1]
             if not structure_ok and last["close"] > last["open"] and (last["close"] - last["low"]) > 2 * (last["high"] - last["close"]):
@@ -1368,7 +1367,6 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
             if not structure_ok and price <= (prev_high + prev_low) / 2:
                 structure_ok = True
         else:
-            # در رنج و نزولی: قیمت زیر سقف ۲۰ کندلی
             structure_ok = price < prev_high * 1.001
             last = df.iloc[-1]
             if not structure_ok and last["close"] < last["open"] and (last["high"] - last["close"]) > 2 * (last["close"] - last["low"]):
@@ -1414,7 +1412,7 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
         if ind["rsi"] < 50: momentum_score += 1
         if ind["roc"] < 0: momentum_score += 1
         if ind["bearish_div"] or ind["macd_bearish_div"]: momentum_score += 1
-    results["momentum"] = momentum_score >= 1   # <-- آستانه کاهش یافت
+    results["momentum"] = momentum_score >= 1
 
     # 4) حجم
     results["volume"] = ind["volume_ratio"] >= 0.8 or ind["volume_spike"] or ind["volume_trend_up"]
@@ -1422,7 +1420,7 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
     # 5) احساسات بازار
     sentiment_score = await cache_obj._calculate_sentiment_score(code, ind)
     if direction == "LONG":
-        results["sentiment"] = sentiment_score > -0.2     # خنثی هم تأیید می‌شود
+        results["sentiment"] = sentiment_score > -0.2
     else:
         results["sentiment"] = sentiment_score < 0.2
 
@@ -1433,7 +1431,7 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
     if order_flow is None:
         order_flow = await cache_obj._get_order_flow(code)
     if order_flow == 0 or (0.9 <= order_flow <= 1.1):
-        results["order_flow"] = True    # حالت خنثی تأیید می‌شود
+        results["order_flow"] = True
     else:
         if direction == "LONG":
             results["order_flow"] = order_flow > 1.1
@@ -1450,7 +1448,7 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
 
     # 9) نوسان‌پذیری هوشمند
     bb_percent = ind.get("bb_percent", 0.5)
-    results["smart_vol"] = 0.1 <= bb_percent <= 0.9   # حالت خنثی در رنج
+    results["smart_vol"] = 0.1 <= bb_percent <= 0.9
 
     # 10) قدرت روند مکمل
     if direction == "LONG":
@@ -1489,7 +1487,6 @@ async def generate_trade_plan_v2(code, mode="standard"):
         confidence = 0
         layers = {}
 
-        # انتخاب جهت: امتیاز بالاتر، در تساوی بر اساس RSI و روند
         if long_confirmed >= config["min_confirmations"] and long_score >= short_score + MIN_DIRECTION_GAP:
             direction = "LONG"
             confidence = long_score
@@ -1499,7 +1496,6 @@ async def generate_trade_plan_v2(code, mode="standard"):
             confidence = short_score
             layers = short_layers
         else:
-            # اگر هیچ‌کدام حداقل تأیید را نداشتند
             if long_confirmed >= config["min_confirmations"] and long_score >= short_score:
                 direction = "LONG"
                 confidence = long_score
@@ -1584,7 +1580,7 @@ async def generate_trade_plan_v2(code, mode="standard"):
             adx_at_time=ind["adx"],
             rsi_at_time=ind["rsi"],
             market_condition="trending" if ind["adx"] >= 25 else "ranging",
-            rr=levels["rr"]               # <-- مقدار RR حتماً ست می‌شود
+            rr=levels["rr"]
         )
         record_signal(plan)
         return plan
@@ -1680,7 +1676,7 @@ def record_signal(plan):
         "mode": plan.mode,
         "win_rate_estimate": plan.win_rate_estimate,
         "signal_grade": plan.signal_grade,
-        "rr": plan.rr,          # <-- حالا بدون خطا
+        "rr": plan.rr,
         "adx_at_time": plan.adx_at_time,
         "rsi_at_time": plan.rsi_at_time,
         "market_condition": plan.market_condition,
@@ -2158,7 +2154,7 @@ async def comprehensive_analysis(update, context):
                 "• ADX پایین (بازار رنج)\n"
                 "• تعداد لایه‌های تأییدشده کمتر از حد نیاز\n"
                 "• نسبت ریسک به بازده پایین",
-                reply_markup=kb_back_main(),
+                reply_markup=kb_back_to_admin_panel(),
                 parse_mode="Markdown"
             )
             return
@@ -2185,12 +2181,12 @@ async def comprehensive_analysis(update, context):
         text += f"📊 جمع‌بندی: {len(active_signals_list)} سیگنال فعال\n"
         text += f"🟢 لانگ: {long_count} | 🔴 شورت: {short_count}"
         chunks = split_long_message(text)
-        await query.edit_message_text(chunks[0], reply_markup=kb_back_main(), parse_mode="Markdown")
+        await query.edit_message_text(chunks[0], reply_markup=kb_back_to_admin_panel(), parse_mode="Markdown")
         for chunk in chunks[1:]:
             await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
     except Exception as e:
         logger.exception(f"Comprehensive analysis error: {e}")
-        await query.edit_message_text(f"❌ خطا در تحلیل جامع:\n{str(e)}", reply_markup=kb_back_main())
+        await query.edit_message_text(f"❌ خطا در تحلیل جامع:\n{str(e)}", reply_markup=kb_back_to_admin_panel())
 
 # ---------- مدیریت صفحه نمایش ----------
 async def clear_interactive_screen(context, chat_id, keep_id=None):
@@ -2276,7 +2272,7 @@ def kb_optimization_center():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 پیشنهادات فعال", callback_data="optimization_active")],
         [InlineKeyboardButton("📜 تاریخچه پیشنهادات", callback_data="optimization_history")],
-        [InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", callback_data="admin_panel")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")],
     ])
 
 def kb_back_to_optimization():
@@ -2287,6 +2283,11 @@ def kb_back_to_optimization():
 def kb_back_main():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙 بازگشت به منو اصلی", callback_data="menu_main")]
+    ])
+
+def kb_back_to_admin_panel():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")]
     ])
 
 def kb_events_menu():
@@ -3560,7 +3561,7 @@ async def post_init(app):
     app.create_task(macro_event_monitor_loop(app))
     app.create_task(macro_data_loop(app))
     app.create_task(optimization_loop(app))
-    logger.info("Signal Bot V59 (Intelligence Center with 2 sections) started")
+    logger.info("Signal Bot V59 (Balanced Signals) started")
 
 def main():
     if not BOT_TOKEN:
