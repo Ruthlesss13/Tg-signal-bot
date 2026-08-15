@@ -1,8 +1,9 @@
 """
-Telegram Signal Bot V60 - Institutional Grade with Intelligence Center
+Telegram Signal Bot V61 - Institutional Grade with Intelligence Center
 - کانال تلگرام + ارسال خودکار سیگنال‌ها (پویا بر اساس check_interval)
 - لایه واکنش سریع برای جلوگیری از فرصت‌سوزی
-- مدیریت پیام کانال: یک پیام فعال برای هر ارز/حالت، ویرایش به‌هنگام تغییر، برچسب سیگنال اصلاح‌شده
+- مدیریت پیام کانال: حذف پیام قبلی و ارسال پیام جدید برای اصلاح و TP/SL
+- حداقل فاصله درصدی متعادل برای اهداف
 - دکمه دریافت سیگنال‌های فعال + آمار سیگنال‌ها (با احترام به واحد پولی کاربر)
 - جلوگیری از ثبت تکراری سیگنال با قفل
 - رفع Rate Limit و XMR
@@ -164,7 +165,7 @@ MODE_CONFIGS = {
         "main_tf": "5m",
         "confirm_tfs": ["15m", "1h"],
         "entry_ladder_atr": [0.0, 0.2, 0.4],
-        "tp_multipliers": [0.4, 0.8, 1.2],
+        "tp_multipliers": [0.8, 1.5, 2.5],
         "sl_atr_mult": 0.8,
         "max_leverage": 10,
         "min_rr": 0.50,
@@ -177,7 +178,7 @@ MODE_CONFIGS = {
         "main_tf": "15m",
         "confirm_tfs": ["1h", "4h"],
         "entry_ladder_atr": [0.0, 0.3, 0.6],
-        "tp_multipliers": [0.6, 1.2, 1.8],
+        "tp_multipliers": [1.2, 2.5, 4.0],
         "sl_atr_mult": 1.0,
         "max_leverage": 7,
         "min_rr": 0.80,
@@ -190,7 +191,7 @@ MODE_CONFIGS = {
         "main_tf": "1h",
         "confirm_tfs": ["4h", "1d"],
         "entry_ladder_atr": [0.0, 0.4, 0.8],
-        "tp_multipliers": [0.8, 1.5, 2.5],
+        "tp_multipliers": [1.5, 3.0, 5.0],
         "sl_atr_mult": 1.2,
         "max_leverage": 5,
         "min_rr": 1.20,
@@ -203,7 +204,7 @@ MODE_CONFIGS = {
         "main_tf": "4h",
         "confirm_tfs": ["1d", "1d"],
         "entry_ladder_atr": [0.0, 0.6, 1.2],
-        "tp_multipliers": [1.5, 2.5, 4.0],
+        "tp_multipliers": [2.0, 4.0, 6.0],
         "sl_atr_mult": 2.0,
         "max_leverage": 3,
         "min_rr": 1.50,
@@ -211,6 +212,13 @@ MODE_CONFIGS = {
         "min_confirmations": 6,
         "check_interval": 60 * 60,
     },
+}
+
+MIN_TP_PERCENTAGES = {
+    "fast": [0.4, 0.8, 1.5],
+    "semi_fast": [0.6, 1.2, 2.5],
+    "standard": [0.8, 1.5, 3.0],
+    "conservative": [1.2, 2.5, 5.0],
 }
 
 LAYER_WEIGHTS = {
@@ -1642,10 +1650,18 @@ def build_ladder_weighted(ind, direction, mode):
     if atr <= 0: atr = price * 0.01
     entries = [price - atr * m if direction == "LONG" else price + atr * m for m in config["entry_ladder_atr"]]
     avg_entry = sum(e * w for e, w in zip(entries, ENTRY_WEIGHTS))
-    take_profits = [avg_entry + atr * m if direction == "LONG" else avg_entry - atr * m for m in config["tp_multipliers"]]
+    min_pcts = MIN_TP_PERCENTAGES.get(mode, [0.5, 1.0, 2.0])
     if direction == "LONG":
+        take_profits = [
+            max(avg_entry + atr * m, avg_entry * (1 + min_pct/100))
+            for m, min_pct in zip(config["tp_multipliers"], min_pcts)
+        ]
         initial_stop = min(avg_entry - config["sl_atr_mult"] * atr, ind["support"] * 0.995)
     else:
+        take_profits = [
+            min(avg_entry - atr * m, avg_entry * (1 - min_pct/100))
+            for m, min_pct in zip(config["tp_multipliers"], min_pcts)
+        ]
         initial_stop = max(avg_entry + config["sl_atr_mult"] * atr, ind["resistance"] * 1.005)
     risk = abs(avg_entry - initial_stop)
     reward = abs(take_profits[-1] - avg_entry)
@@ -2071,6 +2087,10 @@ async def send_signal_to_channel(plan, signal_id):
             if old_hash == new_hash:
                 logger.debug(f"No change for {key}, skipping channel message")
                 return
+            try:
+                await app.bot.delete_message(chat_id=CHANNEL_ID, message_id=existing["message_id"])
+            except Exception as e:
+                logger.error(f"Failed to delete old channel message for {key}: {e}")
             direction_emoji = "🟢" if plan.direction == "LONG" else "🔴"
             mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
             text = (
@@ -2086,23 +2106,21 @@ async def send_signal_to_channel(plan, signal_id):
                 f"2️⃣ {format_channel_price(plan.tp_prices[1])}\n"
                 f"3️⃣ {format_channel_price(plan.tp_prices[2])}\n\n"
                 f"⚡ اهرم پیشنهادی: {plan.leverage}x\n"
-                f"🕒 بروزرسانی: {shamsi_now()}\n\n"
+                f"🕒 {shamsi_now()}\n\n"
                 f"⚠️ سیگنال قبلی با داده‌های جدید اصلاح شد."
             )
             try:
-                await app.bot.edit_message_text(
-                    chat_id=CHANNEL_ID,
-                    message_id=existing["message_id"],
-                    text=rtl_lines(text),
-                    parse_mode="Markdown"
-                )
-                existing["hash"] = new_hash
-                existing["signal_id"] = signal_id
-                channel_signal_messages[signal_id] = existing["message_id"]
+                new_msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(text), parse_mode="Markdown")
+                channel_message_map[key] = {
+                    "signal_id": signal_id,
+                    "message_id": new_msg.message_id,
+                    "hash": new_hash
+                }
+                channel_signal_messages[signal_id] = new_msg.message_id
                 save_state()
-                logger.info(f"Channel message updated for {key}")
+                logger.info(f"Channel message replaced for {key}")
             except Exception as e:
-                logger.error(f"Failed to edit channel message for {key}: {e}")
+                logger.error(f"Failed to send corrected channel message for {key}: {e}")
         else:
             direction_emoji = "🟢" if plan.direction == "LONG" else "🔴"
             mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
@@ -2176,19 +2194,24 @@ async def update_channel_signal_message(signal_id):
     new_text = build_signal_update_text_from_record(rec)
     if not new_text:
         return
-    message_id = channel_signal_messages[signal_id]
+    old_message_id = channel_signal_messages[signal_id]
     try:
-        await app.bot.edit_message_text(
-            chat_id=CHANNEL_ID,
-            message_id=message_id,
-            text=rtl_lines(new_text),
-            parse_mode="Markdown"
-        )
+        await app.bot.delete_message(chat_id=CHANNEL_ID, message_id=old_message_id)
+    except Exception as e:
+        logger.error(f"Failed to delete old channel message for signal {signal_id}: {e}")
+    try:
+        new_msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(new_text), parse_mode="Markdown")
+        channel_signal_messages[signal_id] = new_msg.message_id
+        key = (rec["symbol"], rec["mode"])
+        if key in channel_message_map:
+            channel_message_map[key]["message_id"] = new_msg.message_id
+            channel_message_map[key]["signal_id"] = signal_id
+    except Exception as e:
+        logger.error(f"Failed to send new final channel message for signal {signal_id}: {e}")
+    if rec["status"] in ["tp1_hit", "tp2_hit", "tp3_hit", "sl_hit"]:
         key = (rec["symbol"], rec["mode"])
         if key in channel_message_map:
             del channel_message_map[key]
-    except Exception as e:
-        logger.error(f"Failed to update channel message for signal {signal_id}: {e}")
 
 async def send_high_importance_news_to_channel(news_text):
     if not CHANNEL_ID:
@@ -4108,7 +4131,7 @@ async def post_init(app):
     app.create_task(optimization_loop(app))
     app.create_task(channel_broadcast_loop(app))
     app.create_task(trigger_scanner_loop(app))
-    logger.info("Signal Bot V60 (Channel + Stats + Trigger Scanner) started")
+    logger.info("Signal Bot V61 (Channel + Stats + Trigger Scanner) started")
 
 def main():
     global app
