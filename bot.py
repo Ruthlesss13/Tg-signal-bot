@@ -1,16 +1,32 @@
 """
-Telegram Signal Bot V61 - Institutional Grade with Intelligence Center
-- کانال تلگرام + ارسال خودکار سیگنال‌ها (پویا بر اساس check_interval)
-- لایه واکنش سریع برای جلوگیری از فرصت‌سوزی
-- مدیریت پیام کانال: حذف پیام قبلی و ارسال پیام جدید برای اصلاح و TP/SL
-- حداقل فاصله درصدی متعادل برای اهداف
-- دکمه دریافت سیگنال‌های فعال + آمار سیگنال‌ها (با احترام به واحد پولی کاربر)
-- جلوگیری از ثبت تکراری سیگنال با قفل
-- رفع Rate Limit و XMR
-- سیگنال‌دهی متعادل برای تمام رژیم‌های بازار
-- حذف پیام‌های تأیید پس از انتخاب واحد پولی/حالت معاملاتی
-- نمایش قیمت تومان در کانال
-- راهنمای بروز شامل بخش‌های جدید
+Telegram Signal Bot V62 - Institutional Grade with Intelligence Center
+(نسخه اصلاح‌شده - رفع باگ‌های سیگنال‌دهی کانال)
+
+خلاصه اصلاحات نسبت به V61:
+1) کانال دیگر بر اساس «حالت/نوع معامله» سیگنال جدا صادر نمی‌کند؛ برای هر ارز فقط یک
+   تحلیل واحد (CHANNEL_SIGNAL_MODE) با آستانه‌های سخت‌گیرانه‌تر (CHANNEL_MIN_*) بررسی می‌شود
+   تا حداکثر یک سیگنال زنده به‌ازای هر ارز در کانال وجود داشته باشد.
+2) رفع باگ حیاتی در update_signal_status: در نسخه قبل به‌محض برخورد قیمت به TP1، رکورد
+   سیگنال دیگر هرگز برای TP2/TP3/برخورد بعدی حد ضرر پیگیری نمی‌شد (چون فقط رکوردهای
+   status == "open" بررسی می‌شدند). اکنون پیگیری تا رسیدن به وضعیت نهایی ادامه دارد و
+   حد ضرر هم به‌صورت پویا (Trailing) بعد از هر TP جابه‌جا می‌شود.
+3) رفع باگ: پایش TP/SL سیگنال‌های کانال قبلاً فقط از طریق «سیگنال‌های فعال شخصی هر
+   کاربر» (active_signals) انجام می‌شد؛ یعنی اگر هیچ کاربری یک سیگنال کانال را شخصاً
+   دنبال نکرده بود، آن سیگنال هرگز TP/SL‌اش چک نمی‌شد و پیام کانال هرگز بروزرسانی/حذف
+   نمی‌شد. حلقه مستقل channel_signal_monitor_loop این مشکل را برطرف کرده است.
+4) حذف حلقه قدیمی trigger_scanner_loop که با هر نوسان ۰.۵٪ قیمت، سیگنال تازه (با آستانه
+   پایین) برای دو حالت معاملاتی صادر می‌کرد و منبع اصلی سیگنال‌های کاذب/تکراری بود.
+5) رفع باگ در auto_report_loop: این حلقه برای گزارش خصوصی هر کاربر، اشتباهاً
+   send_to_channel=True صدا می‌زد و به همین دلیل سیگنال‌های شخصی/دلخواه هر کاربر
+   (با مود دلخواه خودش) هم وارد کانال عمومی می‌شد.
+6) افزایش آستانه‌های اطمینان/اختلاف جهت/تعداد لایه‌های تاییدی و افزودن فیلتر ADX
+   مخصوص کانال، تا فقط سیگنال‌های با اطمینان بالا در کانال منتشر شوند.
+7) وقتی جهت یک سیگنال باز کاملاً برعکس می‌شود، رکورد قبلی به‌جای بازنویسی خاموش،
+   status="invalidated" می‌گیرد (از آمار موفق/ناموفق حذف می‌شود) و سیگنال تازه با
+   شناسه جدید ثبت و در کانال به‌عنوان «سیگنال جدید» ارسال می‌شود؛ وقتی فقط ورود/اهداف
+   کمی تغییر کرده (همان جهت)، همان پیام با متن «سیگنال اصلاح شد» جایگزین می‌شود.
+8) کول‌داون ۴۵ دقیقه‌ای بعد از بسته‌شدن هر سیگنال کانال، برای جلوگیری از باز شدن فوری
+   سیگنال بعدی همان ارز (کاهش تعداد سیگنال‌ها طبق درخواست).
 """
 
 import asyncio
@@ -158,6 +174,17 @@ GATEIO_SYMBOL_MAP = {
 MIN_SIGNAL_CONFIDENCE = 40
 MIN_DIRECTION_GAP = 6
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
+
+# ========== تنظیمات اختصاصی سیگنال‌های کانال (سخت‌گیرانه‌تر برای کاهش سیگنال‌های کاذب) ==========
+# در کانال دیگر بر اساس «نوع معامله/حالت» سیگنال جدا ارسال نمی‌شود؛ برای هر ارز فقط
+# یک تحلیل واحد و معتبرتر (بر پایه‌ی حالت CHANNEL_SIGNAL_MODE) در نظر گرفته می‌شود.
+CHANNEL_SIGNAL_MODE = "standard"
+CHANNEL_CHECK_INTERVAL_SECONDS = 20 * 60       # هر ۲۰ دقیقه یک دور بررسی کامل روی همه ارزها
+CHANNEL_REOPEN_COOLDOWN_SECONDS = 45 * 60      # بعد از بسته‌شدن یک سیگنال، حداقل فاصله تا سیگنال بعدی همان ارز
+CHANNEL_MIN_SIGNAL_CONFIDENCE = 68             # حداقل اطمینان برای انتشار در کانال (به‌جای ۴۰ عمومی)
+CHANNEL_MIN_DIRECTION_GAP = 18                 # اختلاف امتیاز لانگ/شورت باید بسیار واضح باشد
+CHANNEL_MIN_CONFIRMATIONS_BONUS = 2            # لایه‌های تاییدی اضافه نسبت به حداقل حالت پایه
+CHANNEL_ADX_MIN = 20                           # فقط در بازار با روند نسبتا قوی سیگنال کانال صادر شود
 
 MODE_CONFIGS = {
     "fast": {
@@ -854,7 +881,11 @@ news_message_ids: Dict[int, List[int]] = {}
 suggestion_history: List[Dict] = []
 
 channel_signal_messages: Dict[str, int] = {}
-channel_message_map: Dict[Tuple[str, str], Dict] = {}
+# کلید این دیکشنری از نسخه اصلاح‌شده فقط نماد ارز است (نه ارز+حالت معاملاتی)
+# چون در کانال برای هر ارز فقط یک تحلیل/سیگنال نهایی وجود دارد
+channel_message_map: Dict[str, Dict] = {}
+# آخرین زمانی که سیگنال یک ارز در کانال بسته شد (TP3 یا SL)، برای جلوگیری از باز شدن فوری سیگنال جدید
+last_channel_signal_close_time: Dict[str, float] = {}
 
 signal_history_lock = asyncio.Lock()
 channel_lock = asyncio.Lock()
@@ -1485,15 +1516,38 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
     return results
 
 # ---------- تولید سیگنال جدید ----------
-async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False):
+async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False,
+                                  min_confidence=None, min_gap=None,
+                                  min_confirmations_bonus=0, adx_min_override=None):
+    """
+    اگر send_to_channel=True باشد، می‌توان از طریق پارامترهای min_confidence/min_gap/
+    min_confirmations_bonus/adx_min_override سخت‌گیری بیشتری نسبت به تحلیل شخصی کاربر
+    اعمال کرد (برای کاهش سیگنال‌های کاذب کانال) بدون این‌که رفتار حالت‌های شخصی تغییر کند.
+    """
     global app
     try:
+        # جلوگیری از باز کردن فوری یک سیگنال جدید کانال بلافاصله بعد از بسته‌شدن سیگنال قبلی همان ارز
+        if send_to_channel:
+            has_open_record = any(
+                r["symbol"] == code and r["mode"] == mode and r["status"] == "open"
+                for r in signal_history
+            )
+            if not has_open_record:
+                last_close = last_channel_signal_close_time.get(code, 0)
+                if time.time() - last_close < CHANNEL_REOPEN_COOLDOWN_SECONDS:
+                    logger.debug(f"Channel cooldown active for {code}, skipping")
+                    return None
+
         await cache.update_prices(force=True, codes=[code])
         ind = await cache.get_indicators(code, mode)
         if not ind:
             logger.info(f"No indicators for {code}")
             return None
         config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
+        effective_min_confidence = min_confidence if min_confidence is not None else MIN_SIGNAL_CONFIDENCE
+        effective_min_gap = min_gap if min_gap is not None else MIN_DIRECTION_GAP
+        effective_min_confirmations = config["min_confirmations"] + max(0, min_confirmations_bonus)
+        effective_adx_min = adx_min_override if adx_min_override is not None else config["adx_min"]
         order_flow = await cache._get_order_flow(code)
         long_layers = await analyze_layers(code, "LONG", ind, mode, cache, order_flow)
         short_layers = await analyze_layers(code, "SHORT", ind, mode, cache, order_flow)
@@ -1514,11 +1568,25 @@ async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False):
         confidence = 0
         layers = {}
 
-        if long_confirmed >= config["min_confirmations"] and long_score >= short_score + MIN_DIRECTION_GAP:
+        if send_to_channel:
+            # برای سیگنال کانال، فقط حالتی که خیلی واضح یک جهت را تایید می‌کند پذیرفته می‌شود
+            # (بدون حالت میانی/ضعیف‌تر «else» که در نسخه قبل باعث سیگنال‌های کم‌اطمینان می‌شد)
+            if long_confirmed >= effective_min_confirmations and long_score >= short_score + effective_min_gap:
+                direction = "LONG"
+                confidence = long_score
+                layers = long_layers
+            elif short_confirmed >= effective_min_confirmations and short_score >= long_score + effective_min_gap:
+                direction = "SHORT"
+                confidence = short_score
+                layers = short_layers
+            else:
+                logger.info(f"No clear channel-grade direction for {code}: long_conf={long_confirmed}, short_conf={short_confirmed}, gap={abs(long_score-short_score)}")
+                return None
+        elif long_confirmed >= config["min_confirmations"] and long_score >= short_score + effective_min_gap:
             direction = "LONG"
             confidence = long_score
             layers = long_layers
-        elif short_confirmed >= config["min_confirmations"] and short_score >= long_score + MIN_DIRECTION_GAP:
+        elif short_confirmed >= config["min_confirmations"] and short_score >= long_score + effective_min_gap:
             direction = "SHORT"
             confidence = short_score
             layers = short_layers
@@ -1535,8 +1603,12 @@ async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False):
                 logger.info(f"No direction for {code}: long_conf={long_confirmed}, short_conf={short_confirmed}, gap={abs(long_score-short_score)}")
                 return None
 
-        if confidence < MIN_SIGNAL_CONFIDENCE:
-            logger.info(f"Confidence too low for {code}: {confidence:.1f} < {MIN_SIGNAL_CONFIDENCE}")
+        if confidence < effective_min_confidence:
+            logger.info(f"Confidence too low for {code}: {confidence:.1f} < {effective_min_confidence}")
+            return None
+
+        if send_to_channel and ind.get("adx", 0) < effective_adx_min:
+            logger.info(f"ADX too low for channel signal {code}: {ind.get('adx', 0):.1f} < {effective_adx_min}")
             return None
 
         levels = build_ladder_weighted(ind, direction, mode)
@@ -1612,14 +1684,17 @@ async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False):
         async with signal_history_lock:
             existing_signal = next((r for r in signal_history if r["symbol"] == code and r["mode"] == mode and r["status"] == "open"), None)
             if existing_signal:
-                if (existing_signal["direction"] == direction and
-                    abs(existing_signal["entry_price"] - entry_avg) / entry_avg < 0.002 and
-                    abs(existing_signal["sl_price"] - levels["stop_losses"][0]) / levels["stop_losses"][0] < 0.002):
+                same_direction = existing_signal["direction"] == direction
+                entry_close = abs(existing_signal["entry_price"] - entry_avg) / entry_avg < 0.002 if entry_avg else False
+                sl0 = levels["stop_losses"][0]
+                sl_close = abs(existing_signal["sl_price"] - sl0) / sl0 < 0.002 if sl0 else False
+                if same_direction and entry_close and sl_close:
+                    # بدون تغییر واقعی؛ فقط تازه‌سازی timestamp، پیام کانال دوباره ارسال نمی‌شود
                     existing_signal["timestamp"] = time.time()
                     signal_id = existing_signal["signal_id"]
-                else:
+                elif same_direction:
+                    # همان جهت اما ورود/اهداف تغییر کرده: همان سیگنال اصلاح می‌شود (پیام «سیگنال اصلاح شد»)
                     existing_signal.update({
-                        "direction": direction,
                         "entry_price": entry_avg,
                         "sl_price": levels["stop_losses"][0],
                         "tp_prices": levels["take_profits"],
@@ -1633,6 +1708,12 @@ async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False):
                         "market_condition": "trending" if ind["adx"] >= 25 else "ranging",
                     })
                     signal_id = existing_signal["signal_id"]
+                else:
+                    # جهت کاملاً برعکس شده: سیگنال قبلی نامعتبر می‌شود (از آمار موفق/ناموفق حذف می‌شود)
+                    # و یک سیگنال کاملاً تازه با شناسه جدید ثبت می‌شود
+                    existing_signal["status"] = "invalidated"
+                    existing_signal["invalidated_at"] = time.time()
+                    signal_id = record_signal(plan)
             else:
                 signal_id = record_signal(plan)
 
@@ -1751,33 +1832,55 @@ def record_signal(plan):
         signal_history.pop(0)
     return signal_id
 
+CLOSED_STATUSES = ("tp3_hit", "sl_hit", "invalidated")
+_STAGE_RANK = {"open": 0, "tp1_hit": 1, "tp2_hit": 2}
+
 def update_signal_status(symbol, current_price):
+    """
+    بروزرسانی وضعیت سیگنال‌های باز یک ارز بر اساس قیمت لحظه‌ای.
+    رفع باگ نسخه قبل: قبلاً فقط رکوردهایی با status == "open" بررسی می‌شدند،
+    یعنی به محض رسیدن به TP1، سیگنال دیگر هرگز برای TP2/TP3/برخورد حد ضرر
+    پیگیری نمی‌شد. اکنون تا رسیدن به یکی از وضعیت‌های نهایی (TP3، SL، یا
+    نامعتبر شدن) پیگیری ادامه دارد و حد ضرر هم به‌صورت پویا (Trailing) جابه‌جا می‌شود:
+    بعد از TP1 → حد ضرر به نقطه ورود، بعد از TP2 → حد ضرر به TP1.
+    """
     changed = []
-    for idx, rec in enumerate(signal_history):
-        if rec["status"] != "open":
-            continue
-        if rec["symbol"] != symbol:
+    for rec in signal_history:
+        if rec["symbol"] != symbol or rec["status"] in CLOSED_STATUSES:
             continue
         direction = rec["direction"]
         old_status = rec["status"]
-        if direction == "LONG":
-            if current_price <= rec["sl_price"]:
-                rec["status"] = "sl_hit"
-            elif current_price >= rec["tp_prices"][2]:
-                rec["status"] = "tp3_hit"
-            elif current_price >= rec["tp_prices"][1]:
-                rec["status"] = "tp2_hit"
-            elif current_price >= rec["tp_prices"][0]:
-                rec["status"] = "tp1_hit"
+        tp = rec["tp_prices"]
+
+        hit_sl = (current_price <= rec["sl_price"]) if direction == "LONG" else (current_price >= rec["sl_price"])
+        if hit_sl:
+            rec["status"] = "sl_hit"
         else:
-            if current_price >= rec["sl_price"]:
-                rec["status"] = "sl_hit"
-            elif current_price <= rec["tp_prices"][2]:
-                rec["status"] = "tp3_hit"
-            elif current_price <= rec["tp_prices"][1]:
-                rec["status"] = "tp2_hit"
-            elif current_price <= rec["tp_prices"][0]:
+            stage = _STAGE_RANK.get(old_status, 0)
+            if direction == "LONG":
+                if stage < 3 and current_price >= tp[2]:
+                    stage = 3
+                elif stage < 2 and current_price >= tp[1]:
+                    stage = 2
+                elif stage < 1 and current_price >= tp[0]:
+                    stage = 1
+            else:
+                if stage < 3 and current_price <= tp[2]:
+                    stage = 3
+                elif stage < 2 and current_price <= tp[1]:
+                    stage = 2
+                elif stage < 1 and current_price <= tp[0]:
+                    stage = 1
+
+            if stage == 1 and old_status == "open":
                 rec["status"] = "tp1_hit"
+                rec["sl_price"] = rec["entry_price"]
+            elif stage == 2 and old_status in ("open", "tp1_hit"):
+                rec["status"] = "tp2_hit"
+                rec["sl_price"] = tp[0]
+            elif stage == 3:
+                rec["status"] = "tp3_hit"
+
         if rec["status"] != old_status:
             changed.append(rec["signal_id"])
     return changed
@@ -2075,117 +2178,105 @@ def calculate_signal_hash(symbol, mode, direction, entry, sl, tps):
     return f"{symbol}|{mode}|{direction}|{entry:.6f}|{sl:.6f}|{tps[0]:.6f}|{tps[1]:.6f}|{tps[2]:.6f}"
 
 async def send_signal_to_channel(plan, signal_id):
+    """
+    برای هر ارز فقط یک پیام سیگنال زنده در کانال وجود دارد (کلید = نماد ارز، بدون توجه
+    به حالت/نوع معامله). اگر سیگنال تازه همان معامله‌ی قبلی باشد (همان signal_id) پیام
+    قبلی حذف و با متن «سیگنال اصلاح شد» جایگزین می‌شود. اگر سیگنال کاملا جدید باشد
+    (جهت برعکس شده و signal_id جدید ساخته شده) پیام قبلی حذف و پیام «سیگنال جدید» ارسال می‌شود.
+    """
     if not CHANNEL_ID:
         return
-    key = (plan.symbol, plan.mode)
+    key = plan.symbol
     new_hash = calculate_signal_hash(plan.symbol, plan.mode, plan.direction, plan.entry_price, plan.sl_price, plan.tp_prices)
 
     async with channel_lock:
         existing = channel_message_map.get(key)
+        if existing and existing.get("hash") == new_hash:
+            logger.debug(f"No change for {key}, skipping channel message")
+            return
+
+        is_correction = bool(existing) and existing.get("signal_id") == signal_id
         if existing:
-            old_hash = existing.get("hash")
-            if old_hash == new_hash:
-                logger.debug(f"No change for {key}, skipping channel message")
-                return
             try:
                 await app.bot.delete_message(chat_id=CHANNEL_ID, message_id=existing["message_id"])
             except Exception as e:
                 logger.error(f"Failed to delete old channel message for {key}: {e}")
-            direction_emoji = "🟢" if plan.direction == "LONG" else "🔴"
-            mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
-            text = (
-                f"🔄 سیگنال اصلاح شد | {plan.symbol}/USDT\n"
-                f"📈 جهت: {plan.direction} {direction_emoji}\n"
-                f"🛠️ حالت: {mode_label}\n"
-                f"🎯 اطمینان: {plan.confidence:.0f}٪\n"
-                f"📐 RR: 1:{plan.rr:.2f}\n\n"
-                f"📥 ورود: {format_channel_price(plan.entry_price)}\n"
-                f"🛑 حد ضرر: {format_channel_price(plan.sl_price)}\n"
-                f"🎯 اهداف:\n"
-                f"1️⃣ {format_channel_price(plan.tp_prices[0])}\n"
-                f"2️⃣ {format_channel_price(plan.tp_prices[1])}\n"
-                f"3️⃣ {format_channel_price(plan.tp_prices[2])}\n\n"
-                f"⚡ اهرم پیشنهادی: {plan.leverage}x\n"
-                f"🕒 {shamsi_now()}\n\n"
-                f"⚠️ سیگنال قبلی با داده‌های جدید اصلاح شد."
-            )
-            try:
-                new_msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(text), parse_mode="Markdown")
-                channel_message_map[key] = {
-                    "signal_id": signal_id,
-                    "message_id": new_msg.message_id,
-                    "hash": new_hash
-                }
-                channel_signal_messages[signal_id] = new_msg.message_id
-                save_state()
-                logger.info(f"Channel message replaced for {key}")
-            except Exception as e:
-                logger.error(f"Failed to send corrected channel message for {key}: {e}")
-        else:
-            direction_emoji = "🟢" if plan.direction == "LONG" else "🔴"
-            mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
-            text = (
-                f"🔔 سیگنال جدید | {plan.symbol}/USDT\n"
-                f"📈 جهت: {plan.direction} {direction_emoji}\n"
-                f"🛠️ حالت: {mode_label}\n"
-                f"🎯 اطمینان: {plan.confidence:.0f}٪\n"
-                f"📐 RR: 1:{plan.rr:.2f}\n\n"
-                f"📥 ورود: {format_channel_price(plan.entry_price)}\n"
-                f"🛑 حد ضرر: {format_channel_price(plan.sl_price)}\n"
-                f"🎯 اهداف:\n"
-                f"1️⃣ {format_channel_price(plan.tp_prices[0])}\n"
-                f"2️⃣ {format_channel_price(plan.tp_prices[1])}\n"
-                f"3️⃣ {format_channel_price(plan.tp_prices[2])}\n\n"
-                f"⚡ اهرم پیشنهادی: {plan.leverage}x\n"
-                f"🕒 {shamsi_now()}"
-            )
-            try:
-                msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(text), parse_mode="Markdown")
-                channel_message_map[key] = {
-                    "signal_id": signal_id,
-                    "message_id": msg.message_id,
-                    "hash": new_hash
-                }
-                channel_signal_messages[signal_id] = msg.message_id
-                save_state()
-                logger.info(f"Signal sent to channel for {plan.symbol} (signal_id {signal_id})")
-            except Exception as e:
-                logger.error(f"Failed to send signal to channel: {e}")
+            old_signal_id = existing.get("signal_id")
+            if old_signal_id and old_signal_id != signal_id:
+                channel_signal_messages.pop(old_signal_id, None)
+
+        direction_emoji = "🟢" if plan.direction == "LONG" else "🔴"
+        header = "🔄 *سیگنال اصلاح شد*" if is_correction else "🔔 *سیگنال جدید*"
+        footer_note = "\n\n⚠️ سیگنال قبلی با داده‌های جدید اصلاح شد." if is_correction else ""
+        text = (
+            f"{header} | {plan.symbol}/USDT\n"
+            f"📈 جهت: {plan.direction} {direction_emoji}\n"
+            f"🎯 اطمینان: {plan.confidence:.0f}٪ ({confidence_badge(plan.confidence)})\n"
+            f"📐 نسبت ریسک به بازده: 1:{plan.rr:.2f}\n\n"
+            f"📥 ورود: {format_channel_price(plan.entry_price)}\n"
+            f"🛑 حد ضرر: {format_channel_price(plan.sl_price)}\n"
+            f"🎯 اهداف:\n"
+            f"1️⃣ {format_channel_price(plan.tp_prices[0])}\n"
+            f"2️⃣ {format_channel_price(plan.tp_prices[1])}\n"
+            f"3️⃣ {format_channel_price(plan.tp_prices[2])}\n\n"
+            f"⚡ اهرم پیشنهادی: {plan.leverage}x\n"
+            f"🕒 {shamsi_now()}"
+            f"{footer_note}"
+        )
+        try:
+            msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(text), parse_mode="Markdown")
+            channel_message_map[key] = {
+                "signal_id": signal_id,
+                "message_id": msg.message_id,
+                "hash": new_hash
+            }
+            channel_signal_messages[signal_id] = msg.message_id
+            save_state()
+            logger.info(f"Channel message {'corrected' if is_correction else 'sent'} for {key} (signal_id {signal_id})")
+        except Exception as e:
+            logger.error(f"Failed to send channel message for {key}: {e}")
 
 def build_signal_update_text_from_record(rec):
     direction_emoji = "🟢" if rec["direction"] == "LONG" else "🔴"
-    mode_label = MODE_CONFIGS.get(rec["mode"], MODE_CONFIGS["standard"])["label"]
     if rec["status"] == "tp1_hit":
-        status_text = "✅ TP1 زده شد"
-        sl_text = f"🛑 حد ضرر به Entry منتقل شد\n📥 ورود: {format_channel_price(rec['entry_price'])}"
+        status_text = "✅ *TP1 زده شد*"
+        sl_text = f"🛑 حد ضرر به نقطه ورود منتقل شد (معامله بدون ریسک)\n📥 ورود/حد ضرر جدید: {format_channel_price(rec['entry_price'])}"
         targets = f"🎯 اهداف بعدی:\n2️⃣ {format_channel_price(rec['tp_prices'][1])}\n3️⃣ {format_channel_price(rec['tp_prices'][2])}"
     elif rec["status"] == "tp2_hit":
-        status_text = "✅ TP2 زده شد"
-        sl_text = f"🛑 حد ضرر به TP1 منتقل شد\n🎯 هدف بعدی:\n3️⃣ {format_channel_price(rec['tp_prices'][2])}"
-        targets = ""
+        status_text = "✅ *TP2 زده شد*"
+        sl_text = f"🛑 حد ضرر به TP1 منتقل شد: {format_channel_price(rec['sl_price'])}"
+        targets = f"🎯 هدف بعدی:\n3️⃣ {format_channel_price(rec['tp_prices'][2])}"
     elif rec["status"] == "tp3_hit":
-        status_text = "✅ TP3 زده شد"
-        sl_text = "🎯 سیگنال با موفقیت بسته شد"
+        status_text = "🏆 *TP3 زده شد — سیگنال با موفقیت بسته شد*"
+        sl_text = ""
         targets = ""
     elif rec["status"] == "sl_hit":
-        status_text = "❌ حد ضرر زده شد"
+        status_text = "❌ *حد ضرر فعال شد — سیگنال بسته شد*"
         sl_text = f"🛑 قیمت به {format_channel_price(rec['sl_price'])} رسید"
         targets = ""
     else:
         return ""
 
-    text = (
-        f"🔔 سیگنال | {rec['symbol']}/USDT\n"
-        f"📈 جهت: {rec['direction']} {direction_emoji}\n"
-        f"🛠️ حالت: {mode_label}\n\n"
-        f"{status_text}\n"
-        f"{sl_text}\n"
-        f"{targets}\n"
-        f"🕒 بروزرسانی: {shamsi_now()}"
-    )
-    return text
+    lines = [
+        f"🔔 سیگنال | {rec['symbol']}/USDT",
+        f"📈 جهت: {rec['direction']} {direction_emoji}",
+        "",
+        status_text,
+    ]
+    if sl_text:
+        lines.append(sl_text)
+    if targets:
+        lines.append(targets)
+    lines.append(f"🕒 بروزرسانی: {shamsi_now()}")
+    return "\n".join(lines)
 
 async def update_channel_signal_message(signal_id):
+    """
+    پیام کانال مربوط به یک سیگنال را با آخرین وضعیت (TP1/TP2/TP3/SL) جایگزین می‌کند:
+    پیام قبلی حذف و پیام تازه با متن بروزشده ارسال می‌شود. فقط وقتی سیگنال به‌طور نهایی
+    بسته می‌شود (TP3 یا SL) رهگیری آن متوقف و امکان صدور سیگنال جدید برای همان ارز
+    (پس از کول‌داون) باز می‌شود.
+    """
     if signal_id not in channel_signal_messages:
         return
     rec = next((r for r in signal_history if r.get("signal_id") == signal_id), None)
@@ -2202,16 +2293,19 @@ async def update_channel_signal_message(signal_id):
     try:
         new_msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(new_text), parse_mode="Markdown")
         channel_signal_messages[signal_id] = new_msg.message_id
-        key = (rec["symbol"], rec["mode"])
-        if key in channel_message_map:
+        key = rec["symbol"]
+        if channel_message_map.get(key, {}).get("signal_id") == signal_id:
             channel_message_map[key]["message_id"] = new_msg.message_id
-            channel_message_map[key]["signal_id"] = signal_id
     except Exception as e:
         logger.error(f"Failed to send new final channel message for signal {signal_id}: {e}")
-    if rec["status"] in ["tp1_hit", "tp2_hit", "tp3_hit", "sl_hit"]:
-        key = (rec["symbol"], rec["mode"])
-        if key in channel_message_map:
+        return
+    if rec["status"] in ("tp3_hit", "sl_hit"):
+        last_channel_signal_close_time[rec["symbol"]] = time.time()
+        key = rec["symbol"]
+        if channel_message_map.get(key, {}).get("signal_id") == signal_id:
             del channel_message_map[key]
+        channel_signal_messages.pop(signal_id, None)
+    save_state()
 
 async def send_high_importance_news_to_channel(news_text):
     if not CHANNEL_ID:
@@ -2223,6 +2317,9 @@ async def send_high_importance_news_to_channel(news_text):
         logger.error(f"Failed to send news to channel: {e}")
 
 # ---------- حلقه مستقل کانال (پویا) ----------
+# نکته مهم (اصلاح‌شده): دیگر به‌ازای هر «حالت معاملاتی» (fast/semi_fast/standard/conservative)
+# سیگنال جدا برای یک ارز تولید و ارسال نمی‌شود. برای هر ارز فقط یک تحلیل واحد (CHANNEL_SIGNAL_MODE)
+# با آستانه‌های سخت‌گیرانه‌تر (CHANNEL_MIN_* ) بررسی می‌شود تا تعداد سیگنال‌ها کم و اعتبار آن‌ها بالا بماند.
 async def channel_broadcast_loop(app):
     await asyncio.sleep(20)
     while True:
@@ -2232,72 +2329,67 @@ async def channel_broadcast_loop(app):
                 continue
 
             now = time.time()
-            for mode, config in MODE_CONFIGS.items():
-                interval = config["check_interval"]
-                last_time = last_mode_broadcast_time.get(mode, 0)
-                if now - last_time >= interval:
-                    logger.info(f"Channel broadcast for mode {mode} started")
-                    await cache.update_prices(force=False)
-                    await cache.update_ohlcv(force=False)
-                    for code in cache.valid_codes:
-                        try:
-                            plan = await generate_trade_plan_v2(code, mode, send_to_channel=True)
-                            if plan:
-                                logger.info(f"Signal generated: {plan.symbol} {plan.direction} {mode}")
-                        except Exception as e:
-                            logger.debug(f"Error generating {code} {mode}: {e}")
-                        await asyncio.sleep(0.05)
-                    last_mode_broadcast_time[mode] = now
-                    logger.info(f"Channel broadcast for mode {mode} completed")
+            last_time = last_mode_broadcast_time.get(CHANNEL_SIGNAL_MODE, 0)
+            if now - last_time >= CHANNEL_CHECK_INTERVAL_SECONDS:
+                logger.info("Channel broadcast cycle started (یک تحلیل واحد برای هر ارز)")
+                await cache.update_prices(force=False)
+                await cache.update_ohlcv(force=False)
+                for code in cache.valid_codes:
+                    try:
+                        plan = await generate_trade_plan_v2(
+                            code,
+                            CHANNEL_SIGNAL_MODE,
+                            send_to_channel=True,
+                            min_confidence=CHANNEL_MIN_SIGNAL_CONFIDENCE,
+                            min_gap=CHANNEL_MIN_DIRECTION_GAP,
+                            min_confirmations_bonus=CHANNEL_MIN_CONFIRMATIONS_BONUS,
+                            adx_min_override=CHANNEL_ADX_MIN,
+                        )
+                        if plan:
+                            logger.info(f"Channel signal generated: {plan.symbol} {plan.direction} conf={plan.confidence:.0f}")
+                    except Exception as e:
+                        logger.debug(f"Error generating channel signal for {code}: {e}")
+                    await asyncio.sleep(0.05)
+                last_mode_broadcast_time[CHANNEL_SIGNAL_MODE] = now
+                logger.info("Channel broadcast cycle completed")
         except Exception as e:
             logger.exception("Channel broadcast error: %s", e)
         await asyncio.sleep(60)
 
-# ---------- حلقه واکنش سریع ----------
-trigger_last_prices = {}
-trigger_cooldown = {}
-TRIGGER_SCAN_INTERVAL = int(os.getenv("TRIGGER_SCAN_INTERVAL", "60"))
-TRIGGER_PRICE_CHANGE_PERCENT = float(os.getenv("TRIGGER_PRICE_CHANGE_PERCENT", "0.5"))
-TRIGGER_COOLDOWN_SECONDS = int(os.getenv("TRIGGER_COOLDOWN_SECONDS", "300"))
+# ---------- حلقه پایش سیگنال‌های کانال (جایگزین trigger_scanner_loop قدیمی) ----------
+# نسخه قبل این حلقه به‌جای «پایش» سیگنال‌های باز، برای هر نوسان کوچک قیمت (۰.۵٪) سیگنال
+# تازه تولید می‌کرد که باعث سیل سیگنال و تناقض با حلقه اصلی کانال می‌شد؛ این باگ حذف شده.
+# کار این حلقه اکنون فقط این است: با فاصله کوتاه، قیمت لحظه‌ای هر ارزی که یک سیگنال باز و
+# فعال در کانال دارد را می‌خواند و در صورت برخورد به TP/SL پیام کانال را بروزرسانی می‌کند.
+# این کار دیگر به «سیگنال‌های شخصی کاربران» (active_signals) وابسته نیست، بنابراین سیگنال‌های
+# کانال حتی وقتی هیچ کاربری آن‌ها را شخصاً دنبال نکرده باشد هم به‌درستی بسته/بروزرسانی می‌شوند.
+CHANNEL_MONITOR_INTERVAL_SECONDS = int(os.getenv("CHANNEL_MONITOR_INTERVAL_SECONDS", "90"))
 
-async def trigger_scanner_loop(app):
+async def channel_signal_monitor_loop(app):
     await asyncio.sleep(30)
     while True:
         try:
-            if not CHANNEL_ID:
-                await asyncio.sleep(60)
+            if not CHANNEL_ID or not channel_message_map:
+                await asyncio.sleep(CHANNEL_MONITOR_INTERVAL_SECONDS)
                 continue
 
-            await cache.update_prices(force=True)
-            now = time.time()
+            symbols_to_check = list(channel_message_map.keys())
+            await cache.update_prices(force=True, codes=symbols_to_check)
 
-            for code in cache.valid_codes:
+            for code in symbols_to_check:
                 current_price = cache.prices.get(code)
                 if not current_price:
                     continue
-
-                prev_price = trigger_last_prices.get(code)
-                if prev_price is None:
-                    trigger_last_prices[code] = current_price
-                    continue
-
-                change_pct = abs((current_price / prev_price - 1) * 100) if prev_price else 0
-
-                if change_pct >= TRIGGER_PRICE_CHANGE_PERCENT:
-                    last_sent = trigger_cooldown.get(code, 0)
-                    if now - last_sent >= TRIGGER_COOLDOWN_SECONDS:
-                        logger.info(f"Trigger detected for {code}: {change_pct:.2f}% change")
-                        for mode in ["standard", "conservative"]:
-                            plan = await generate_trade_plan_v2(code, mode, send_to_channel=True)
-                            if plan:
-                                logger.info(f"Trigger signal sent: {code} {mode} {plan.direction}")
-                        trigger_cooldown[code] = now
-
-                trigger_last_prices[code] = current_price
+                try:
+                    changed = update_signal_status(code, current_price)
+                    for sid in changed:
+                        await update_channel_signal_message(sid)
+                except Exception as e:
+                    logger.debug(f"Error monitoring channel signal for {code}: {e}")
 
         except Exception as e:
-            logger.exception("Trigger scanner error: %s", e)
-        await asyncio.sleep(TRIGGER_SCAN_INTERVAL)
+            logger.exception("Channel signal monitor error: %s", e)
+        await asyncio.sleep(CHANNEL_MONITOR_INTERVAL_SECONDS)
 
 # ---------- توابع آمار سیگنال‌ها ----------
 def format_signal_history_page(filter_type: str, page: int = 0, per_page: int = 20, chat_id: int = None):
@@ -3261,7 +3353,11 @@ async def auto_report_loop(app):
                         continue
                     current_signals = {}
                     for code in favs:
-                        plan = await generate_trade_plan_v2(code, mode, send_to_channel=True)
+                        # اصلاح باگ: این حلقه فقط برای گزارش خصوصی به همان کاربر است و
+                        # نباید send_to_channel=True باشد؛ قبلاً هر کاربر با هر «مورد علاقه» و
+                        # هر «حالت معاملاتی» شخصی خودش، پیام‌های اضافی و ناهماهنگ به کانال عمومی
+                        # ارسال می‌کرد که یکی از دلایل اصلی سیگنال‌های زیاد/متناقض در کانال بود.
+                        plan = await generate_trade_plan_v2(code, mode, send_to_channel=False)
                         if plan:
                             current_signals[code] = plan.direction
                         await asyncio.sleep(0.5)
@@ -3435,7 +3531,8 @@ def save_state():
                 "signal_history": signal_history[-200:],
                 "suggestion_history": suggestion_history[-20:],
                 "channel_signal_messages": {str(k): v for k, v in channel_signal_messages.items()},
-                "channel_message_map": {f"{k[0]}|{k[1]}": v for k, v in channel_message_map.items()},
+                "channel_message_map": {str(k): v for k, v in channel_message_map.items()},
+                "last_channel_signal_close_time": last_channel_signal_close_time,
                 "last_mode_broadcast_time": last_mode_broadcast_time,
             }, f, ensure_ascii=False)
         os.replace(tmp, STATE_FILE)
@@ -3443,7 +3540,7 @@ def save_state():
         logger.warning("State save failed: %s", e)
 
 def load_state():
-    global subscribed_chat_ids, user_currency, user_trading_mode, user_favorites, user_role, news_history, signal_history, suggestion_history, channel_signal_messages, channel_message_map, last_mode_broadcast_time
+    global subscribed_chat_ids, user_currency, user_trading_mode, user_favorites, user_role, news_history, signal_history, suggestion_history, channel_signal_messages, channel_message_map, last_channel_signal_close_time, last_mode_broadcast_time
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -3456,7 +3553,14 @@ def load_state():
         signal_history = data.get("signal_history", [])
         suggestion_history = data.get("suggestion_history", [])
         channel_signal_messages = {str(k): int(v) for k, v in data.get("channel_signal_messages", {}).items()}
-        channel_message_map = {tuple(k.split("|")): v for k, v in data.get("channel_message_map", {}).items()}
+        raw_map = data.get("channel_message_map", {})
+        fixed_map = {}
+        for k, v in raw_map.items():
+            # سازگاری با فایل state قدیمی که کلیدش به‌صورت "SYMBOL|MODE" بود
+            symbol_key = k.split("|")[0] if "|" in k else k
+            fixed_map[symbol_key] = v
+        channel_message_map = fixed_map
+        last_channel_signal_close_time = data.get("last_channel_signal_close_time", {})
         last_mode_broadcast_time = data.get("last_mode_broadcast_time", {})
         logger.info("State restored: %s users, %s signals, %s suggestions, %s channel messages",
                     len(subscribed_chat_ids), len(signal_history), len(suggestion_history), len(channel_signal_messages))
@@ -3467,6 +3571,7 @@ def load_state():
         suggestion_history = []
         channel_signal_messages = {}
         channel_message_map = {}
+        last_channel_signal_close_time = {}
         last_mode_broadcast_time = {}
     except Exception as e:
         logger.warning("State load failed: %s", e)
@@ -3475,6 +3580,7 @@ def load_state():
         suggestion_history = []
         channel_signal_messages = {}
         channel_message_map = {}
+        last_channel_signal_close_time = {}
         last_mode_broadcast_time = {}
 
 # ---------- Button handler ----------
@@ -4130,8 +4236,8 @@ async def post_init(app):
     app.create_task(macro_data_loop(app))
     app.create_task(optimization_loop(app))
     app.create_task(channel_broadcast_loop(app))
-    app.create_task(trigger_scanner_loop(app))
-    logger.info("Signal Bot V61 (Channel + Stats + Trigger Scanner) started")
+    app.create_task(channel_signal_monitor_loop(app))
+    logger.info("Signal Bot V62 (Channel: یک سیگنال معتبر به‌ازای هر ارز + پایش مستقل TP/SL) started")
 
 def main():
     global app
