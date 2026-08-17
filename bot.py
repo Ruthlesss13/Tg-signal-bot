@@ -167,7 +167,15 @@ BIG_DIVIDER = "═══════════════"
 MENU_PROMPT = "👇 یکی از گزینه‌ها را انتخاب کن:"
 
 # ---------- صرافی‌ها ----------
-exchange_gateio = ccxt.gateio({
+# اصلاح باگ (علت اصلی «بات استارت نمیشه» با نسخه‌های جدید ccxt):
+# در ccxt نسخه ۴ به بعد، نام کلاس صرافی Gate.io از gateio به gate تغییر کرده.
+_GateExchangeClass = getattr(ccxt, "gate", None) or getattr(ccxt, "gateio", None)
+if _GateExchangeClass is None:
+    raise RuntimeError(
+        "کتابخانه ccxt نصب‌شده هیچ‌کدام از کلاس‌های 'gate' یا 'gateio' را ندارد. "
+        "لطفاً با «pip install --upgrade ccxt» نسخه ccxt را بروزرسانی کنید."
+    )
+exchange_gateio = _GateExchangeClass({
     "enableRateLimit": True,
     "options": {"defaultType": "spot"},
 })
@@ -1441,6 +1449,7 @@ def kb_suggestion_actions(suggestion_id):
         [InlineKeyboardButton("✅ اعمال تغییرات", callback_data=f"apply_suggestion_{suggestion_id}")],
         [InlineKeyboardButton("❌ رد پیشنهادات", callback_data=f"reject_suggestion_{suggestion_id}")],
         [InlineKeyboardButton("📊 مشاهده جزئیات", callback_data=f"details_suggestion_{suggestion_id}")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="optimization_center")],
     ])
 
 def _apply_suggestion_params(target):
@@ -2434,7 +2443,12 @@ def build_signal_update_text_from_record(rec):
     if rec["status"] in ("tp3_hit", "sl_hit"):
         opened_at = rec.get("opened_at", rec.get("timestamp", time.time()))
         duration_txt = _format_duration(time.time() - opened_at)
-        if rec["status"] == "tp3_hit":
+        is_win = rec["status"] == "tp3_hit"
+        # ایموجی سبز (برد) یا قرمز (باخت) دقیقاً در ابتدا و انتهای پیام، تا در نگاه اول و
+        # حتی در پیش‌نمایش/نوتیفیکیشن تلگرام کاملاً مشخص باشد که این پیام یک «سیگنال زنده»
+        # نیست بلکه گزارش نهایی بسته‌شدن یک سیگنال قبلی است.
+        edge_emoji = "🟢" if is_win else "🔴"
+        if is_win:
             result_header = "🏆 *سیگنال با موفقیت بسته شد — TP3 زده شد*"
             result_price = rec["tp_prices"][2]
             pct = (
@@ -2454,7 +2468,7 @@ def build_signal_update_text_from_record(rec):
             result_line = f"📉 نتیجه: {pct:.2f}%"
 
         lines = [
-            f"🔔 بسته‌شدن سیگنال | {rec['symbol']}/USDT",
+            f"{edge_emoji} {edge_emoji} {edge_emoji} بسته‌شدن سیگنال | {rec['symbol']}/USDT {edge_emoji} {edge_emoji} {edge_emoji}",
             f"🛠️ حالت معاملاتی: {mode_label}",
             f"📈 جهت: {rec['direction']} {direction_emoji}",
             DIVIDER,
@@ -2474,6 +2488,8 @@ def build_signal_update_text_from_record(rec):
             f"⚡ اهرم پیشنهادی: {rec.get('leverage', 1)}x",
             f"🕒 زمان باز شدن: {shamsi_date(datetime.fromtimestamp(opened_at))}",
             f"🕒 زمان بسته‌شدن: {shamsi_now()}",
+            DIVIDER,
+            f"{edge_emoji} {edge_emoji} {edge_emoji} این سیگنال دیگر فعال نیست {edge_emoji} {edge_emoji} {edge_emoji}",
         ]
         return "\n".join(lines)
 
@@ -2835,7 +2851,38 @@ async def optimization_active(update, context):
         parse_mode="Markdown"
     )
 
-async def optimization_history(update, context):
+def kb_optimization_history_nav(page, total_pages):
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"opt_history_page_{page - 1}"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"opt_history_page_{page + 1}"))
+    rows = []
+    if nav_row:
+        rows.append(nav_row)
+    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="optimization_center")])
+    return InlineKeyboardMarkup(rows)
+
+_OPT_HISTORY_PARAM_FA = {
+    "min_rr": "حداقل نسبت ریسک به بازده",
+    "adx_min": "حداقل ADX",
+    "min_confirmations": "حداقل لایه‌های تاییدی",
+}
+_OPT_HISTORY_STATUS_FA = {
+    "pending": "⏳ در انتظار پاسخ",
+    "applied": "✅ اعمال شده",
+    "rejected": "❌ رد شده",
+    "expired": "⌛ منقضی‌شده",
+}
+_OPT_HISTORY_STATUS_EMOJI = {"applied": "✅", "rejected": "❌", "pending": "⏳", "expired": "⌛"}
+
+async def optimization_history(update, context, page: int = 0):
+    """
+    اصلاح طبق درخواست: قبلاً فقط ۱۰ مورد آخر و فقط یک خلاصه‌ی یک‌خطی («N پیشنهاد») نمایش
+    داده می‌شد. الان تا ۲۰ پیشنهاد آخر نمایش داده می‌شود و برای هر مورد، اطلاعات کامل
+    پیشنهادی (حالت معاملاتی، پارامتر، مقدار قبل ← بعد و دلیل) هم نشان داده می‌شود؛ برای
+    این‌که پیام خیلی طولانی نشود، صفحه‌بندی (۴ مورد در هر صفحه) اضافه شده است.
+    """
     query = update.callback_query
     chat_id = update.effective_chat.id
     if not is_admin_role(chat_id):
@@ -2853,27 +2900,44 @@ async def optimization_history(update, context):
             parse_mode="Markdown"
         )
         return
-    text = "📜 *تاریخچه پیشنهادات*\n\n"
-    text += f"{DIVIDER}\n"
-    for sug in reversed(suggestion_history[-10:]):
-        status_emoji = {
-            "applied": "✅",
-            "rejected": "❌",
-            "pending": "⏳",
-            "expired": "⌛"
-        }.get(sug["status"], "❓")
+
+    recent = list(reversed(suggestion_history[-20:]))  # جدیدترین اول، حداکثر ۲۰ پیشنهاد آخر
+    per_page = 4
+    total_pages = max(1, (len(recent) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    start = page * per_page
+    page_items = recent[start:start + per_page]
+
+    text = f"📜 *تاریخچه پیشنهادات* — {len(recent)} مورد آخر (صفحه {page + 1}/{total_pages})\n"
+    text += f"{DIVIDER}\n\n"
+    for sug in page_items:
+        status_emoji = _OPT_HISTORY_STATUS_EMOJI.get(sug["status"], "❓")
+        status_fa = _OPT_HISTORY_STATUS_FA.get(sug["status"], sug["status"])
         date_str = shamsi_date(datetime.fromtimestamp(sug["timestamp"]))
-        text += f"{status_emoji} {date_str} - {len(sug['suggestions'])} پیشنهاد\n"
+        a = sug.get("analysis", {})
+        text += f"{status_emoji} *{date_str}* — {status_fa}\n"
+        text += f"   📊 {a.get('total_signals', 0)} سیگنال بسته‌شده | نرخ برد: {a.get('win_rate', 0):.1f}%\n"
+        if not sug["suggestions"]:
+            text += "   موردی برای پیشنهاد یافت نشد.\n"
+        for s in sug["suggestions"]:
+            if s["parameter"] == "mode":
+                text += f"   ℹ️ {s['reason']}\n"
+                continue
+            p_fa = _OPT_HISTORY_PARAM_FA.get(s["parameter"], s["parameter"])
+            mode_label = MODE_CONFIGS.get(s["mode"], {}).get("label", s["mode"])
+            text += f"   • {mode_label} — {p_fa}: {s['current']} ← {s['suggested']}\n"
+            text += f"     📌 {s['reason']}\n"
         if sug["status"] == "applied" and "result" in sug:
             text += f"   📌 {sug['result']}\n"
         elif sug["status"] == "rejected":
-            text += f"   📌 تنظیمات قبلی حفظ شد\n"
+            text += "   📌 تنظیمات قبلی حفظ شد\n"
         elif sug["status"] == "expired":
-            text += f"   📌 عدم پاسخ تا ۲۴ ساعت\n"
-        text += "\n"
+            text += "   📌 عدم پاسخ تا ۲۴ ساعت\n"
+        text += f"\n{DIVIDER}\n\n"
+
     await query.edit_message_text(
         text,
-        reply_markup=kb_back_to_optimization(),
+        reply_markup=kb_optimization_history_nav(page, total_pages),
         parse_mode="Markdown"
     )
 
@@ -3848,7 +3912,11 @@ async def button_handler(update, context):
         await optimization_active(update, context)
         return
     if data == "optimization_history":
-        await optimization_history(update, context)
+        await optimization_history(update, context, page=0)
+        return
+    if data.startswith("opt_history_page_"):
+        page_num = int(data.rsplit("_", 1)[1])
+        await optimization_history(update, context, page=page_num)
         return
 
     if data.startswith("apply_suggestion_") or data.startswith("reject_suggestion_") or data.startswith("details_suggestion_"):
