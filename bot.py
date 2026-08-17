@@ -27,6 +27,32 @@ Telegram Signal Bot V62 - Institutional Grade with Intelligence Center
    کمی تغییر کرده (همان جهت)، همان پیام با متن «سیگنال اصلاح شد» جایگزین می‌شود.
 8) کول‌داون ۴۵ دقیقه‌ای بعد از بسته‌شدن هر سیگنال کانال، برای جلوگیری از باز شدن فوری
    سیگنال بعدی همان ارز (کاهش تعداد سیگنال‌ها طبق درخواست).
+
+--- اصلاحات دور بعدی (این نسخه) ---
+9)  رفع باگ امنیتی حیاتی: is_admin_role فقط user_role را چک می‌کرد (که با یک
+    callback_data ساختگی «role_admin» توسط هر کاربری قابل تغییر بود)؛ اکنون علاوه بر
+    آن حتماً باید chat_id واقعاً در ADMIN_USER_IDS (.env) هم باشد. دکمه‌ی «ادمین 👑» هم
+    مستقیماً is_admin() را چک می‌کند.
+10) رفع باگ: TOTAL_SIGNALS_GENERATED و LAST_REPORT_TIME هرگز بروزرسانی نمی‌شدند (همیشه
+    ۰ و خالی نمایش داده می‌شدند)؛ اکنون در record_signal() بروزرسانی می‌شوند.
+11) افزوده شدن escape_markdown و اعمال آن روی هر متنی که از منابع بیرونی (CryptoPanic،
+    CoinGecko events، برچسب‌های Whale-Alert) می‌آید، تا کاراکترهای خاص Markdown باعث
+    fail شدن کامل ارسال پیام نشوند.
+12) سیگنال‌دهی به‌طور کلی سخت‌گیرانه‌تر شد: سطح سخت‌گیری قبلیِ حالت «استاندارد» تقریباً
+    به حالت «سریع» منتقل شد و سه حالت دیگر هم به همان نسبت سخت‌گیرانه‌تر شدند
+    (min_confirmations/adx_min/min_rr در هر ۴ حالت بالا رفت، هم‌چنین
+    MIN_SIGNAL_CONFIDENCE/MIN_DIRECTION_GAP و آستانه‌های کانال). مسیر جایگزین ضعیف در
+    انتخاب جهت سیگنال شخصی (که با گپ نزدیک صفر هم سیگنال می‌داد) حذف شد.
+13) مرکز هوشمندسازی بازطراحی شد: تحلیل عملکرد اکنون به‌تفکیک هر حالت معاملاتی (نه فقط
+    استاندارد) انجام می‌شود و پیشنهادها پارامترهای واقعی همان حالت (adx_min،
+    min_confirmations، min_rr) را هدف می‌گیرند. صفحه‌ی «پیشنهادات فعال» دیگر فقط
+    پیشنهادهای pending را نشان نمی‌دهد؛ همیشه آخرین پیشنهاد را با جزئیات کامل و دکمه‌های
+    فعال نشان می‌دهد تا صرف‌نظر از اتفاقی که برای پیام مستقیم افتاده، بشود تصمیم را در
+    هر زمان اعمال/رد/تغییر داد (رد کردن یک پیشنهاد قبلاً اعمال‌شده پارامترها را برمی‌گرداند).
+14) پیام سیگنال کانال اکنون حالت معاملاتی را در خط دوم نشان می‌دهد. وقتی سیگنالی به‌طور
+    نهایی بسته می‌شود (TP3 یا SL)، به‌جای یک خط خلاصه، پیام کامل شامل جهت، حالت، تمام
+    ورودها/اهداف/حد ضرر، اهرم، اطمینان اولیه، RR و مدت‌زمان باز بودن معامله جایگزین پیام
+    قبلی می‌شود (پیام قبلی حذف و پیام تازه با اطلاعات کامل ارسال می‌شود).
 """
 
 import asyncio
@@ -170,21 +196,25 @@ GATEIO_SYMBOL_MAP = {
     "XRP": "XRP/USDT",
 }
 
-# ========== تنظیمات سیگنال‌دهی متعادل ==========
-MIN_SIGNAL_CONFIDENCE = 40
-MIN_DIRECTION_GAP = 6
+# ========== تنظیمات سیگنال‌دهی (سخت‌گیرانه‌تر شده) ==========
+# طبق درخواست: کل سیستم سیگنال‌دهی سخت‌گیرانه‌تر شد. سطح سخت‌گیری قبلیِ حالت
+# «استاندارد» اکنون تقریباً معادل سخت‌گیری حالت «سریع» جدید است و سه حالت دیگر هم به
+# همان نسبت سخت‌گیرانه‌تر شدند (min_confirmations/adx_min/min_rr همه بالاتر رفتند).
+# نتیجه: سیگنال‌های کمتر ولی با کیفیت و اطمینان بالاتر در همه حالت‌ها، نه فقط کانال.
+MIN_SIGNAL_CONFIDENCE = 55      # قبلاً 40
+MIN_DIRECTION_GAP = 10          # قبلاً 6
 ENTRY_WEIGHTS = [0.5, 0.3, 0.2]
 
-# ========== تنظیمات اختصاصی سیگنال‌های کانال (سخت‌گیرانه‌تر برای کاهش سیگنال‌های کاذب) ==========
+# ========== تنظیمات اختصاصی سیگنال‌های کانال (سخت‌گیرانه‌تر از حالت پایه، برای کاهش بیشتر سیگنال‌های کاذب) ==========
 # در کانال دیگر بر اساس «نوع معامله/حالت» سیگنال جدا ارسال نمی‌شود؛ برای هر ارز فقط
 # یک تحلیل واحد و معتبرتر (بر پایه‌ی حالت CHANNEL_SIGNAL_MODE) در نظر گرفته می‌شود.
 CHANNEL_SIGNAL_MODE = "standard"
 CHANNEL_CHECK_INTERVAL_SECONDS = 20 * 60       # هر ۲۰ دقیقه یک دور بررسی کامل روی همه ارزها
 CHANNEL_REOPEN_COOLDOWN_SECONDS = 45 * 60      # بعد از بسته‌شدن یک سیگنال، حداقل فاصله تا سیگنال بعدی همان ارز
-CHANNEL_MIN_SIGNAL_CONFIDENCE = 68             # حداقل اطمینان برای انتشار در کانال (به‌جای ۴۰ عمومی)
-CHANNEL_MIN_DIRECTION_GAP = 18                 # اختلاف امتیاز لانگ/شورت باید بسیار واضح باشد
-CHANNEL_MIN_CONFIRMATIONS_BONUS = 2            # لایه‌های تاییدی اضافه نسبت به حداقل حالت پایه
-CHANNEL_ADX_MIN = 20                           # فقط در بازار با روند نسبتا قوی سیگنال کانال صادر شود
+CHANNEL_MIN_SIGNAL_CONFIDENCE = 78             # قبلاً 68 — حداقل اطمینان برای انتشار در کانال
+CHANNEL_MIN_DIRECTION_GAP = 25                 # قبلاً 18 — اختلاف امتیاز لانگ/شورت باید کاملاً واضح باشد
+CHANNEL_MIN_CONFIRMATIONS_BONUS = 1            # لایه تاییدی اضافه نسبت به حداقل حالت پایه (که خودش بالا رفته)
+CHANNEL_ADX_MIN = 22                           # قبلاً 20 — فقط در بازار با روند نسبتاً قوی سیگنال کانال صادر شود
 
 MODE_CONFIGS = {
     "fast": {
@@ -195,9 +225,9 @@ MODE_CONFIGS = {
         "tp_multipliers": [0.8, 1.5, 2.5],
         "sl_atr_mult": 0.8,
         "max_leverage": 10,
-        "min_rr": 0.50,
-        "adx_min": 5,
-        "min_confirmations": 3,
+        "min_rr": 1.00,          # قبلاً 0.50
+        "adx_min": 8,            # قبلاً 5
+        "min_confirmations": 5,  # قبلاً 3 (تقریباً معادل سخت‌گیری «استاندارد» قدیم)
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -208,9 +238,9 @@ MODE_CONFIGS = {
         "tp_multipliers": [1.2, 2.5, 4.0],
         "sl_atr_mult": 1.0,
         "max_leverage": 7,
-        "min_rr": 0.80,
-        "adx_min": 7,
-        "min_confirmations": 4,
+        "min_rr": 1.30,          # قبلاً 0.80
+        "adx_min": 11,           # قبلاً 7
+        "min_confirmations": 6,  # قبلاً 4
         "check_interval": 10 * 60,
     },
     "standard": {
@@ -221,9 +251,9 @@ MODE_CONFIGS = {
         "tp_multipliers": [1.5, 3.0, 5.0],
         "sl_atr_mult": 1.2,
         "max_leverage": 5,
-        "min_rr": 1.20,
-        "adx_min": 8,
-        "min_confirmations": 5,
+        "min_rr": 1.60,          # قبلاً 1.20
+        "adx_min": 14,           # قبلاً 8
+        "min_confirmations": 7,  # قبلاً 5
         "check_interval": 30 * 60,
     },
     "conservative": {
@@ -234,9 +264,9 @@ MODE_CONFIGS = {
         "tp_multipliers": [2.0, 4.0, 6.0],
         "sl_atr_mult": 2.0,
         "max_leverage": 3,
-        "min_rr": 1.50,
-        "adx_min": 10,
-        "min_confirmations": 6,
+        "min_rr": 2.00,          # قبلاً 1.50
+        "adx_min": 18,           # قبلاً 10
+        "min_confirmations": 8,  # قبلاً 6
         "check_interval": 60 * 60,
     },
 }
@@ -906,8 +936,28 @@ def is_allowed(user_id):
 def is_admin(user_id):
     return user_id in ADMIN_USER_IDS
 
+_MARKDOWN_SPECIAL_RE = None
+
+def escape_markdown(text):
+    """
+    فرار از کاراکترهای خاص Markdown (نسخه legacy تلگرام) برای هر متنی که از منابع
+    بیرونی (CryptoPanic, CoinGecko, Whale-Alert و ...) می‌آید. بدون این کار، عنوان یا
+    توضیحی که به‌طور طبیعی شامل _ * ` [ باشد می‌تواند کل ارسال پیام را با خطای
+    "can't parse entities" fail کند و آن پیام هرگز به کاربر/کانال نرسد.
+    """
+    global _MARKDOWN_SPECIAL_RE
+    if not text:
+        return text
+    if _MARKDOWN_SPECIAL_RE is None:
+        import re as _re
+        _MARKDOWN_SPECIAL_RE = _re.compile(r'([_*`\[])')
+    return _MARKDOWN_SPECIAL_RE.sub(r'\\\1', str(text))
+
 def is_admin_role(chat_id):
-    return user_role.get(chat_id, "user") == "admin"
+    # نکته امنیتی: صرفاً چک کردن user_role کافی نیست چون آن دیکشنری با یک callback_data
+    # ساختگی («role_admin») هم قابل تغییر بود؛ اکنون علاوه بر آن، حتماً باید chat_id
+    # واقعاً عضو ADMIN_USER_IDS (تعریف‌شده در .env) هم باشد.
+    return chat_id in ADMIN_USER_IDS and user_role.get(chat_id, "user") == "admin"
 
 async def guard(update):
     user = update.effective_user
@@ -1076,7 +1126,7 @@ async def fetch_cryptopanic_news():
                 impact = "نزولی 📉"
             if "important" in str(tags).lower() or "high" in str(tags).lower():
                 news_list.append({
-                    "title": title[:100],
+                    "title": escape_markdown(title[:100]),
                     "impact": impact,
                     "source": "CryptoPanic",
                     "url": item.get("url", ""),
@@ -1201,55 +1251,149 @@ def analyze_performance():
     wins = [s for s in closed if s["status"].startswith("tp")]
     losses = [s for s in closed if s["status"] == "sl_hit"]
     win_rate = len(wins) / len(closed) * 100 if closed else 0
+    tp3_count = len([s for s in closed if s["status"] == "tp3_hit"])
+    tp2_count = len([s for s in closed if s["status"] == "tp2_hit"])
+    tp1_count = len([s for s in closed if s["status"] == "tp1_hit"])
+    sl_count = len(losses)
+
     mode_performance = {}
     for mode in MODE_CONFIGS.keys():
         mode_signals = [s for s in closed if s.get("mode") == mode]
         if mode_signals:
             mode_wins = [s for s in mode_signals if s["status"].startswith("tp")]
+            rr_vals = [s.get("rr", 0) for s in mode_signals if "rr" in s]
+            conf_vals = [s.get("confidence", 0) for s in mode_signals]
             mode_performance[mode] = {
                 "count": len(mode_signals),
-                "win_rate": len(mode_wins) / len(mode_signals) * 100 if mode_signals else 0
+                "win_rate": len(mode_wins) / len(mode_signals) * 100 if mode_signals else 0,
+                "avg_rr": sum(rr_vals) / len(rr_vals) if rr_vals else 0,
+                "avg_confidence": sum(conf_vals) / len(conf_vals) if conf_vals else 0,
             }
-    best_mode = max(mode_performance, key=lambda x: mode_performance[x]["win_rate"]) if mode_performance else "standard"
+    best_mode = max(mode_performance, key=lambda x: mode_performance[x]["win_rate"]) if mode_performance else None
+    worst_mode = min(mode_performance, key=lambda x: mode_performance[x]["win_rate"]) if mode_performance else None
     rr_values = [s.get("rr", 0) for s in closed if "rr" in s]
     avg_rr = sum(rr_values) / len(rr_values) if rr_values else 0
+    conf_values = [s.get("confidence", 0) for s in closed]
+    avg_confidence = sum(conf_values) / len(conf_values) if conf_values else 0
+
     return {
         "win_rate": win_rate,
         "best_mode": best_mode,
+        "worst_mode": worst_mode,
         "avg_rr": avg_rr,
+        "avg_confidence": avg_confidence,
         "total_signals": len(closed),
-        "mode_performance": mode_performance
+        "wins": len(wins),
+        "losses": len(losses),
+        "tp1_count": tp1_count,
+        "tp2_count": tp2_count,
+        "tp3_count": tp3_count,
+        "sl_count": sl_count,
+        "mode_performance": mode_performance,
     }
 
 def generate_optimization_suggestions(analysis):
+    """
+    برای هر حالت معاملاتی که داده کافی (حداقل ۵ سیگنال بسته‌شده) دارد، عملکرد آن حالت
+    به‌طور مستقل بررسی می‌شود (نه فقط «استاندارد») و پارامترهای واقعی همان حالت
+    (min_rr، adx_min، min_confirmations) بسته به نرخ برد پیشنهاد تغییر می‌گیرند:
+    - نرخ برد پایین (زیر ۴۰٪) → سخت‌گیرانه‌تر شدن پیشنهاد می‌شود (adx_min و
+      min_confirmations بالاتر) چون یعنی فیلترها برای رد سیگنال‌های ضعیف کافی نبوده‌اند.
+    - نرخ برد بسیار بالا (بالای ۷۵٪) با تعداد نمونه کافی → کمی سخت‌گیری کمتر در min_rr
+      پیشنهاد می‌شود تا فرصت‌های بیشتری از دست نرود، بدون این‌که به‌کلی فیلترها باز شوند.
+    """
     if not analysis or analysis["total_signals"] < 10:
         return []
     suggestions = []
-    if analysis["win_rate"] < 40:
-        suggestions.append({
-            "parameter": "min_rr",
-            "mode": "standard",
-            "current": MODE_CONFIGS["standard"]["min_rr"],
-            "suggested": MODE_CONFIGS["standard"]["min_rr"] - 0.02,
-            "reason": f"نرخ برد پایین است ({analysis['win_rate']:.1f}%)، کاهش RR می‌تواند سیگنال‌های بیشتری تولید کند."
-        })
-    elif analysis["win_rate"] > 70:
-        suggestions.append({
-            "parameter": "min_rr",
-            "mode": "standard",
-            "current": MODE_CONFIGS["standard"]["min_rr"],
-            "suggested": MODE_CONFIGS["standard"]["min_rr"] + 0.02,
-            "reason": f"نرخ برد بالا است ({analysis['win_rate']:.1f}%)، افزایش RR می‌تواند کیفیت سیگنال‌ها را بهبود بخشد."
-        })
-    if analysis["best_mode"] != "standard":
-        suggestions.append({
-            "parameter": "mode",
-            "mode": analysis["best_mode"],
-            "current": "standard",
-            "suggested": analysis["best_mode"],
-            "reason": f"حالت {MODE_CONFIGS[analysis['best_mode']]['label']} عملکرد بهتری دارد (نرخ برد {analysis['mode_performance'][analysis['best_mode']]['win_rate']:.1f}%)."
-        })
+    for mode, perf in analysis.get("mode_performance", {}).items():
+        if perf["count"] < 5:
+            continue
+        cfg = MODE_CONFIGS[mode]
+        if perf["win_rate"] < 40:
+            new_adx = min(35, cfg["adx_min"] + 3)
+            if new_adx != cfg["adx_min"]:
+                suggestions.append({
+                    "parameter": "adx_min",
+                    "mode": mode,
+                    "current": cfg["adx_min"],
+                    "suggested": new_adx,
+                    "reason": f"نرخ برد حالت {cfg['label']} پایین است ({perf['win_rate']:.1f}% از {perf['count']} سیگنال)؛ افزایش حداقل ADX یعنی فقط در روندهای قوی‌تر سیگنال صادر شود."
+                })
+            new_conf = min(10, cfg["min_confirmations"] + 1)
+            if new_conf != cfg["min_confirmations"]:
+                suggestions.append({
+                    "parameter": "min_confirmations",
+                    "mode": mode,
+                    "current": cfg["min_confirmations"],
+                    "suggested": new_conf,
+                    "reason": f"نرخ برد حالت {cfg['label']} پایین است ({perf['win_rate']:.1f}%)؛ افزایش حداقل لایه‌های تاییدی می‌تواند سیگنال‌های ضعیف‌تر را حذف کند."
+                })
+        elif perf["win_rate"] > 75:
+            new_rr = round(max(0.3, cfg["min_rr"] - 0.10), 2)
+            if new_rr != cfg["min_rr"]:
+                suggestions.append({
+                    "parameter": "min_rr",
+                    "mode": mode,
+                    "current": cfg["min_rr"],
+                    "suggested": new_rr,
+                    "reason": f"نرخ برد حالت {cfg['label']} بسیار بالاست ({perf['win_rate']:.1f}% از {perf['count']} سیگنال)؛ کمی کاهش حداقل RR می‌تواند بدون افت کیفیت، فرصت‌های بیشتری ثبت کند."
+                })
+    if analysis.get("best_mode"):
+        best = analysis["best_mode"]
+        if analysis["mode_performance"][best]["count"] >= 5:
+            suggestions.append({
+                "parameter": "mode",
+                "mode": best,
+                "current": "—",
+                "suggested": best,
+                "reason": f"در بین حالت‌های با داده کافی، حالت {MODE_CONFIGS[best]['label']} بهترین نرخ برد را دارد ({analysis['mode_performance'][best]['win_rate']:.1f}%). این صرفاً اطلاع‌رسانی است، پارامتری تغییر نمی‌دهد."
+            })
     return suggestions
+
+def build_suggestion_detail_text(sug_entry):
+    """
+    متن کامل و غنی یک پیشنهاد بهینه‌سازی: تحلیل کامل عملکرد (کلی + به تفکیک هر حالت)
+    و لیست کامل پیشنهادات با دلیل هرکدام. هم در پیام مستقیم به ادمین، هم در «پیشنهادات
+    فعال» و هم در «مشاهده جزئیات» از همین تابع استفاده می‌شود تا اطلاعات همه‌جا یکسان
+    و کامل باشد (نه فقط ۲-۳ مورد اول).
+    """
+    a = sug_entry["analysis"]
+    text = (
+        f"🧠 *پیشنهاد بهینه‌سازی تنظیمات*\n"
+        f"{DIVIDER}\n"
+        f"📊 *تحلیل کلی* ({a.get('total_signals', 0)} سیگنال بسته‌شده)\n"
+        f"• نرخ برد کلی: {a.get('win_rate', 0):.1f}% ({a.get('wins', 0)} برد / {a.get('losses', 0)} باخت)\n"
+        f"• تفکیک برد: TP1️⃣ {a.get('tp1_count', 0)} | TP2️⃣ {a.get('tp2_count', 0)} | TP3️⃣ {a.get('tp3_count', 0)} | SL {a.get('sl_count', 0)}\n"
+        f"• میانگین RR: {a.get('avg_rr', 0):.2f}\n"
+        f"• میانگین اطمینان سیگنال‌ها: {a.get('avg_confidence', 0):.1f}%\n"
+    )
+    if a.get("best_mode") and a.get("mode_performance", {}).get(a["best_mode"]):
+        text += f"• بهترین حالت: {MODE_CONFIGS[a['best_mode']]['label']} ({a['mode_performance'][a['best_mode']]['win_rate']:.1f}%)\n"
+    if a.get("worst_mode") and a.get("worst_mode") != a.get("best_mode") and a.get("mode_performance", {}).get(a["worst_mode"]):
+        text += f"• ضعیف‌ترین حالت: {MODE_CONFIGS[a['worst_mode']]['label']} ({a['mode_performance'][a['worst_mode']]['win_rate']:.1f}%)\n"
+    if a.get("mode_performance"):
+        text += f"{DIVIDER}\n📋 *عملکرد به تفکیک حالت:*\n"
+        for mode, perf in a["mode_performance"].items():
+            label = MODE_CONFIGS.get(mode, {}).get("label", mode)
+            text += (
+                f"• {label}: {perf.get('count', 0)} سیگنال | برد {perf.get('win_rate', 0):.1f}% | "
+                f"RR {perf.get('avg_rr', 0):.2f} | اطمینان {perf.get('avg_confidence', 0):.1f}%\n"
+            )
+    text += f"{DIVIDER}\n💡 *پیشنهادات ({len(sug_entry['suggestions'])} مورد):*\n"
+    if not sug_entry["suggestions"]:
+        text += "موردی برای پیشنهاد یافت نشد.\n"
+    for sug in sug_entry["suggestions"]:
+        if sug["parameter"] == "mode":
+            text += f"ℹ️ {sug['reason']}\n"
+            continue
+        param_fa = {
+            "min_rr": "حداقل نسبت ریسک به بازده",
+            "adx_min": "حداقل ADX",
+            "min_confirmations": "حداقل لایه‌های تاییدی",
+        }.get(sug["parameter"], sug["parameter"])
+        text += f"• {MODE_CONFIGS.get(sug['mode'], {}).get('label', sug['mode'])} — {param_fa}: {sug['current']} ← {sug['suggested']}\n"
+        text += f"  📌 {sug['reason']}\n"
+    return text
 
 async def optimization_loop(app):
     await asyncio.sleep(60)
@@ -1273,23 +1417,13 @@ async def optimization_loop(app):
                     save_state()
                     for admin_id in ADMIN_USER_IDS:
                         try:
-                            text = (
-                                f"🧠 *پیشنهاد بهینه‌سازی تنظیمات*\n"
-                                f"{DIVIDER}\n"
-                                f"📊 تحلیل {analysis['total_signals']} سیگنال اخیر:\n"
-                                f"• نرخ برد: {analysis['win_rate']:.1f}%\n"
-                                f"• میانگین RR: {analysis['avg_rr']:.2f}\n"
-                                f"• بهترین حالت: {MODE_CONFIGS[analysis['best_mode']]['label']}\n"
-                                f"{DIVIDER}\n"
-                                f"💡 *پیشنهادات:*\n"
+                            text = build_suggestion_detail_text(entry)
+                            text += (
+                                f"\n{DIVIDER}\n"
+                                f"⏳ اعتبار پیشنهاد: ۲۴ ساعت\n"
+                                f"💡 حتی بعد از اعمال یا رد، هر زمان می‌توانید از «مرکز هوشمندسازی → "
+                                f"پیشنهادات فعال» همین پیشنهاد را دوباره ببینید و تصمیم را عوض کنید."
                             )
-                            for sug in suggestions[:2]:
-                                if sug["parameter"] == "mode":
-                                    text += f"• تغییر حالت به {MODE_CONFIGS[sug['suggested']]['label']}\n"
-                                else:
-                                    text += f"• {sug['parameter']}: {sug['current']} → {sug['suggested']}\n"
-                                text += f"  📌 {sug['reason']}\n"
-                            text += f"\n⏳ اعتبار پیشنهاد: ۲۴ ساعت"
                             await app.bot.send_message(
                                 chat_id=admin_id,
                                 text=text,
@@ -1309,7 +1443,27 @@ def kb_suggestion_actions(suggestion_id):
         [InlineKeyboardButton("📊 مشاهده جزئیات", callback_data=f"details_suggestion_{suggestion_id}")],
     ])
 
+def _apply_suggestion_params(target):
+    for sug in target["suggestions"]:
+        if sug["parameter"] == "mode":
+            continue
+        if sug["mode"] in MODE_CONFIGS and sug["parameter"] in MODE_CONFIGS[sug["mode"]]:
+            MODE_CONFIGS[sug["mode"]][sug["parameter"]] = sug["suggested"]
+
+def _revert_suggestion_params(target):
+    for sug in target["suggestions"]:
+        if sug["parameter"] == "mode":
+            continue
+        if sug["mode"] in MODE_CONFIGS and sug["parameter"] in MODE_CONFIGS[sug["mode"]]:
+            MODE_CONFIGS[sug["mode"]][sug["parameter"]] = sug["current"]
+
 async def handle_suggestion_action(update, context):
+    """
+    اصلاح: قبلاً وقتی یک پیشنهاد applied/rejected می‌شد، دیگر هرگز قابل تغییر نبود
+    ("این پیشنهاد قبلاً ... شده است"). اکنون تصمیم همیشه قابل تغییر است: رد کردن یک
+    پیشنهادِ قبلاً اعمال‌شده، پارامترها را به مقدار قبل از پیشنهاد (current) برمی‌گرداند؛
+    اعمال دوباره‌ی یک پیشنهادِ قبلاً ردشده هم دوباره مقدار suggested را می‌گذارد.
+    """
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1322,56 +1476,40 @@ async def handle_suggestion_action(update, context):
     if not target:
         await query.edit_message_text("❌ پیشنهاد مورد نظر یافت نشد.", reply_markup=kb_back_main())
         return
-    if target["status"] != "pending":
-        await query.edit_message_text(f"⏳ این پیشنهاد قبلاً {target['status']} شده است.", reply_markup=kb_back_main())
-        return
+
     if data.startswith("apply_suggestion_"):
-        for sug in target["suggestions"]:
-            if sug["parameter"] == "mode":
-                pass
-            elif sug["parameter"] == "min_rr":
-                MODE_CONFIGS[sug["mode"]]["min_rr"] = sug["suggested"]
-            elif sug["parameter"] == "min_confirmations":
-                MODE_CONFIGS[sug["mode"]]["min_confirmations"] = sug["suggested"]
+        _apply_suggestion_params(target)
         target["status"] = "applied"
         target["applied_at"] = time.time()
         target["result"] = "تنظیمات با موفقیت اعمال شد."
         save_state()
-        await query.edit_message_text(
-            "✅ *تنظیمات با موفقیت به‌روزرسانی شد.*\n\n"
-            f"پیشنهادات اعمال‌شده:\n" + "\n".join([
-                f"• {sug['parameter']}: {sug['current']} → {sug['suggested']}"
-                for sug in target["suggestions"]
-            ]),
-            reply_markup=kb_back_to_optimization(),
-            parse_mode="Markdown"
-        )
+        text = "✅ *تنظیمات اعمال شد.*\n" + DIVIDER + "\n"
+        text += build_suggestion_detail_text(target)
+        text += f"\n{DIVIDER}\n💡 در صورت نیاز، هر زمان از همین صفحه یا «پیشنهادات فعال» می‌توانید رد کنید."
+        await query.edit_message_text(text, reply_markup=kb_suggestion_actions(target["id"]), parse_mode="Markdown")
     elif data.startswith("reject_suggestion_"):
+        was_applied = target["status"] == "applied"
+        if was_applied:
+            _revert_suggestion_params(target)
         target["status"] = "rejected"
         target["rejected_at"] = time.time()
         save_state()
-        await query.edit_message_text(
-            "❌ *پیشنهادات رد شد.*\n\nتنظیمات فعلی حفظ شد.",
-            reply_markup=kb_back_to_optimization(),
-            parse_mode="Markdown"
-        )
+        text = "❌ *پیشنهاد رد شد.*\n" + DIVIDER + "\n"
+        if was_applied:
+            text += "⚠️ این پیشنهاد قبلاً اعمال شده بود؛ پارامترها به مقدار قبلی بازگردانده شدند.\n" + DIVIDER + "\n"
+        text += build_suggestion_detail_text(target)
+        text += f"\n{DIVIDER}\n💡 در صورت نیاز، هر زمان از همین صفحه یا «پیشنهادات فعال» می‌توانید دوباره اعمال کنید."
+        await query.edit_message_text(text, reply_markup=kb_suggestion_actions(target["id"]), parse_mode="Markdown")
     elif data.startswith("details_suggestion_"):
-        text = f"📊 *جزئیات پیشنهاد*\n{DIVIDER}\n"
-        text += f"📅 تاریخ: {shamsi_date(datetime.fromtimestamp(target['timestamp']))}\n"
-        text += f"📊 تحلیل {target['analysis']['total_signals']} سیگنال:\n"
-        text += f"• نرخ برد: {target['analysis']['win_rate']:.1f}%\n"
-        text += f"• میانگین RR: {target['analysis']['avg_rr']:.2f}\n"
-        text += f"• بهترین حالت: {MODE_CONFIGS[target['analysis']['best_mode']]['label']}\n"
-        text += f"{DIVIDER}\n"
-        text += f"💡 *پیشنهادات:*\n"
-        for sug in target["suggestions"]:
-            if sug["parameter"] == "mode":
-                text += f"• تغییر حالت به {MODE_CONFIGS[sug['suggested']]['label']}\n"
-            else:
-                text += f"• {sug['parameter']}: {sug['current']} → {sug['suggested']}\n"
-            text += f"  📌 {sug['reason']}\n"
-        text += f"\n⏳ وضعیت: {target['status']}"
-        await query.edit_message_text(text, reply_markup=kb_back_to_optimization(), parse_mode="Markdown")
+        status_fa = {
+            "pending": "⏳ در انتظار پاسخ",
+            "applied": "✅ اعمال شده",
+            "rejected": "❌ رد شده",
+            "expired": "⌛ منقضی‌شده",
+        }.get(target["status"], target["status"])
+        text = build_suggestion_detail_text(target)
+        text += f"\n{DIVIDER}\n📌 وضعیت: {status_fa}"
+        await query.edit_message_text(text, reply_markup=kb_suggestion_actions(target["id"]), parse_mode="Markdown")
 
 # ---------- رویدادها ----------
 def fetch_upcoming_events():
@@ -1394,10 +1532,10 @@ def fetch_upcoming_events():
                 importance = "high"
             description = ev.get("description", "")[:200]
             events.append({
-                "name": name,
+                "name": escape_markdown(name),
                 "time": event_time,
                 "importance": importance,
-                "description": description,
+                "description": escape_markdown(description),
                 "impact": "مشخص نیست"
             })
         return events
@@ -1591,17 +1729,12 @@ async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False,
             confidence = short_score
             layers = short_layers
         else:
-            if long_confirmed >= config["min_confirmations"] and long_score >= short_score:
-                direction = "LONG"
-                confidence = long_score
-                layers = long_layers
-            elif short_confirmed >= config["min_confirmations"] and short_score >= long_score:
-                direction = "SHORT"
-                confidence = short_score
-                layers = short_layers
-            else:
-                logger.info(f"No direction for {code}: long_conf={long_confirmed}, short_conf={short_confirmed}, gap={abs(long_score-short_score)}")
-                return None
+            # اصلاح: قبلاً یک مسیر جایگزین ضعیف‌تر اینجا بود که حتی وقتی اختلاف امتیاز
+            # لانگ/شورت تقریباً صفر بود هم سیگنال صادر می‌کرد (فقط برای مصرف شخصی).
+            # این باعث سیگنال‌های کم‌اطمینان می‌شد؛ حذف شد تا حتی حالت شخصی هم به همان
+            # حداقل فاصله اطمینان (effective_min_gap) پایبند باشد.
+            logger.info(f"No clear direction for {code}: long_conf={long_confirmed}, short_conf={short_confirmed}, gap={abs(long_score-short_score)}")
+            return None
 
         if confidence < effective_min_confidence:
             logger.info(f"Confidence too low for {code}: {confidence:.1f} < {effective_min_confidence}")
@@ -1808,6 +1941,7 @@ def signal_reasons(direction, ind, mode):
     return reasons, warnings
 
 def record_signal(plan):
+    global TOTAL_SIGNALS_GENERATED, LAST_REPORT_TIME
     signal_id = uuid.uuid4().hex[:10]
     record = {
         "signal_id": signal_id,
@@ -1818,6 +1952,8 @@ def record_signal(plan):
         "tp_prices": plan.tp_prices,
         "confidence": plan.confidence,
         "timestamp": plan.timestamp,
+        "opened_at": plan.timestamp,  # زمان واقعی باز شدن؛ برخلاف timestamp هرگز با اصلاحیه‌ها بازنویسی نمی‌شود
+        "leverage": plan.leverage,
         "status": "open",
         "mode": plan.mode,
         "win_rate_estimate": plan.win_rate_estimate,
@@ -1830,6 +1966,8 @@ def record_signal(plan):
     signal_history.append(record)
     if len(signal_history) > 200:
         signal_history.pop(0)
+    TOTAL_SIGNALS_GENERATED += 1
+    LAST_REPORT_TIME = time.time()
     return signal_id
 
 CLOSED_STATUSES = ("tp3_hit", "sl_hit", "invalidated")
@@ -2038,2225 +2176,4 @@ async def generate_weekly_summary_async(code, chat_id):
     highest = float(week_df["high"].max()); lowest = float(week_df["low"].min())
     range_pct = ((highest - lowest) / first_price * 100)
     high_row = week_df.loc[week_df["high"].idxmax()]; low_row = week_df.loc[week_df["low"].idxmin()]
-    running_max = close.cummax(); drawdown = (close / running_max - 1) * 100; max_drawdown = float(drawdown.min())
-    running_min = close.cummin(); runup = (close / running_min - 1) * 100; max_runup = float(runup.max())
-    volatility = float(returns.dropna().std() or 0)
-    atr_series = AverageTrueRange(week_df["high"], week_df["low"], close, window=min(14, max(2, len(week_df)-1))).average_true_range()
-    atr_daily = float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else 0
-    atr_pct = (atr_daily / current_price * 100) if current_price > 0 else 0
-    avg_volume = float(week_df["volume"].mean()); first_volume = float(week_df["volume"].iloc[0]); last_volume = float(week_df["volume"].iloc[-1])
-    volume_trend_pct = ((last_volume / first_volume) - 1) * 100 if first_volume > 0 else 0
-    volume_trend = "افزایشی 🔊" if volume_trend_pct > 10 else "کاهشی 🔇" if volume_trend_pct < -10 else "خنثی"
-    daily_all = cache.ohlcv.get("1d", {}).get(code)
-    daily_rsi = daily_ema20 = daily_ema50 = daily_macd = daily_adx = bb_position = bb_width = None
-    if daily_all is not None and len(daily_all) >= 50:
-        d_close = daily_all["close"]
-        rsi = RSIIndicator(d_close, window=14).rsi()
-        ema20 = EMAIndicator(d_close, window=20).ema_indicator(); ema50 = EMAIndicator(d_close, window=50).ema_indicator()
-        macd = MACD(d_close, window_slow=26, window_fast=12, window_sign=9)
-        adx_ind = ADXIndicator(daily_all["high"], daily_all["low"], d_close, window=14)
-        bb = BollingerBands(d_close, window=20, window_dev=2)
-        daily_rsi = float(rsi.iloc[-1]) if pd.notna(rsi.iloc[-1]) else None
-        daily_ema20 = float(ema20.iloc[-1]) if pd.notna(ema20.iloc[-1]) else None
-        daily_ema50 = float(ema50.iloc[-1]) if pd.notna(ema50.iloc[-1]) else None
-        daily_macd = float(macd.macd_diff().iloc[-1]) if pd.notna(macd.macd_diff().iloc[-1]) else None
-        daily_adx = float(adx_ind.adx().iloc[-1]) if pd.notna(adx_ind.adx().iloc[-1]) else None
-        bb_position = float(bb.bollinger_pband().iloc[-1]) if pd.notna(bb.bollinger_pband().iloc[-1]) else None
-        bb_width = float(bb.bollinger_wband().iloc[-1]) if pd.notna(bb.bollinger_wband().iloc[-1]) else None
-    if daily_ema20 is not None and daily_ema50 is not None:
-        if current_price > daily_ema20 and daily_ema20 > daily_ema50: trend = "صعودی قوی 📈"
-        elif current_price > daily_ema50: trend = "صعودی ملایم 📈"
-        elif current_price < daily_ema20 and daily_ema20 < daily_ema50: trend = "نزولی قوی 📉"
-        else: trend = "نزولی ملایم 📉"
-    else: trend = "نامشخص"
-    returns_vals = returns.dropna().tolist(); consecutive_up = 0
-    for v in reversed(returns_vals):
-        if v > 0: consecutive_up += 1
-        else: break
-    consecutive_down = 0
-    for v in reversed(returns_vals):
-        if v < 0: consecutive_down += 1
-        else: break
-    if daily_macd is not None and daily_macd > 0 and volume_trend_pct > 0: momentum_volume = "مومنتوم با حجم تأیید می‌شود 🟢"
-    elif daily_macd is not None and daily_macd < 0 and volume_trend_pct < 0: momentum_volume = "ضعف مومنتوم با کاهش حجم 🔴"
-    else: momentum_volume = "تأیید کامل وجود ندارد ⚠️"
-    ret_3d = ((current_price / float(close.iloc[max(0, len(close)-4)])) - 1) * 100 if len(close) >= 4 else 0
-    ret_24h = float(returns.iloc[-1]) if not returns.empty else 0
-    best_date = shamsi_date(week_df.loc[best_idx, "timestamp"]) if best_idx in week_df.index else "-"
-    worst_date = shamsi_date(week_df.loc[worst_idx, "timestamp"]) if worst_idx in week_df.index else "-"
-    funding = 0.0
-    fg_value, fg_class = await get_fear_greed()
-    macro_data = cache.get_macro_data()
-    text = (
-        f"📊 *تحلیل جامع ارز* {code}\n"
-        f"🕒 {shamsi_now()}\n{DIVIDER}\n"
-        f"💰 قیمت فعلی: {fmt_amount(current_price, chat_id)}\n"
-        f"📈 بازده ۷ روزه: *{cumulative_return:+.2f}%*\n"
-        f"📈 بازده ۳ روزه: *{ret_3d:+.2f}%*\n"
-        f"📈 بازده ۲۴h: *{ret_24h:+.2f}%*\n"
-        f"{DIVIDER}\n"
-        f"📈 بالاترین: {fmt_amount(highest, chat_id)} 📅 {shamsi_date(high_row['timestamp'])}\n"
-        f"📉 پایین‌ترین: {fmt_amount(lowest, chat_id)} 📅 {shamsi_date(low_row['timestamp'])}\n"
-        f"📏 محدوده ۷ روزه: *{range_pct:.2f}%*\n"
-        f"🚀 بیشینه رشد: *{max_runup:+.2f}%*\n"
-        f"🛑 بیشینه کاهش: *{max_drawdown:.2f}%*\n"
-        f"⚡ ATR روزانه: *{atr_pct:.2f}%*\n"
-        f"📐 نوسان‌پذیری: *{volatility:.2f}%*\n"
-        f"{DIVIDER}\n"
-        f"🟢 روز مثبت: {positive_days} | 🔴 روز منفی: {negative_days}\n"
-        f"🔥 بهترین روز: *{best_day:+.2f}%* ({best_date})\n"
-        f"💥 بدترین روز: *{worst_day:+.2f}%* ({worst_date})\n"
-        f"📈 پشت‌سرهم صعودی: {consecutive_up} روز\n"
-        f"📉 پشت‌سرهم نزولی: {consecutive_down} روز\n"
-        f"{DIVIDER}\n"
-        f"📊 میانگین حجم: `{avg_volume:,.0f}`\n"
-        f"🔊 روند حجم: {volume_trend} ({volume_trend_pct:+.1f}%)\n"
-        f"🧠 {momentum_volume}\n"
-        f"{DIVIDER}\n"
-        f"📈 *روند روزانه:* {trend}\n"
-        f"📐 قیمت نسبت به EMA20: {'بالای 📈' if daily_ema20 is not None and current_price > daily_ema20 else 'زیر 📉' if daily_ema20 is not None else 'نامشخص'}\n"
-        f"📐 قیمت نسبت به EMA50: {'بالای 📈' if daily_ema50 is not None and current_price > daily_ema50 else 'زیر 📉' if daily_ema50 is not None else 'نامشخص'}\n"
-        f"📈 MACD روزانه: {'مثبت 📈' if daily_macd is not None and daily_macd > 0 else 'منفی 📉' if daily_macd is not None else '-'}\n"
-        f"💪 ADX روزانه: {daily_adx:.1f}" if daily_adx is not None else "💪 ADX روزانه: -"
-    )
-    text += f"\n🎯 RSI روزانه: {daily_rsi:.1f}" if daily_rsi is not None else "\n🎯 RSI روزانه: -"
-    text += f"\n📏 موقعیت بولینگر: {bb_position*100:.1f}%" if bb_position is not None else "\n📏 موقعیت بولینگر: -"
-    text += f"\n📐 پهنای بولینگر: {bb_width:.2f}" if bb_width is not None else "\n📐 پهنای بولینگر: -"
-    if macro_data:
-        text += f"\n{DIVIDER}\n📊 *داده‌های کلان بازار:*\n"
-        text += f"• سلطه بیت‌کوین: {macro_data.get('btc_dominance', 0):.1f}%\n"
-        text += f"• حجم کل بازار: {macro_data.get('total_volume', 0):.0f}\n"
-    text += (
-        f"\n{DIVIDER}\n"
-        f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-        f"{DIVIDER}\nℹ️ داده‌ها از Gate.io (اصلی)، کوکوین اسپات و CoinGecko (پشتیبان) محاسبه شده‌اند."
-    )
-    return rtl_lines(text)
-
-def format_prices_pretty(prices, chat_id):
-    lines = ["💰 قیمت لحظه‌ای", f"🕒 {shamsi_now()}", DIVIDER]
-    for code in COIN_CODES:
-        price = prices.get(code)
-        if price is not None and price > 0:
-            source = price_sources.get(code, "G")
-            if source == "G":
-                source_emoji = "🅶"
-            elif source == "K":
-                source_emoji = "🅺"
-            elif source == "C":
-                source_emoji = "🅲"
-            else:
-                source_emoji = "❓"
-            price_display = fmt_amount(price, chat_id)
-            lines.append(f"{code} {source_emoji} → {price_display}")
-        else:
-            lines.append(f"{code} ⚠️ قیمت در دسترس نیست")
-    return rtl_lines("\n".join(lines))
-
-def split_long_message(text, limit=TELEGRAM_MSG_LIMIT):
-    if len(text) <= limit:
-        return [text]
-    parts, current = [], ""
-    for block in text.split("\n\n"):
-        if len(block) > limit:
-            if current:
-                parts.append(current.strip()); current = ""
-            for i in range(0, len(block), limit):
-                parts.append(block[i:i + limit])
-            continue
-        candidate = f"{current}\n\n{block}" if current else block
-        if len(candidate) > limit:
-            parts.append(current.strip()); current = block
-        else:
-            current = candidate
-    if current:
-        parts.append(current.strip())
-    return parts
-
-# ---------- توابع ارسال به کانال ----------
-def calculate_signal_hash(symbol, mode, direction, entry, sl, tps):
-    return f"{symbol}|{mode}|{direction}|{entry:.6f}|{sl:.6f}|{tps[0]:.6f}|{tps[1]:.6f}|{tps[2]:.6f}"
-
-async def send_signal_to_channel(plan, signal_id):
-    """
-    برای هر ارز فقط یک پیام سیگنال زنده در کانال وجود دارد (کلید = نماد ارز، بدون توجه
-    به حالت/نوع معامله). اگر سیگنال تازه همان معامله‌ی قبلی باشد (همان signal_id) پیام
-    قبلی حذف و با متن «سیگنال اصلاح شد» جایگزین می‌شود. اگر سیگنال کاملا جدید باشد
-    (جهت برعکس شده و signal_id جدید ساخته شده) پیام قبلی حذف و پیام «سیگنال جدید» ارسال می‌شود.
-    """
-    if not CHANNEL_ID:
-        return
-    key = plan.symbol
-    new_hash = calculate_signal_hash(plan.symbol, plan.mode, plan.direction, plan.entry_price, plan.sl_price, plan.tp_prices)
-
-    async with channel_lock:
-        existing = channel_message_map.get(key)
-        if existing and existing.get("hash") == new_hash:
-            logger.debug(f"No change for {key}, skipping channel message")
-            return
-
-        is_correction = bool(existing) and existing.get("signal_id") == signal_id
-        if existing:
-            try:
-                await app.bot.delete_message(chat_id=CHANNEL_ID, message_id=existing["message_id"])
-            except Exception as e:
-                logger.error(f"Failed to delete old channel message for {key}: {e}")
-            old_signal_id = existing.get("signal_id")
-            if old_signal_id and old_signal_id != signal_id:
-                channel_signal_messages.pop(old_signal_id, None)
-
-        direction_emoji = "🟢" if plan.direction == "LONG" else "🔴"
-        header = "🔄 *سیگنال اصلاح شد*" if is_correction else "🔔 *سیگنال جدید*"
-        footer_note = "\n\n⚠️ سیگنال قبلی با داده‌های جدید اصلاح شد." if is_correction else ""
-        text = (
-            f"{header} | {plan.symbol}/USDT\n"
-            f"📈 جهت: {plan.direction} {direction_emoji}\n"
-            f"🎯 اطمینان: {plan.confidence:.0f}٪ ({confidence_badge(plan.confidence)})\n"
-            f"📐 نسبت ریسک به بازده: 1:{plan.rr:.2f}\n\n"
-            f"📥 ورود: {format_channel_price(plan.entry_price)}\n"
-            f"🛑 حد ضرر: {format_channel_price(plan.sl_price)}\n"
-            f"🎯 اهداف:\n"
-            f"1️⃣ {format_channel_price(plan.tp_prices[0])}\n"
-            f"2️⃣ {format_channel_price(plan.tp_prices[1])}\n"
-            f"3️⃣ {format_channel_price(plan.tp_prices[2])}\n\n"
-            f"⚡ اهرم پیشنهادی: {plan.leverage}x\n"
-            f"🕒 {shamsi_now()}"
-            f"{footer_note}"
-        )
-        try:
-            msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(text), parse_mode="Markdown")
-            channel_message_map[key] = {
-                "signal_id": signal_id,
-                "message_id": msg.message_id,
-                "hash": new_hash
-            }
-            channel_signal_messages[signal_id] = msg.message_id
-            save_state()
-            logger.info(f"Channel message {'corrected' if is_correction else 'sent'} for {key} (signal_id {signal_id})")
-        except Exception as e:
-            logger.error(f"Failed to send channel message for {key}: {e}")
-
-def build_signal_update_text_from_record(rec):
-    direction_emoji = "🟢" if rec["direction"] == "LONG" else "🔴"
-    if rec["status"] == "tp1_hit":
-        status_text = "✅ *TP1 زده شد*"
-        sl_text = f"🛑 حد ضرر به نقطه ورود منتقل شد (معامله بدون ریسک)\n📥 ورود/حد ضرر جدید: {format_channel_price(rec['entry_price'])}"
-        targets = f"🎯 اهداف بعدی:\n2️⃣ {format_channel_price(rec['tp_prices'][1])}\n3️⃣ {format_channel_price(rec['tp_prices'][2])}"
-    elif rec["status"] == "tp2_hit":
-        status_text = "✅ *TP2 زده شد*"
-        sl_text = f"🛑 حد ضرر به TP1 منتقل شد: {format_channel_price(rec['sl_price'])}"
-        targets = f"🎯 هدف بعدی:\n3️⃣ {format_channel_price(rec['tp_prices'][2])}"
-    elif rec["status"] == "tp3_hit":
-        status_text = "🏆 *TP3 زده شد — سیگنال با موفقیت بسته شد*"
-        sl_text = ""
-        targets = ""
-    elif rec["status"] == "sl_hit":
-        status_text = "❌ *حد ضرر فعال شد — سیگنال بسته شد*"
-        sl_text = f"🛑 قیمت به {format_channel_price(rec['sl_price'])} رسید"
-        targets = ""
-    else:
-        return ""
-
-    lines = [
-        f"🔔 سیگنال | {rec['symbol']}/USDT",
-        f"📈 جهت: {rec['direction']} {direction_emoji}",
-        "",
-        status_text,
-    ]
-    if sl_text:
-        lines.append(sl_text)
-    if targets:
-        lines.append(targets)
-    lines.append(f"🕒 بروزرسانی: {shamsi_now()}")
-    return "\n".join(lines)
-
-async def update_channel_signal_message(signal_id):
-    """
-    پیام کانال مربوط به یک سیگنال را با آخرین وضعیت (TP1/TP2/TP3/SL) جایگزین می‌کند:
-    پیام قبلی حذف و پیام تازه با متن بروزشده ارسال می‌شود. فقط وقتی سیگنال به‌طور نهایی
-    بسته می‌شود (TP3 یا SL) رهگیری آن متوقف و امکان صدور سیگنال جدید برای همان ارز
-    (پس از کول‌داون) باز می‌شود.
-    """
-    if signal_id not in channel_signal_messages:
-        return
-    rec = next((r for r in signal_history if r.get("signal_id") == signal_id), None)
-    if not rec:
-        return
-    new_text = build_signal_update_text_from_record(rec)
-    if not new_text:
-        return
-    old_message_id = channel_signal_messages[signal_id]
-    try:
-        await app.bot.delete_message(chat_id=CHANNEL_ID, message_id=old_message_id)
-    except Exception as e:
-        logger.error(f"Failed to delete old channel message for signal {signal_id}: {e}")
-    try:
-        new_msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(new_text), parse_mode="Markdown")
-        channel_signal_messages[signal_id] = new_msg.message_id
-        key = rec["symbol"]
-        if channel_message_map.get(key, {}).get("signal_id") == signal_id:
-            channel_message_map[key]["message_id"] = new_msg.message_id
-    except Exception as e:
-        logger.error(f"Failed to send new final channel message for signal {signal_id}: {e}")
-        return
-    if rec["status"] in ("tp3_hit", "sl_hit"):
-        last_channel_signal_close_time[rec["symbol"]] = time.time()
-        key = rec["symbol"]
-        if channel_message_map.get(key, {}).get("signal_id") == signal_id:
-            del channel_message_map[key]
-        channel_signal_messages.pop(signal_id, None)
-    save_state()
-
-async def send_high_importance_news_to_channel(news_text):
-    if not CHANNEL_ID:
-        return
-    try:
-        await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(news_text), parse_mode="Markdown")
-        logger.info("High importance news sent to channel")
-    except Exception as e:
-        logger.error(f"Failed to send news to channel: {e}")
-
-# ---------- حلقه مستقل کانال (پویا) ----------
-# نکته مهم (اصلاح‌شده): دیگر به‌ازای هر «حالت معاملاتی» (fast/semi_fast/standard/conservative)
-# سیگنال جدا برای یک ارز تولید و ارسال نمی‌شود. برای هر ارز فقط یک تحلیل واحد (CHANNEL_SIGNAL_MODE)
-# با آستانه‌های سخت‌گیرانه‌تر (CHANNEL_MIN_* ) بررسی می‌شود تا تعداد سیگنال‌ها کم و اعتبار آن‌ها بالا بماند.
-async def channel_broadcast_loop(app):
-    await asyncio.sleep(20)
-    while True:
-        try:
-            if not CHANNEL_ID:
-                await asyncio.sleep(60)
-                continue
-
-            now = time.time()
-            last_time = last_mode_broadcast_time.get(CHANNEL_SIGNAL_MODE, 0)
-            if now - last_time >= CHANNEL_CHECK_INTERVAL_SECONDS:
-                logger.info("Channel broadcast cycle started (یک تحلیل واحد برای هر ارز)")
-                await cache.update_prices(force=False)
-                await cache.update_ohlcv(force=False)
-                for code in cache.valid_codes:
-                    try:
-                        plan = await generate_trade_plan_v2(
-                            code,
-                            CHANNEL_SIGNAL_MODE,
-                            send_to_channel=True,
-                            min_confidence=CHANNEL_MIN_SIGNAL_CONFIDENCE,
-                            min_gap=CHANNEL_MIN_DIRECTION_GAP,
-                            min_confirmations_bonus=CHANNEL_MIN_CONFIRMATIONS_BONUS,
-                            adx_min_override=CHANNEL_ADX_MIN,
-                        )
-                        if plan:
-                            logger.info(f"Channel signal generated: {plan.symbol} {plan.direction} conf={plan.confidence:.0f}")
-                    except Exception as e:
-                        logger.debug(f"Error generating channel signal for {code}: {e}")
-                    await asyncio.sleep(0.05)
-                last_mode_broadcast_time[CHANNEL_SIGNAL_MODE] = now
-                logger.info("Channel broadcast cycle completed")
-        except Exception as e:
-            logger.exception("Channel broadcast error: %s", e)
-        await asyncio.sleep(60)
-
-# ---------- حلقه پایش سیگنال‌های کانال (جایگزین trigger_scanner_loop قدیمی) ----------
-# نسخه قبل این حلقه به‌جای «پایش» سیگنال‌های باز، برای هر نوسان کوچک قیمت (۰.۵٪) سیگنال
-# تازه تولید می‌کرد که باعث سیل سیگنال و تناقض با حلقه اصلی کانال می‌شد؛ این باگ حذف شده.
-# کار این حلقه اکنون فقط این است: با فاصله کوتاه، قیمت لحظه‌ای هر ارزی که یک سیگنال باز و
-# فعال در کانال دارد را می‌خواند و در صورت برخورد به TP/SL پیام کانال را بروزرسانی می‌کند.
-# این کار دیگر به «سیگنال‌های شخصی کاربران» (active_signals) وابسته نیست، بنابراین سیگنال‌های
-# کانال حتی وقتی هیچ کاربری آن‌ها را شخصاً دنبال نکرده باشد هم به‌درستی بسته/بروزرسانی می‌شوند.
-CHANNEL_MONITOR_INTERVAL_SECONDS = int(os.getenv("CHANNEL_MONITOR_INTERVAL_SECONDS", "90"))
-
-async def channel_signal_monitor_loop(app):
-    await asyncio.sleep(30)
-    while True:
-        try:
-            if not CHANNEL_ID or not channel_message_map:
-                await asyncio.sleep(CHANNEL_MONITOR_INTERVAL_SECONDS)
-                continue
-
-            symbols_to_check = list(channel_message_map.keys())
-            await cache.update_prices(force=True, codes=symbols_to_check)
-
-            for code in symbols_to_check:
-                current_price = cache.prices.get(code)
-                if not current_price:
-                    continue
-                try:
-                    changed = update_signal_status(code, current_price)
-                    for sid in changed:
-                        await update_channel_signal_message(sid)
-                except Exception as e:
-                    logger.debug(f"Error monitoring channel signal for {code}: {e}")
-
-        except Exception as e:
-            logger.exception("Channel signal monitor error: %s", e)
-        await asyncio.sleep(CHANNEL_MONITOR_INTERVAL_SECONDS)
-
-# ---------- توابع آمار سیگنال‌ها ----------
-def format_signal_history_page(filter_type: str, page: int = 0, per_page: int = 20, chat_id: int = None):
-    if filter_type == "success":
-        records = [r for r in signal_history if r["status"].startswith("tp")]
-        title = "✅ *تاریخچه سیگنال‌های موفق*"
-    else:
-        records = [r for r in signal_history if r["status"] == "sl_hit"]
-        title = "❌ *تاریخچه سیگنال‌های ناموفق*"
-
-    records = sorted(records, key=lambda x: x["timestamp"], reverse=True)
-    total = len(records)
-    total_pages = (total + per_page - 1) // per_page if total > 0 else 1
-    page = max(0, min(page, total_pages - 1))
-    start = page * per_page
-    end = start + per_page
-    page_records = records[start:end]
-
-    if not page_records:
-        text = f"{title}\n\nهیچ سیگنالی ثبت نشده است."
-    else:
-        text = f"{title}\n{DIVIDER}\n"
-        for rec in page_records:
-            date_str = shamsi_date(datetime.fromtimestamp(rec["timestamp"]))
-            symbol = rec["symbol"]
-            direction = "لانگ 🟢" if rec["direction"] == "LONG" else "شورت 🔴"
-            status = "TP1" if rec["status"] == "tp1_hit" else "TP2" if rec["status"] == "tp2_hit" else "TP3" if rec["status"] == "tp3_hit" else "SL"
-            mode_label = MODE_CONFIGS.get(rec["mode"], MODE_CONFIGS["standard"])["label"]
-            if rec["status"].startswith("tp"):
-                if rec["status"] == "tp1_hit":
-                    price_hit = rec["tp_prices"][0]
-                elif rec["status"] == "tp2_hit":
-                    price_hit = rec["tp_prices"][1]
-                else:
-                    price_hit = rec["tp_prices"][2]
-                price_text = fmt_amount(price_hit, chat_id) if chat_id else format_channel_price(price_hit)
-            else:
-                price_text = fmt_amount(rec["sl_price"], chat_id) if chat_id else format_channel_price(rec["sl_price"])
-            text += (
-                f"{symbol} | {direction} | {mode_label}\n"
-                f"   تاریخ: {date_str}\n"
-                f"   وضعیت: {status} @ {price_text}\n"
-                f"{DIVIDER}\n"
-            )
-
-    buttons = []
-    if page > 0:
-        buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"stats_{filter_type}_page_{page-1}"))
-    if page < total_pages - 1:
-        buttons.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"stats_{filter_type}_page_{page+1}"))
-    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
-    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="stats_history_menu")])
-    keyboard = InlineKeyboardMarkup(rows)
-    return text, keyboard
-
-def format_coin_ranking(success: bool = True, top_n: int = 20):
-    if success:
-        records = [r for r in signal_history if r["status"].startswith("tp")]
-        title = "🏆 *بیشترین ارزهای موفق*"
-    else:
-        records = [r for r in signal_history if r["status"] == "sl_hit"]
-        title = "💔 *بیشترین ارزهای ناموفق*"
-
-    counts = {}
-    for rec in records:
-        sym = rec["symbol"]
-        counts[sym] = counts.get(sym, 0) + 1
-
-    sorted_coins = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
-    if not sorted_coins:
-        text = f"{title}\n\nهیچ داده‌ای موجود نیست."
-    else:
-        text = f"{title}\n{DIVIDER}\n"
-        for i, (sym, cnt) in enumerate(sorted_coins, 1):
-            text += f"{i}. {sym} — {cnt} سیگنال\n"
-        text += f"{DIVIDER}\n"
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="stats_menu")]
-    ])
-    return text, keyboard
-
-# ---------- توابع منوهای آمار ----------
-async def stats_menu(update, context):
-    query = update.callback_query
-    await query.answer()
-    text = "📊 *آمار سیگنال‌ها*\n" + DIVIDER + "\n" + MENU_PROMPT
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏆 بیشترین ارزها", callback_data="stats_top_coins_menu")],
-        [InlineKeyboardButton("📋 آخرین سیگنال‌ها", callback_data="stats_recent_signals_menu")],
-        [InlineKeyboardButton("📜 تاریخچه سیگنال‌ها", callback_data="stats_history_menu")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")],
-    ])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-    set_interactive_screen(query.message.chat_id, [query.message.message_id])
-
-async def stats_top_coins_menu(update, context):
-    query = update.callback_query
-    await query.answer()
-    text = "🏆 *بیشترین ارزها*\n" + DIVIDER + "\n" + MENU_PROMPT
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏆 ارزهای موفق", callback_data="stats_success_coins")],
-        [InlineKeyboardButton("💔 ارزهای ناموفق", callback_data="stats_failed_coins")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="stats_menu")],
-    ])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-    set_interactive_screen(query.message.chat_id, [query.message.message_id])
-
-async def stats_recent_signals_menu(update, context):
-    query = update.callback_query
-    await query.answer()
-    text = "📋 *آخرین سیگنال‌ها*\n" + DIVIDER + "\n" + MENU_PROMPT
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ سیگنال‌های موفق", callback_data="stats_recent_success_page_0")],
-        [InlineKeyboardButton("❌ سیگنال‌های ناموفق", callback_data="stats_recent_failed_page_0")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="stats_menu")],
-    ])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-    set_interactive_screen(query.message.chat_id, [query.message.message_id])
-
-async def stats_history_menu(update, context):
-    query = update.callback_query
-    await query.answer()
-    text = "📜 *تاریخچه سیگنال‌ها*\n" + DIVIDER + "\n" + MENU_PROMPT
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ سیگنال‌های موفق", callback_data="stats_success_page_0")],
-        [InlineKeyboardButton("❌ سیگنال‌های ناموفق", callback_data="stats_failed_page_0")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="stats_menu")],
-    ])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-    set_interactive_screen(query.message.chat_id, [query.message.message_id])
-
-async def stats_success_signals(update, context, page=0, recent=False):
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat_id
-    text, keyboard = format_signal_history_page("success", page, chat_id=chat_id)
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-    set_interactive_screen(chat_id, [query.message.message_id])
-
-async def stats_failed_signals(update, context, page=0, recent=False):
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat_id
-    text, keyboard = format_signal_history_page("failed", page, chat_id=chat_id)
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-    set_interactive_screen(chat_id, [query.message.message_id])
-
-async def stats_success_coins(update, context):
-    query = update.callback_query
-    await query.answer()
-    text, keyboard = format_coin_ranking(success=True)
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-    set_interactive_screen(query.message.chat_id, [query.message.message_id])
-
-async def stats_failed_coins(update, context):
-    query = update.callback_query
-    await query.answer()
-    text, keyboard = format_coin_ranking(success=False)
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
-    set_interactive_screen(query.message.chat_id, [query.message.message_id])
-
-# ---------- مرکز هوشمندسازی ----------
-async def optimization_center(update, context):
-    query = update.callback_query
-    chat_id = update.effective_chat.id
-    if not is_admin_role(chat_id):
-        await query.answer("⛔️ فقط ادمین.", show_alert=True)
-        return
-    text = "🧠 *مرکز هوشمندسازی*\n" + DIVIDER + "\n" + MENU_PROMPT
-    await query.edit_message_text(
-        text,
-        reply_markup=kb_optimization_center(),
-        parse_mode="Markdown"
-    )
-
-async def optimization_active(update, context):
-    query = update.callback_query
-    chat_id = update.effective_chat.id
-    if not is_admin_role(chat_id):
-        await query.answer("⛔️ فقط ادمین.", show_alert=True)
-        return
-    last_pending = None
-    for sug in reversed(suggestion_history):
-        if sug["status"] == "pending":
-            last_pending = sug
-            break
-    if not last_pending:
-        total_closed = len([s for s in signal_history if s["status"] in ["tp1_hit", "tp2_hit", "tp3_hit", "sl_hit"]])
-        text = (
-            "📋 *پیشنهادات فعال*\n\n"
-            f"📊 *وضعیت جمع‌آوری داده*\n"
-            f"{DIVIDER}\n"
-            f"• تعداد سیگنال‌های بسته‌شده: {total_closed}\n"
-            f"• حداقل نیاز برای تحلیل: ۱۰\n\n"
-            f"⏳ در حال جمع‌آوری داده‌های کافی برای ارائه پیشنهادات هوشمند...\n\n"
-            f"💡 *نکته:* پس از بسته شدن حداقل ۱۰ سیگنال (TP یا SL)، اولین پیشنهادات در اینجا نمایش داده می‌شوند."
-        )
-        await query.edit_message_text(
-            text,
-            reply_markup=kb_back_to_optimization(),
-            parse_mode="Markdown"
-        )
-        return
-    text = "📋 *پیشنهادات فعال*\n\n"
-    text += "🔄 *آخرین پیشنهاد فعال*\n"
-    text += f"{DIVIDER}\n"
-    text += f"📅 تاریخ: {shamsi_date(datetime.fromtimestamp(last_pending['timestamp']))}\n"
-    text += f"📊 تحلیل {last_pending['analysis']['total_signals']} سیگنال اخیر:\n"
-    text += f"• نرخ برد: {last_pending['analysis']['win_rate']:.1f}%\n"
-    text += f"• میانگین RR: {last_pending['analysis']['avg_rr']:.2f}\n"
-    text += f"• بهترین حالت: {MODE_CONFIGS[last_pending['analysis']['best_mode']]['label']}\n"
-    text += f"{DIVIDER}\n"
-    text += f"💡 *پیشنهادات:*\n"
-    for sug in last_pending["suggestions"][:3]:
-        if sug["parameter"] == "mode":
-            text += f"• تغییر حالت به {MODE_CONFIGS[sug['suggested']]['label']}\n"
-        else:
-            text += f"• {sug['parameter']}: {sug['current']} → {sug['suggested']}\n"
-        text += f"  📌 {sug['reason']}\n"
-    text += f"\n{DIVIDER}\n"
-    text += f"⏳ وضعیت: در انتظار پاسخ\n"
-    text += f"📌 *یادآوری:* در صورت عدم پاسخ، پس از ۲۴ ساعت منقضی می‌شود."
-    await query.edit_message_text(
-        text,
-        reply_markup=kb_suggestion_actions(last_pending["id"]),
-        parse_mode="Markdown"
-    )
-
-async def optimization_history(update, context):
-    query = update.callback_query
-    chat_id = update.effective_chat.id
-    if not is_admin_role(chat_id):
-        await query.answer("⛔️ فقط ادمین.", show_alert=True)
-        return
-    if not suggestion_history:
-        text = (
-            "📜 *تاریخچه پیشنهادات*\n\n"
-            "هیچ پیشنهادی ثبت نشده است.\n"
-            "پس از جمع‌آوری داده‌های کافی، اولین پیشنهادات در اینجا نمایش داده می‌شوند."
-        )
-        await query.edit_message_text(
-            text,
-            reply_markup=kb_back_to_optimization(),
-            parse_mode="Markdown"
-        )
-        return
-    text = "📜 *تاریخچه پیشنهادات*\n\n"
-    text += f"{DIVIDER}\n"
-    for sug in reversed(suggestion_history[-10:]):
-        status_emoji = {
-            "applied": "✅",
-            "rejected": "❌",
-            "pending": "⏳",
-            "expired": "⌛"
-        }.get(sug["status"], "❓")
-        date_str = shamsi_date(datetime.fromtimestamp(sug["timestamp"]))
-        text += f"{status_emoji} {date_str} - {len(sug['suggestions'])} پیشنهاد\n"
-        if sug["status"] == "applied" and "result" in sug:
-            text += f"   📌 {sug['result']}\n"
-        elif sug["status"] == "rejected":
-            text += f"   📌 تنظیمات قبلی حفظ شد\n"
-        elif sug["status"] == "expired":
-            text += f"   📌 عدم پاسخ تا ۲۴ ساعت\n"
-        text += "\n"
-    await query.edit_message_text(
-        text,
-        reply_markup=kb_back_to_optimization(),
-        parse_mode="Markdown"
-    )
-
-# ---------- دکمه تحلیل جامع ----------
-async def comprehensive_analysis(update, context):
-    query = update.callback_query
-    chat_id = update.effective_chat.id
-    if not is_admin_role(chat_id):
-        await query.answer("⛔️ فقط ادمین.", show_alert=True)
-        return
-    await query.edit_message_text("⏳ در حال تحلیل همه ارزها...")
-    try:
-        await cache.update_prices(force=True)
-        await cache.update_ohlcv(force=True)
-        active_signals_list = []
-        mode = "standard"
-        for code in COIN_CODES:
-            try:
-                ind = await cache.get_indicators(code, mode)
-                if not ind:
-                    continue
-                plan = await generate_trade_plan_v2(code, mode)
-                if plan and plan.confidence >= MIN_SIGNAL_CONFIDENCE:
-                    active_signals_list.append({
-                        "code": code,
-                        "direction": plan.direction,
-                        "confidence": plan.confidence,
-                        "rr": plan.rr,
-                        "mode": plan.mode,
-                        "entry": plan.entry_price,
-                        "sl": plan.sl_price,
-                        "tp1": plan.take_profits[0] if plan.take_profits else 0,
-                    })
-                await asyncio.sleep(0.2)
-            except Exception as e:
-                logger.debug(f"Comprehensive analysis error for {code}: {e}")
-                continue
-        if not active_signals_list:
-            await query.edit_message_text(
-                "📊 *تحلیل جامع ارزها*\n"
-                f"{DIVIDER}\n"
-                "💤 هیچ سیگنال فعالی یافت نشد.\n\n"
-                "دلایل احتمالی:\n"
-                "• ADX پایین (بازار رنج)\n"
-                "• تعداد لایه‌های تأییدشده کمتر از حد نیاز\n"
-                "• نسبت ریسک به بازده پایین",
-                reply_markup=kb_back_to_admin_panel(),
-                parse_mode="Markdown"
-            )
-            return
-        text = "📊 *تحلیل جامع ارزها*\n"
-        text += f"🕒 {shamsi_now()}\n{DIVIDER}\n"
-        long_count = 0
-        short_count = 0
-        for signal in active_signals_list:
-            direction_emoji = "🟢" if signal["direction"] == "LONG" else "🔴"
-            direction_text = "لانگ" if signal["direction"] == "LONG" else "شورت"
-            mode_label = MODE_CONFIGS.get(signal["mode"], MODE_CONFIGS["standard"])["label"]
-            if signal["direction"] == "LONG":
-                long_count += 1
-            else:
-                short_count += 1
-            text += (
-                f"{direction_emoji} {signal['code']} | {direction_text}\n"
-                f"   اطمینان: {signal['confidence']:.0f}% | RR: {signal['rr']:.2f} | {mode_label}\n"
-                f"   📥 ورود: {fmt_amount(signal['entry'], chat_id)}\n"
-                f"   🛑 حد ضرر: {fmt_amount(signal['sl'], chat_id)}\n"
-                f"   🎯 TP1: {fmt_amount(signal['tp1'], chat_id)}\n"
-                f"{DIVIDER}\n"
-            )
-        text += f"📊 جمع‌بندی: {len(active_signals_list)} سیگنال فعال\n"
-        text += f"🟢 لانگ: {long_count} | 🔴 شورت: {short_count}"
-        chunks = split_long_message(text)
-        await query.edit_message_text(chunks[0], reply_markup=kb_back_to_admin_panel(), parse_mode="Markdown")
-        for chunk in chunks[1:]:
-            await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
-    except Exception as e:
-        logger.exception(f"Comprehensive analysis error: {e}")
-        await query.edit_message_text(f"❌ خطا در تحلیل جامع:\n{str(e)}", reply_markup=kb_back_to_admin_panel())
-
-# ---------- مدیریت صفحه نمایش ----------
-async def clear_interactive_screen(context, chat_id, keep_id=None):
-    ids = interactive_screen_messages.pop(chat_id, [])
-    for mid in ids:
-        if mid == keep_id: continue
-        try: await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-        except Exception: pass
-
-def set_interactive_screen(chat_id, message_ids):
-    interactive_screen_messages[chat_id] = message_ids
-
-async def clear_overlay(context, chat_id):
-    ids = overlay_messages.pop(chat_id, [])
-    for mid in ids:
-        try: await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-        except Exception: pass
-
-# ---------- کیبوردها ----------
-def build_grid_keyboard(buttons, columns):
-    rows = [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
-    return rows
-
-def kb_currency():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("دلار (USDT) 💵", callback_data="cur_USDT")],
-        [InlineKeyboardButton("تومان (IRT) 💴", callback_data="cur_IRT")],
-        [InlineKeyboardButton("هر دو 💱", callback_data="cur_BOTH")],
-    ])
-
-def kb_role_selection():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("ادمین 👑", callback_data="role_admin")],
-        [InlineKeyboardButton("کاربر عادی 👤", callback_data="role_user")],
-    ])
-
-def kb_mode_selection():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("سریع ⚡", callback_data="mode_fast")],
-        [InlineKeyboardButton("نیمه‌سریع 🔥", callback_data="mode_semi_fast")],
-        [InlineKeyboardButton("استاندارد 📊", callback_data="mode_standard")],
-        [InlineKeyboardButton("محافظه‌کار 🛡️", callback_data="mode_conservative")],
-    ])
-
-def kb_mode_selection_for_action(action, code):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("سریع ⚡", callback_data=f"run_{action}_{code}_fast")],
-        [InlineKeyboardButton("نیمه‌سریع 🔥", callback_data=f"run_{action}_{code}_semi_fast")],
-        [InlineKeyboardButton("استاندارد 📊", callback_data=f"run_{action}_{code}_standard")],
-        [InlineKeyboardButton("محافظه‌کار 🛡️", callback_data=f"run_{action}_{code}_conservative")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"coin_{code}")],
-    ])
-
-def kb_main(user_id, mode="standard"):
-    role = user_role.get(user_id, "user")
-    if role == "admin":
-        rows = [
-            [InlineKeyboardButton("💰 قیمت لحظه‌ای", callback_data="menu_prices"), InlineKeyboardButton("🪙 انتخاب ارز", callback_data="menu_coins")],
-            [InlineKeyboardButton("📅 رویدادها", callback_data="events_menu"), InlineKeyboardButton("⭐ علاقه‌مندی‌ها", callback_data="favorites")],
-            [InlineKeyboardButton("📊 گزارش مقایسه‌ای", callback_data="admin_compare"), InlineKeyboardButton("🧾 گزارش دوره‌ای", callback_data="periodic_report")],
-            [InlineKeyboardButton("🔄 شروع مجدد", callback_data="restart_bot"), InlineKeyboardButton("🛑 توقف ربات", callback_data="stop_bot")],
-            [InlineKeyboardButton("📈 داشبورد تحلیلی", callback_data="dashboard"), InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")],
-            [InlineKeyboardButton("❓ راهنما", callback_data="help")],
-        ]
-    else:
-        rows = [
-            [InlineKeyboardButton("💰 قیمت لحظه‌ای", callback_data="menu_prices"), InlineKeyboardButton("🪙 انتخاب ارز", callback_data="menu_coins")],
-            [InlineKeyboardButton("📅 رویدادها", callback_data="events_menu"), InlineKeyboardButton("⭐ علاقه‌مندی‌ها", callback_data="favorites")],
-            [InlineKeyboardButton("🔄 تغییر سبک معاملاتی", callback_data="change_mode"), InlineKeyboardButton("❓ راهنما", callback_data="help")],
-            [InlineKeyboardButton("🔄 شروع مجدد", callback_data="restart_bot"), InlineKeyboardButton("🛑 توقف ربات", callback_data="stop_bot")],
-        ]
-    return InlineKeyboardMarkup(rows)
-
-def kb_admin_panel():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 تحلیل جامع", callback_data="comprehensive_analysis")],
-        [InlineKeyboardButton("🔄 بروزرسانی کامل", callback_data="menu_all")],
-        [InlineKeyboardButton("🧠 مرکز هوشمندسازی", callback_data="optimization_center")],
-        [InlineKeyboardButton("🔙 بازگشت به منو اصلی", callback_data="menu_main")],
-    ])
-
-def kb_optimization_center():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 پیشنهادات فعال", callback_data="optimization_active")],
-        [InlineKeyboardButton("📜 تاریخچه پیشنهادات", callback_data="optimization_history")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")],
-    ])
-
-def kb_back_to_optimization():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="optimization_center")]
-    ])
-
-def kb_back_main():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت به منو اصلی", callback_data="menu_main")]
-    ])
-
-def kb_back_to_admin_panel():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")]
-    ])
-
-def kb_events_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📅 رویدادهای پیش رو", callback_data="events_upcoming")],
-        [InlineKeyboardButton("📰 اخبار و هشدارها", callback_data="events_news")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")],
-    ])
-
-def kb_back_to_events():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="events_menu")]
-    ])
-
-def kb_back_to_coin(code):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"coin_{code}")]
-    ])
-
-def kb_coins(page=0):
-    start = page * PER_PAGE
-    end = start + PER_PAGE
-    page_codes = COIN_CODES[start:end]
-    buttons = []
-    for code in page_codes:
-        status = cache.market_status.get(code, {}).get("status")
-        if status == "SWAP OK":
-            label = f"{code} 🟢"
-        elif status == "TICKER ERROR":
-            label = f"{code} 🟠"
-        else:
-            label = f"{code} ⚪"
-        buttons.append(InlineKeyboardButton(label, callback_data=f"coin_{code}"))
-    rows = build_grid_keyboard(buttons, COINS_GRID_COLUMNS)
-
-    nav_row = []
-    total_pages = (len(COIN_CODES) + PER_PAGE - 1) // PER_PAGE
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"coins_page_{page-1}"))
-    if end < len(COIN_CODES):
-        nav_row.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"coins_page_{page+1}"))
-    if nav_row:
-        rows.append(nav_row)
-
-    rows.append([InlineKeyboardButton("📡 دریافت سیگنال‌های فعال", callback_data="active_signals_all")])
-    rows.append([InlineKeyboardButton("📊 آمار سیگنال‌ها", callback_data="stats_menu")])
-    rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")])
-    return InlineKeyboardMarkup(rows)
-
-def kb_coin_detail(code, is_fav, is_admin_role=False):
-    fav_btn = InlineKeyboardButton("🗑️ حذف از علاقه‌مندی‌ها" if is_fav else "⭐ افزودن به علاقه‌مندی‌ها", callback_data=f"toggle_fav_{code}")
-    buttons = [
-        [InlineKeyboardButton("🧭 وضعیت لحظه‌ای", callback_data=f"askmode_suggest_{code}" if is_admin_role else f"suggest_{code}")],
-        [InlineKeyboardButton("🚀 پیشنهاد لحظه‌ای", callback_data=f"askmode_instant_{code}" if is_admin_role else f"instant_{code}")],
-        [InlineKeyboardButton("📆 تحلیل جامع ارز", callback_data=f"askmode_weekly_{code}" if is_admin_role else f"weekly_{code}")],
-        [fav_btn],
-        [InlineKeyboardButton("🔙 لیست ارزها", callback_data="menu_coins"), InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")],
-    ]
-    return InlineKeyboardMarkup(buttons)
-
-def kb_signal_details(code):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 جزئیات فنی", callback_data=f"details_{code}")],
-        [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"suggest_{code}")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"coin_{code}")],
-        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")],
-    ])
-
-def kb_back_to_signal(code):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"coin_{code}")],
-        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")],
-    ])
-
-def kb_weekly(code):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"coin_{code}")],
-        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")],
-    ])
-
-def kb_suggestion(code):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"suggest_{code}")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data=f"coin_{code}")],
-        [InlineKeyboardButton("📋 لیست ارزها", callback_data="menu_coins")],
-        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu_main")],
-    ])
-
-def kb_periodic_report():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 هفتگی", callback_data="report_period_weekly"), InlineKeyboardButton("📅 ماهانه", callback_data="report_period_monthly")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")],
-    ])
-
-def kb_help(step=0):
-    buttons = []
-    if step < 7:
-        buttons.append(InlineKeyboardButton("بعدی ⬅️", callback_data=f"help_{step+1}"))
-    if step > 0:
-        buttons.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"help_{step-1}"))
-    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
-    if step == 0:
-        rows.append([InlineKeyboardButton("🔙 بازگشت به منو اصلی", callback_data="menu_main")])
-    else:
-        rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="help_0")])
-    return InlineKeyboardMarkup(rows)
-
-def help_text(step):
-    if step == 0:
-        return rtl_lines(
-            "📖 *شروع کار با ربات*\n"
-            f"{DIVIDER}\n"
-            "این ربات با تحلیل ۱۰ لایه‌ای، سیگنال‌های معاملاتی فیوچرز تولید می‌کند.\n"
-            "پس از شروع، ابتدا واحد پولی را انتخاب کنید.\n"
-            "سپس سبک معاملاتی خود را از چهار حالت انتخاب کنید.\n"
-            "در نهایت منوی اصلی نمایش داده می‌شود."
-        )
-    elif step == 1:
-        return rtl_lines(
-            "💰 *قیمت‌های لحظه‌ای*\n"
-            f"{DIVIDER}\n"
-            "قیمت‌ها از سه منبع دریافت می‌شوند:\n"
-            "🅶 Gate.io (منبع اصلی)\n"
-            "🅺 کوکوین اسپات (پشتیبان اول)\n"
-            "🅲 CoinGecko (پشتیبان نهایی)\n"
-            "در صورت عدم دسترسی به منبع اصلی، به‌طور خودکار از پشتیبان استفاده می‌شود."
-        )
-    elif step == 2:
-        return rtl_lines(
-            "🪙 *ارزها و علاقه‌مندی‌ها*\n"
-            f"{DIVIDER}\n"
-            "از منوی «انتخاب ارز» می‌توانید وارد صفحه هر ارز شوید.\n"
-            "در آن‌جا می‌توانید ارز را به علاقه‌مندی‌ها اضافه یا حذف کنید.\n"
-            "علاقه‌مندی‌ها برای دریافت خودکار سیگنال استفاده می‌شوند."
-        )
-    elif step == 3:
-        return rtl_lines(
-            "📊 *تحلیل‌ها و سیگنال‌ها (۱۰ لایه)*\n"
-            f"{DIVIDER}\n"
-            "سیگنال‌ها بر اساس ۱۰ لایه تحلیل تولید می‌شوند:\n"
-            "۱. ساختار بازار | ۲. هم‌گرایی تایم‌فریم | ۳. مومنتوم\n"
-            "۴. حجم معاملات | ۵. احساسات بازار (جایگزین فاندینگ)\n"
-            "۶. روند | ۷. جریان سفارشات | ۸. تنوع بازار\n"
-            "۹. نوسان‌پذیری هوشمند | ۱۰. قدرت روند مکمل\n"
-            "حداقل ۴ تا ۷ لایه (بسته به حالت) باید تأیید شوند.\n"
-            "ضریب اطمینان = امتیاز وزنی لایه‌های تأییدشده.\n"
-            "نرخ موفقیت تخمینی = درصد موفقیت سیگنال‌های گذشته.\n"
-            "نسبت ریسک به بازده = نسبت سود بالقوه به ضرر احتمالی.\n"
-            "اهرم پویا = بر اساس قدرت سیگنال و حالت معاملاتی.\n"
-            "در بازار راکد (ADX پایین)، سیگنال صادر نمی‌شود."
-        )
-    elif step == 4:
-        return rtl_lines(
-            "📈 *داشبورد و گزارش‌ها*\n"
-            f"{DIVIDER}\n"
-            "داشبورد تحلیلی: نرخ برد، فاکتور سود، Expectancy، Max Drawdown، Sharpe، Risk of Ruin\n"
-            "گزارش دوره‌ای: هفتگی/ماهانه"
-        )
-    elif step == 5:
-        return rtl_lines(
-            "💡 *اصطلاحات جدید*\n"
-            f"{DIVIDER}\n"
-            "ساختار بازار: شکست مقاومت یا برگشت از حمایت\n"
-            "هم‌گرایی تایم‌فریم: همراستایی حداقل ۲ تایم‌فریم\n"
-            "احساسات بازار: ترکیبی از تغییر قیمت، حجم و ترس و طمع\n"
-            "جریان سفارشات: نسبت سفارشات خرید به فروش\n"
-            "تنوع بازار: درصد ارزهای بالای EMA۲۰\n"
-            "نوسان‌پذیری هوشمند: موقعیت قیمت در باند بولینگر\n"
-            "قدرت روند مکمل: اختلاف +DI و -DI\n"
-            "رژیم بازار: رونددار (ADX بالا) یا رنج (ADX پایین)\n"
-            "اهرم پویا: اهرم پیشنهادی بر اساس قدرت سیگنال"
-        )
-    elif step == 6:
-        return rtl_lines(
-            "📰 *اخبار و هشدارها*\n"
-            f"{DIVIDER}\n"
-            "اخبار نهنگ‌ها با ایموجی متحرک ارسال می‌شوند.\n"
-            "پیام‌های خبری بعد از ۱ ساعت به‌طور خودکار حذف می‌شوند.\n"
-            "تاریخچه اخبار در منوی «اخبار و هشدارها» قابل مشاهده است."
-        )
-    else:
-        return rtl_lines(
-            "❓ *پرسش‌های متداول*\n"
-            f"{DIVIDER}\n"
-            "چطور سیگنال بگیرم؟ → انتخاب ارز → پیشنهاد لحظه‌ای\n"
-            "ارسال خودکار چگونه است؟ → فقط برای ارزهای مورد علاقه، رویدادمحور\n"
-            "چطور ربات را متوقف کنم؟ → دکمه توقف ربات\n"
-            "آیا سیگنال‌ها تضمین سود هستند؟ → خیر، تحلیل تکنیکال است"
-        )
-
-def welcome_text():
-    return rtl_lines(
-        "🌟✨ *به سیگنال‌یار حرفه‌ای خوش آمدید!* ✨🌟\n"
-        f"{DIVIDER}\n"
-        "🤖 *ربات معاملاتی هوشمند* با تحلیل ۱۰ لایه‌ای\n"
-        "🎯 *سیگنال‌های لحظه‌ای* با دقت بالا و مدیریت ریسک پویا\n"
-        "📊 *تحلیل جامع ارزها* در تایم‌فریم‌های مختلف\n"
-        "🔔 *اخبار نهنگ‌ها و رویدادهای مهم* به‌صورت خودکار\n"
-        f"{DIVIDER}\n"
-        "🚀 *چگونه شروع کنیم؟*\n"
-        "۱. واحد پولی خود را انتخاب کنید\n"
-        "۲. سبک معاملاتی (سریع، نیمه‌سریع، استاندارد، محافظه‌کار) را تنظیم کنید\n"
-        "۳. ارزهای مورد نظر را به علاقه‌مندی‌ها اضافه کنید تا سیگنال خودکار دریافت کنید\n"
-        "۴. از منوی اصلی، قیمت‌ها، سیگنال‌ها و تحلیل‌ها را مشاهده کنید\n"
-        f"{DIVIDER}\n"
-        "⚠️ *توجه:* تمام تحلیل‌ها تکنیکال بوده و توصیه مالی نیستند.\n"
-        "🛡️ مدیریت ریسک را همواره رعایت کنید."
-    )
-
-MAIN_MENU_HEADER = "✨ *سیگنال‌یار حرفه‌ای* ✨\n" + DIVIDER + "\n" + MENU_PROMPT
-
-async def finish_start(context, chat_id, user_id):
-    commands = [
-        BotCommand("start", "شروع ربات"),
-        BotCommand("menu", "منوی اصلی"),
-        BotCommand("status", "وضعیت سیستم"),
-        BotCommand("dashboard", "داشبورد تحلیلی"),
-        BotCommand("news", "رویدادهای پیش رو"),
-        BotCommand("report", "گزارش دوره‌ای"),
-        BotCommand("stop", "توقف ربات"),
-    ] if is_admin(user_id) else [BotCommand("menu", "منوی اصلی")]
-    await context.bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=chat_id))
-    await clear_interactive_screen(context, chat_id)
-    msg = await context.bot.send_message(chat_id=chat_id, text=welcome_text(), reply_markup=kb_main(user_id), parse_mode="Markdown")
-    set_interactive_screen(chat_id, [msg.message_id])
-
-# ---------- Trailing monitor ----------
-async def trailing_monitor_loop(app):
-    await asyncio.sleep(20)
-    while True:
-        try:
-            if active_signals:
-                for chat_id, signals in list(active_signals.items()):
-                    for code, data in list(signals.items()):
-                        plan = data["plan"]; stage = data["stage"]
-                        try:
-                            source = cache.source_for_code(code)
-                            if source == "gateio":
-                                ticker = await asyncio.to_thread(exchange_gateio.fetch_ticker, cache.symbol_for_code(code))
-                            elif source == "kucoin":
-                                ticker = await asyncio.to_thread(exchange_spot_kucoin.fetch_ticker, cache.symbol_for_code(code))
-                            else:
-                                current = cache.prices.get(code, 0)
-                                if current > 0:
-                                    changed = update_signal_status(code, current)
-                                    for sid in changed:
-                                        await update_channel_signal_message(sid)
-                                continue
-                            current = float(ticker.get("last") or ticker.get("close") or 0)
-                        except Exception as e:
-                            logger.debug("Trailing price fetch failed | code=%s | error=%s", code, e)
-                            continue
-                        if current <= 0: continue
-                        changed = update_signal_status(code, current)
-                        for sid in changed:
-                            await update_channel_signal_message(sid)
-                        tp1, tp2, tp3 = plan.take_profits[0], plan.take_profits[1], plan.take_profits[2]
-                        if plan.direction == "LONG":
-                            hit_tp1, hit_tp2, hit_tp3 = current >= tp1, current >= tp2, current >= tp3
-                        else:
-                            hit_tp1, hit_tp2, hit_tp3 = current <= tp1, current <= tp2, current <= tp3
-                        new_stage = stage
-                        if hit_tp3 and stage < 3: new_stage = 3
-                        elif hit_tp2 and stage < 2: new_stage = 2
-                        elif hit_tp1 and stage < 1: new_stage = 1
-                        if new_stage > stage:
-                            if new_stage == 1: new_sl = plan.entries[0]
-                            elif new_stage == 2: new_sl = tp1
-                            else: new_sl = tp2
-                            data["stage"] = new_stage; data["last_notified"] = new_stage
-                            text = (
-                                f"🔔 بروزرسانی حد ضرر | {code}/USDT\n"
-                                f"🕒 {shamsi_now()}\n{DIVIDER}\n"
-                                f"✅ قیمت به TP{new_stage} رسید.\n"
-                                f"🛑 حد ضرر به {fmt_amount(new_sl, chat_id)} منتقل شد.\n{DIVIDER}\n"
-                                f"⚠️ این یک اطلاع‌رسانی خودکار است."
-                            )
-                            try:
-                                await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
-                            except Exception as e:
-                                logger.warning("Trailing notify failed | chat_id=%s | code=%s | error=%s", chat_id, code, e)
-        except Exception as e:
-            logger.exception("Trailing loop error | error=%s", e)
-        await asyncio.sleep(TRAILING_CHECK_SECONDS)
-
-# ---------- Event/News monitor ----------
-async def news_monitor_loop(app):
-    await asyncio.sleep(30)
-    while True:
-        try:
-            if subscribed_chat_ids:
-                important_news = await fetch_important_news()
-                for news in important_news:
-                    add_news_alert(news["text"], importance="high", impact=news["impact"], details={"source": news.get("source", "")})
-                    if news.get("importance") == "high":
-                        await send_high_importance_news_to_channel(news["text"])
-                await check_and_notify_events(app)
-        except Exception as e:
-            logger.exception("News monitor error: %s", e)
-        await asyncio.sleep(EVENTS_CHECK_SECONDS)
-
-async def check_and_notify_events(app):
-    events = await get_upcoming_events(force=True)
-    now_utc = datetime.now(tz=TEHRAN_TZ) if TEHRAN_TZ else datetime.now()
-    upcoming = []
-    for ev in events:
-        event_time = ev["time"]
-        if event_time.tzinfo is None:
-            event_time = event_time.replace(tzinfo=TEHRAN_TZ)
-        delta = event_time - now_utc
-        if timedelta(0) <= delta <= timedelta(hours=24):
-            upcoming.append(ev)
-    if upcoming:
-        for chat_id in subscribed_chat_ids:
-            text = "📅 *رویدادهای مهم کریپتو در ۲۴ ساعت آینده:*\n" + DIVIDER + "\n"
-            for ev in upcoming[:5]:
-                importance_emoji = "🔴" if ev.get("importance") == "high" else "🟡" if ev.get("importance") == "medium" else "🟢"
-                text += f"{importance_emoji} *{ev['name']}*\n"
-                text += f"🕒 {shamsi_date(ev['time'])} {ev['time'].strftime('%H:%M')}\n"
-                if ev.get("description"):
-                    text += f"📝 {ev['description'][:100]}...\n"
-                if ev.get("impact"):
-                    text += f"📊 تأثیر مورد انتظار: {ev['impact']}\n"
-                text += "\n"
-            try:
-                msg = await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
-                asyncio.create_task(delete_news_messages_after_delay(app, chat_id, msg.message_id))
-            except Exception as e:
-                logger.warning("Event notify failed: %s", e)
-
-# ---------- Whale monitor ----------
-async def whale_monitor_loop(app):
-    await asyncio.sleep(60)
-    while True:
-        try:
-            if subscribed_chat_ids:
-                alerts = fetch_whale_alerts()
-                if alerts:
-                    for alert in alerts[:5]:
-                        if "نزولی" in alert["impact"] or "صعودی" in alert["impact"]:
-                            amount = alert["amount_btc"]
-                            symbol = alert["symbol"]
-                            flow = alert["flow_type"]
-                            impact = alert["impact"]
-                            value_usd = alert.get("value_usd", 0)
-                            from_addr = alert.get("from_address", "نامشخص")
-                            to_addr = alert.get("to_address", "نامشخص")
-                            from_owner = alert.get("from_owner", "ناشناس")
-                            to_owner = alert.get("to_owner", "ناشناس")
-                            whale_emoji = "🐋" if amount > 5000 else "🐳"
-                            text = (
-                                f"{whale_emoji} *حرکت نهنگ بزرگ*\n"
-                                f"💰 مقدار: **{amount:,.0f} {symbol}** (~{value_usd:,.0f} دلار)\n"
-                                f"🔗 شبکه: {symbol}\n"
-                                f"📌 از آدرس: `{from_addr}`\n"
-                                f"📌 به آدرس: `{to_addr}`\n"
-                                f"🏷️ برچسب مبدأ: {from_owner}\n"
-                                f"🏷️ برچسب مقصد: {to_owner}\n"
-                                f"📊 نوع تراکنش: {flow}\n"
-                                f"📈 تأثیر احتمالی: {impact}\n"
-                                f"🕒 {shamsi_now()}"
-                            )
-                            add_news_alert(text, importance="high", impact=impact, details=alert)
-                    latest = news_history[-1] if news_history else None
-                    if latest and latest.get("importance") == "high":
-                        await send_high_importance_news_to_channel(latest["text"])
-        except Exception as e:
-            logger.exception("Whale monitor error: %s", e)
-        await asyncio.sleep(WHALE_CHECK_SECONDS)
-
-# ---------- Macro event monitor ----------
-async def fetch_macro_events():
-    return []
-
-async def macro_event_monitor_loop(app):
-    await asyncio.sleep(120)
-    while True:
-        try:
-            if subscribed_chat_ids:
-                events = await fetch_macro_events()
-                for ev in events:
-                    text = (
-                        f"📰 *رویداد کلان اقتصادی*\n"
-                        f"{ev.get('title', 'رویداد')}\n"
-                        f"🕒 {shamsi_now()}\n"
-                        f"📊 سطح اهمیت: {ev.get('importance', 'medium')}\n"
-                        f"📈 تأثیر مورد انتظار: {ev.get('impact', 'نامشخص')}\n"
-                        f"📝 {ev.get('description', '')[:200]}"
-                    )
-                    add_news_alert(text, importance=ev.get('importance', 'medium'), impact=ev.get('impact', ''))
-                    for chat_id in subscribed_chat_ids:
-                        msg = await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
-                        asyncio.create_task(delete_news_messages_after_delay(app, chat_id, msg.message_id))
-        except Exception as e:
-            logger.exception("Macro event monitor error: %s", e)
-        await asyncio.sleep(6 * 3600)
-
-# ---------- Macro data loop ----------
-async def macro_data_loop(app):
-    await asyncio.sleep(30)
-    while True:
-        try:
-            await cache.update_macro_data()
-        except Exception as e:
-            logger.exception(f"Macro data loop error: {e}")
-        await asyncio.sleep(MACRO_CHECK_SECONDS)
-
-# ---------- Periodic report ----------
-async def send_periodic_report(app, period="weekly"):
-    stats = compute_advanced_stats(signal_history)
-    fg_value, fg_class = await get_fear_greed()
-    macro_data = cache.get_macro_data()
-    text = (
-        f"📊 *گزارش { 'هفتگی' if period == 'weekly' else 'ماهانه' }*\n"
-        f"🕒 {shamsi_now()}\n{DIVIDER}\n"
-        f"🔢 تعداد کل سیگنال‌ها: {stats['total_trades']}\n"
-        f"✅ نرخ برد: {stats['win_rate']:.1f}%\n"
-        f"💰 فاکتور سود: {stats['profit_factor']:.2f}\n"
-        f"📈 میانگین سود هر معامله (Expectancy): {stats['expectancy']:.2f} USDT\n"
-        f"📉 بیشترین افت سرمایه (Max Drawdown): {stats['max_drawdown']:.2f} USDT\n"
-        f"📊 نسبت شارپ: {stats['sharpe']:.2f}\n"
-        f"⚠️ ریسک ورشکستگی: {stats['risk_of_ruin']:.1f}%\n"
-        f"🎯 میانگین اطمینان سیگنال‌ها: {stats['avg_confidence']:.1f}%\n"
-        f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-    )
-    if macro_data:
-        text += f"\n📊 *داده‌های کلان بازار:*\n"
-        text += f"• سلطه بیت‌کوین: {macro_data.get('btc_dominance', 0):.1f}%\n"
-    for chat_id in subscribed_chat_ids:
-        try:
-            await app.bot.send_message(chat_id=chat_id, text=rtl_lines(text), parse_mode="Markdown")
-        except Exception as e:
-            logger.warning("Periodic report send failed: %s", e)
-
-# ---------- Advanced Reporting ----------
-def compute_advanced_stats(signal_history, mode=None):
-    filtered = [r for r in signal_history if mode is None or r.get("mode") == mode]
-    if not filtered:
-        return {
-            "sharpe": 0, "max_drawdown": 0, "expectancy": 0,
-            "risk_of_ruin": 0, "total_trades": 0, "win_rate": 0,
-            "profit_factor": 0, "avg_confidence": 0,
-            "wins": 0, "losses": 0
-        }
-    returns = []
-    wins = 0
-    losses = 0
-    for rec in filtered:
-        if rec["status"] == "tp3_hit":
-            returns.append(3 * (rec["tp_prices"][2] - rec["entry_price"]))
-            wins += 1
-        elif rec["status"] == "tp2_hit":
-            returns.append(2 * (rec["tp_prices"][1] - rec["entry_price"]))
-            wins += 1
-        elif rec["status"] == "tp1_hit":
-            returns.append(1 * (rec["tp_prices"][0] - rec["entry_price"]))
-            wins += 1
-        elif rec["status"] == "sl_hit":
-            returns.append(rec["entry_price"] - rec["sl_price"])
-            losses += 1
-    if not returns:
-        return {
-            "sharpe": 0, "max_drawdown": 0, "expectancy": 0,
-            "risk_of_ruin": 0, "total_trades": 0, "win_rate": 0,
-            "profit_factor": 0, "avg_confidence": 0,
-            "wins": 0, "losses": 0
-        }
-    returns = np.array(returns)
-    win_rate = wins / len(returns) * 100
-    avg_return = np.mean(returns)
-    std_return = np.std(returns) if len(returns) > 1 else 1e-9
-    sharpe = (avg_return / std_return) * np.sqrt(365) if std_return != 0 else 0
-    cumulative = np.cumsum(returns)
-    max_dd = 0
-    peak = cumulative[0]
-    for val in cumulative:
-        if val > peak:
-            peak = val
-        dd = peak - val
-        if dd > max_dd:
-            max_dd = dd
-    expectancy = avg_return
-    risk_of_ruin = (1 - (wins / len(returns))) ** 10 * 100
-    profit_factor = (sum(r for r in returns if r > 0) / abs(sum(r for r in returns if r <= 0))) if losses else 999
-    avg_confidence = np.mean([rec["confidence"] for rec in filtered]) if filtered else 0
-    return {
-        "sharpe": sharpe, "max_drawdown": max_dd, "expectancy": expectancy,
-        "risk_of_ruin": risk_of_ruin, "total_trades": len(returns),
-        "win_rate": win_rate, "profit_factor": profit_factor,
-        "avg_confidence": avg_confidence, "wins": wins, "losses": losses,
-    }
-
-# ---------- Auto report loop ----------
-async def auto_report_loop(app):
-    await asyncio.sleep(10)
-    while True:
-        try:
-            if subscribed_chat_ids:
-                await cache.update_prices(force=True)
-                await cache.update_ohlcv(force=True)
-                now = time.time()
-                for chat_id in list(subscribed_chat_ids):
-                    role = user_role.get(chat_id, "user")
-                    if role == "admin":
-                        continue
-                    mode = user_trading_mode.get(chat_id, "standard")
-                    interval = MODE_CONFIGS[mode]["check_interval"]
-                    last_ts = last_check_time.get(chat_id, 0)
-                    if now - last_ts < interval:
-                        continue
-                    favs = user_favorites.get(chat_id, set())
-                    if not favs:
-                        continue
-                    current_signals = {}
-                    for code in favs:
-                        # اصلاح باگ: این حلقه فقط برای گزارش خصوصی به همان کاربر است و
-                        # نباید send_to_channel=True باشد؛ قبلاً هر کاربر با هر «مورد علاقه» و
-                        # هر «حالت معاملاتی» شخصی خودش، پیام‌های اضافی و ناهماهنگ به کانال عمومی
-                        # ارسال می‌کرد که یکی از دلایل اصلی سیگنال‌های زیاد/متناقض در کانال بود.
-                        plan = await generate_trade_plan_v2(code, mode, send_to_channel=False)
-                        if plan:
-                            current_signals[code] = plan.direction
-                        await asyncio.sleep(0.5)
-                    prev_signals = last_sent_signals.get(chat_id, {})
-                    for code, direction in current_signals.items():
-                        prev = prev_signals.get(code)
-                        if prev is None or prev["direction"] != direction:
-                            plan = await generate_trade_plan_v2(code, mode, send_to_channel=False)
-                            if plan:
-                                main_text = format_main_signal_v2(plan, code, chat_id)
-                                msg = await app.bot.send_message(chat_id=chat_id, text=main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
-                                active_signals.setdefault(chat_id, {})[code] = {"plan": plan, "stage": 0, "last_notified": 0}
-                                prev_signals[code] = {"direction": direction, "timestamp": time.time()}
-                    for code in list(prev_signals.keys()):
-                        if code not in current_signals:
-                            await app.bot.send_message(chat_id=chat_id, text=f"🔴 سیگنال {code} بسته شد.")
-                            del prev_signals[code]
-                    last_sent_signals[chat_id] = prev_signals
-                    last_check_time[chat_id] = now
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.exception("Auto loop failed | error=%s", e)
-        await asyncio.sleep(60)
-
-# ---------- Command handlers ----------
-async def start(update, context):
-    if not await guard(update): return
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    if is_admin(user_id):
-        await clear_interactive_screen(context, chat_id)
-        msg = await update.message.reply_text("🔐 لطفاً نقش خود را انتخاب کنید:", reply_markup=kb_role_selection())
-        set_interactive_screen(chat_id, [msg.message_id])
-    else:
-        await clear_interactive_screen(context, chat_id)
-        msg = await update.message.reply_text("👋 واحد پولی نمایش قیمت‌ها را انتخاب کن:", reply_markup=kb_currency())
-        set_interactive_screen(chat_id, [msg.message_id])
-
-async def stop(update, context):
-    if not await guard(update): return
-    subscribed_chat_ids.discard(update.effective_chat.id)
-    active_signals.pop(update.effective_chat.id, None)
-    save_state()
-    await update.message.reply_text("🛑 ربات متوقف شد.\nبرای فعال‌سازی دوباره /start را بزن.")
-
-async def menu_command(update, context):
-    if not await guard(update): return
-    chat_id = update.effective_chat.id; user_id = update.effective_user.id
-    subscribed_chat_ids.add(chat_id); save_state()
-    role = user_role.get(chat_id, "user")
-    mode = user_trading_mode.get(chat_id, "standard") if role == "user" else "standard"
-    await clear_interactive_screen(context, chat_id)
-    msg = await update.message.reply_text(MAIN_MENU_HEADER, reply_markup=kb_main(user_id, mode), parse_mode="Markdown")
-    set_interactive_screen(chat_id, [msg.message_id])
-
-async def status(update, context):
-    if not await guard(update): return
-    ok = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "SWAP OK")
-    no_swap = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "NO SWAP")
-    ticker_error = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "TICKER ERROR")
-    uptime_sec = time.time() - START_TIME
-    hours, remainder = divmod(uptime_sec, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    uptime_str = f"{int(hours)}:{int(minutes):02d}:{int(seconds):02d}"
-    last_update_str = shamsi_now()
-    if LAST_REPORT_TIME:
-        last_update_str = shamsi_date(datetime.fromtimestamp(LAST_REPORT_TIME, TEHRAN_TZ))
-    active_trailing_count = sum(len(signals) for signals in active_signals.values())
-    fg_value, fg_class = await get_fear_greed()
-    macro_data = cache.get_macro_data()
-    text = (
-        f"📊 *وضعیت سیستم*\n🕒 {shamsi_now()}\n{DIVIDER}\n"
-        f"⏳ مدت زمان اجرا: `{uptime_str}`\n"
-        f"👥 اعضای فعال: {len(subscribed_chat_ids)}\n"
-        f"⚡ سیگنال‌های فعال: {len(last_plans)}\n"
-        f"🔁 سیگنال‌های دنبال‌شده (تریلینگ): {active_trailing_count}\n"
-        f"📊 کل سیگنال‌های تولیدشده: {TOTAL_SIGNALS_GENERATED}\n"
-        f"🕒 آخرین بروزرسانی سیگنال: {last_update_str}\n"
-        f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-    )
-    if macro_data:
-        text += f"📊 سلطه BTC: {macro_data.get('btc_dominance', 0):.1f}%\n"
-    text += (
-        f"{DIVIDER}\n"
-        f"🪙 کل ارزهای تعریف‌شده: {len(COIN_CODES)}\n"
-        f"🟢 SWAP OK: {ok}\n"
-        f"⚪ NO SWAP: {no_swap}\n"
-        f"🟠 TICKER ERROR: {ticker_error}\n"
-        f"📊 قیمت‌های لحظه‌ای دریافت‌شده: {len(cache.prices)} ارز\n"
-        f"{DIVIDER}\n"
-        f"📊 داده‌های ذخیره‌شده:\n"
-        f"5m: {len(cache.ohlcv.get('5m', {}))} ارز\n"
-        f"15m: {len(cache.ohlcv.get('15m', {}))} ارز\n"
-        f"1h: {len(cache.ohlcv.get('1h', {}))} ارز\n"
-        f"4h: {len(cache.ohlcv.get('4h', {}))} ارز\n"
-        f"1d: {len(cache.ohlcv.get('1d', {}))} ارز\n"
-    )
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-async def dashboard(update, context):
-    if not await guard(update): return
-    if not is_admin_role(update.effective_chat.id):
-        await update.message.reply_text("⛔️ فقط ادمین.")
-        return
-    stats = compute_advanced_stats(signal_history)
-    fg_value, fg_class = await get_fear_greed()
-    macro_data = cache.get_macro_data()
-    text = (
-        f"📈 *داشبورد تحلیلی*\n🕒 {shamsi_now()}\n{DIVIDER}\n"
-        f"🔢 کل سیگنال‌ها: {stats['total_trades']}\n"
-        f"✅ بردها: {stats['wins']}\n"
-        f"❌ باخت‌ها: {stats['losses']}\n"
-        f"📊 نرخ برد: {stats['win_rate']:.1f}%\n"
-        f"💰 فاکتور سود: {stats['profit_factor']:.2f}\n"
-        f"📈 Expectancy: {stats['expectancy']:.2f} USDT\n"
-        f"📉 Max Drawdown: {stats['max_drawdown']:.2f} USDT\n"
-        f"📊 Sharpe Ratio: {stats['sharpe']:.2f}\n"
-        f"⚠️ Risk of Ruin: {stats['risk_of_ruin']:.1f}%\n"
-        f"🎯 میانگین اطمینان: {stats['avg_confidence']:.1f}%\n"
-        f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-    )
-    if macro_data:
-        text += f"📊 سلطه BTC: {macro_data.get('btc_dominance', 0):.1f}%\n"
-    text += f"{DIVIDER}\n🕒 آخرین سیگنال‌ها:\n"
-    for rec in signal_history[-5:]:
-        status_emoji = "🟢" if rec["status"].startswith("tp") else "🔴" if rec["status"] == "sl_hit" else "⏳"
-        text += f"{status_emoji} {rec['symbol']} {rec['direction']} @ {rec['entry_price']:.4f} — {rec['status']}\n"
-    await update.message.reply_text(rtl_lines(text), parse_mode="Markdown")
-
-async def news(update, context):
-    if not await guard(update): return
-    events = await get_upcoming_events(force=True)
-    now_utc = datetime.now(tz=TEHRAN_TZ) if TEHRAN_TZ else datetime.now()
-    upcoming = [ev for ev in events if ev["time"].tzinfo is None or (ev["time"] - now_utc) >= timedelta(0)]
-    if not upcoming:
-        await update.message.reply_text("📅 رویداد مهمی در آینده نزدیک یافت نشد.")
-        return
-    text = "📅 *رویدادهای کریپتویی پیش رو:*\n" + DIVIDER + "\n"
-    for ev in upcoming[:10]:
-        importance_emoji = "🔴" if ev.get("importance") == "high" else "🟡" if ev.get("importance") == "medium" else "🟢"
-        text += f"{importance_emoji} *{ev['name']}*\n"
-        text += f"🕒 {shamsi_date(ev['time'])} {ev['time'].strftime('%H:%M')}\n"
-        if ev.get("description"):
-            text += f"📝 {ev['description'][:100]}...\n"
-        if ev.get("impact"):
-            text += f"📊 تأثیر مورد انتظار: {ev['impact']}\n"
-        text += "\n"
-    await update.message.reply_text(rtl_lines(text), parse_mode="Markdown")
-
-async def periodic_report_command(update, context):
-    if not await guard(update): return
-    if not is_admin_role(update.effective_chat.id):
-        await update.message.reply_text("⛔️ فقط ادمین.")
-        return
-    await update.message.reply_text("📊 لطفاً دوره‌ی گزارش را انتخاب کنید:", reply_markup=kb_periodic_report())
-
-# ---------- ذخیره و بارگذاری ----------
-def save_state():
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        tmp = STATE_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({
-                "subscribed_chat_ids": list(subscribed_chat_ids),
-                "user_currency": user_currency,
-                "user_trading_mode": user_trading_mode,
-                "user_favorites": {str(k): list(v) for k, v in user_favorites.items()},
-                "user_role": {str(k): v for k, v in user_role.items()},
-                "news_history": news_history[-20:],
-                "signal_history": signal_history[-200:],
-                "suggestion_history": suggestion_history[-20:],
-                "channel_signal_messages": {str(k): v for k, v in channel_signal_messages.items()},
-                "channel_message_map": {str(k): v for k, v in channel_message_map.items()},
-                "last_channel_signal_close_time": last_channel_signal_close_time,
-                "last_mode_broadcast_time": last_mode_broadcast_time,
-            }, f, ensure_ascii=False)
-        os.replace(tmp, STATE_FILE)
-    except Exception as e:
-        logger.warning("State save failed: %s", e)
-
-def load_state():
-    global subscribed_chat_ids, user_currency, user_trading_mode, user_favorites, user_role, news_history, signal_history, suggestion_history, channel_signal_messages, channel_message_map, last_channel_signal_close_time, last_mode_broadcast_time
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        subscribed_chat_ids = {int(x) for x in data.get("subscribed_chat_ids", [])}
-        user_currency = {int(k): v for k, v in data.get("user_currency", {}).items()}
-        user_trading_mode = {int(k): v for k, v in data.get("user_trading_mode", {}).items()}
-        user_favorites = {int(k): set(v) for k, v in data.get("user_favorites", {}).items()}
-        user_role = {int(k): v for k, v in data.get("user_role", {}).items()}
-        news_history = data.get("news_history", [])
-        signal_history = data.get("signal_history", [])
-        suggestion_history = data.get("suggestion_history", [])
-        channel_signal_messages = {str(k): int(v) for k, v in data.get("channel_signal_messages", {}).items()}
-        raw_map = data.get("channel_message_map", {})
-        fixed_map = {}
-        for k, v in raw_map.items():
-            # سازگاری با فایل state قدیمی که کلیدش به‌صورت "SYMBOL|MODE" بود
-            symbol_key = k.split("|")[0] if "|" in k else k
-            fixed_map[symbol_key] = v
-        channel_message_map = fixed_map
-        last_channel_signal_close_time = data.get("last_channel_signal_close_time", {})
-        last_mode_broadcast_time = data.get("last_mode_broadcast_time", {})
-        logger.info("State restored: %s users, %s signals, %s suggestions, %s channel messages",
-                    len(subscribed_chat_ids), len(signal_history), len(suggestion_history), len(channel_signal_messages))
-    except FileNotFoundError:
-        logger.info("No state file; starting fresh.")
-        news_history = []
-        signal_history = []
-        suggestion_history = []
-        channel_signal_messages = {}
-        channel_message_map = {}
-        last_channel_signal_close_time = {}
-        last_mode_broadcast_time = {}
-    except Exception as e:
-        logger.warning("State load failed: %s", e)
-        news_history = []
-        signal_history = []
-        suggestion_history = []
-        channel_signal_messages = {}
-        channel_message_map = {}
-        last_channel_signal_close_time = {}
-        last_mode_broadcast_time = {}
-
-# ---------- Button handler ----------
-async def button_handler(update, context):
-    if not await guard(update): return
-    query = update.callback_query; await query.answer()
-    data = query.data; chat_id = update.effective_chat.id; user_id = update.effective_user.id
-    if data == "noop": return
-
-    if data == "stats_menu":
-        await stats_menu(update, context)
-        return
-    if data == "stats_top_coins_menu":
-        await stats_top_coins_menu(update, context)
-        return
-    if data == "stats_recent_signals_menu":
-        await stats_recent_signals_menu(update, context)
-        return
-    if data == "stats_history_menu":
-        await stats_history_menu(update, context)
-        return
-    if data.startswith("stats_success_page_"):
-        page = int(data.split("_")[-1])
-        await stats_success_signals(update, context, page)
-        return
-    if data.startswith("stats_failed_page_"):
-        page = int(data.split("_")[-1])
-        await stats_failed_signals(update, context, page)
-        return
-    if data.startswith("stats_recent_success_page_"):
-        page = int(data.split("_")[-1])
-        await stats_success_signals(update, context, page, recent=True)
-        return
-    if data.startswith("stats_recent_failed_page_"):
-        page = int(data.split("_")[-1])
-        await stats_failed_signals(update, context, page, recent=True)
-        return
-    if data == "stats_success_coins":
-        await stats_success_coins(update, context)
-        return
-    if data == "stats_failed_coins":
-        await stats_failed_coins(update, context)
-        return
-
-    if data == "optimization_center":
-        await optimization_center(update, context)
-        return
-    if data == "optimization_active":
-        await optimization_active(update, context)
-        return
-    if data == "optimization_history":
-        await optimization_history(update, context)
-        return
-
-    if data.startswith("apply_suggestion_") or data.startswith("reject_suggestion_") or data.startswith("details_suggestion_"):
-        await handle_suggestion_action(update, context)
-        return
-
-    if data == "comprehensive_analysis":
-        await comprehensive_analysis(update, context)
-        return
-
-    if data == "role_admin":
-        user_role[chat_id] = "admin"
-        save_state()
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        await query.edit_message_text("👑 وارد حالت ادمین شدید.\nحالا واحد پولی را انتخاب کنید:", reply_markup=kb_currency())
-        return
-    if data == "role_user":
-        user_role[chat_id] = "user"
-        save_state()
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        await query.edit_message_text("👤 وارد حالت کاربر عادی شدید. واحد پولی را انتخاب کنید:", reply_markup=kb_currency())
-        return
-
-    if data.startswith("cur_"):
-        user_currency[chat_id] = data.split("_", 1)[1]
-        subscribed_chat_ids.add(chat_id)
-        save_state()
-        msg_id = query.message.message_id
-        if user_role.get(chat_id, "user") == "admin":
-            await query.edit_message_text("✅ واحد پولی انتخاب شد. منوی اصلی:")
-            await finish_start(context, chat_id, user_id)
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-            except Exception:
-                pass
-        else:
-            await query.edit_message_text("🛠️ حالا سبک معاملاتی خود را انتخاب کن:", reply_markup=kb_mode_selection())
-        return
-
-    if data.startswith("mode_"):
-        mode = data.split("_", 1)[1]
-        user_trading_mode[chat_id] = mode
-        save_state()
-        msg_id = query.message.message_id
-        await query.edit_message_text(f"✅ حالت {MODE_CONFIGS[mode]['label']} انتخاب شد.")
-        await finish_start(context, chat_id, user_id)
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception:
-            pass
-        return
-
-    if data == "change_mode":
-        if user_role.get(chat_id, "user") == "admin":
-            await query.answer("ادمین حالت ثابت ندارد.", show_alert=True)
-            return
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        await query.edit_message_text("🛠️ سبک معاملاتی جدید را انتخاب کن:", reply_markup=kb_mode_selection())
-        return
-
-    if data == "restart_bot":
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        if is_admin(user_id):
-            await query.edit_message_text("🔐 لطفاً نقش خود را انتخاب کنید:", reply_markup=kb_role_selection())
-        else:
-            await query.edit_message_text("👋 واحد پولی نمایش قیمت‌ها را انتخاب کن:", reply_markup=kb_currency())
-        return
-
-    if data == "stop_bot":
-        subscribed_chat_ids.discard(chat_id)
-        active_signals.pop(chat_id, None)
-        save_state()
-        await query.edit_message_text("🛑 ربات برای شما متوقف شد.\nبرای فعال‌سازی دوباره /start را بزن.")
-        return
-
-    if data == "help":
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        await query.edit_message_text(help_text(0), reply_markup=kb_help(0), parse_mode="Markdown")
-        set_interactive_screen(chat_id, [query.message.message_id])
-        return
-
-    if data.startswith("help_"):
-        step = int(data.split("_")[1])
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        await query.edit_message_text(help_text(step), reply_markup=kb_help(step), parse_mode="Markdown")
-        set_interactive_screen(chat_id, [query.message.message_id])
-        return
-
-    if data == "close_temp":
-        await clear_overlay(context, chat_id); return
-
-    if data == "menu_main":
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        role = user_role.get(chat_id, "user")
-        mode = user_trading_mode.get(chat_id, "standard") if role == "user" else "standard"
-        await query.edit_message_text(MAIN_MENU_HEADER, reply_markup=kb_main(user_id, mode), parse_mode="Markdown")
-        set_interactive_screen(chat_id, [query.message.message_id]); return
-
-    if data == "events_menu":
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        await query.edit_message_text("📋 *منوی رویدادها*\n" + DIVIDER + "\n" + MENU_PROMPT, reply_markup=kb_events_menu(), parse_mode="Markdown")
-        set_interactive_screen(chat_id, [query.message.message_id]); return
-
-    if data == "events_upcoming":
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        events = await get_upcoming_events(force=True)
-        now_utc = datetime.now(tz=TEHRAN_TZ) if TEHRAN_TZ else datetime.now()
-        upcoming = [ev for ev in events if ev["time"].tzinfo is None or (ev["time"] - now_utc) >= timedelta(0)]
-        if not upcoming:
-            text = "📅 رویداد مهمی در آینده نزدیک یافت نشد."
-        else:
-            text = "📅 *رویدادهای کریپتویی پیش رو:*\n" + DIVIDER + "\n"
-            for ev in upcoming[:10]:
-                importance_emoji = "🔴" if ev.get("importance") == "high" else "🟡" if ev.get("importance") == "medium" else "🟢"
-                text += f"{importance_emoji} *{ev['name']}*\n"
-                text += f"🕒 {shamsi_date(ev['time'])} {ev['time'].strftime('%H:%M')}\n"
-                if ev.get("description"):
-                    text += f"📝 {ev['description'][:100]}...\n"
-                if ev.get("impact"):
-                    text += f"📊 تأثیر مورد انتظار: {ev['impact']}\n"
-                text += "\n"
-        await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_to_events(), parse_mode="Markdown")
-        set_interactive_screen(chat_id, [query.message.message_id])
-        return
-
-    if data == "events_news":
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        if not news_history:
-            text = "📰 *تاریخچه اخبار و هشدارها*\n" + DIVIDER + "\n\nهیچ خبری ثبت نشده است."
-        else:
-            text = "📰 *تاریخچه اخبار و هشدارها*\n" + DIVIDER + "\n"
-            for item in reversed(news_history[-20:]):
-                importance_emoji = "🔴" if item.get("importance") == "high" else "🟡" if item.get("importance") == "medium" else "🟢"
-                text += f"{importance_emoji} {item['time']}\n{item['text']}\n\n"
-        await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_to_events(), parse_mode="Markdown")
-        set_interactive_screen(chat_id, [query.message.message_id])
-        return
-
-    if data == "dashboard":
-        if not is_admin_role(chat_id):
-            await query.answer("⛔️ فقط ادمین.", show_alert=True); return
-        stats = compute_advanced_stats(signal_history)
-        fg_value, fg_class = await get_fear_greed()
-        macro_data = cache.get_macro_data()
-        text = (
-            f"📈 *داشبورد تحلیلی*\n🕒 {shamsi_now()}\n{DIVIDER}\n"
-            f"🔢 کل سیگنال‌ها: {stats['total_trades']}\n"
-            f"✅ بردها: {stats['wins']}\n"
-            f"❌ باخت‌ها: {stats['losses']}\n"
-            f"📊 نرخ برد: {stats['win_rate']:.1f}%\n"
-            f"💰 فاکتور سود: {stats['profit_factor']:.2f}\n"
-            f"📈 Expectancy: {stats['expectancy']:.2f} USDT\n"
-            f"📉 Max Drawdown: {stats['max_drawdown']:.2f} USDT\n"
-            f"📊 Sharpe Ratio: {stats['sharpe']:.2f}\n"
-            f"⚠️ Risk of Ruin: {stats['risk_of_ruin']:.1f}%\n"
-            f"🎯 میانگین اطمینان: {stats['avg_confidence']:.1f}%\n"
-            f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-        )
-        if macro_data:
-            text += f"📊 سلطه BTC: {macro_data.get('btc_dominance', 0):.1f}%\n"
-        text += f"{DIVIDER}\n🕒 آخرین سیگنال‌ها:\n"
-        for rec in signal_history[-5:]:
-            status_emoji = "🟢" if rec["status"].startswith("tp") else "🔴" if rec["status"] == "sl_hit" else "⏳"
-            text += f"{status_emoji} {rec['symbol']} {rec['direction']} @ {rec['entry_price']:.4f} — {rec['status']}\n"
-        await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
-        set_interactive_screen(chat_id, [query.message.message_id])
-        return
-
-    if data == "favorites":
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        favs = user_favorites.get(chat_id, set())
-        if not favs:
-            text = "⭐ *علاقه‌مندی‌ها*\n\nشما هنوز ارزی به علاقه‌مندی‌ها اضافه نکرده‌اید."
-            await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
-        else:
-            buttons = []
-            for code in favs:
-                status = cache.market_status.get(code, {}).get("status")
-                if status == "SWAP OK": label = f"{code} 🟢"
-                elif status == "TICKER ERROR": label = f"{code} 🟠"
-                else: label = f"{code} ⚪"
-                buttons.append(InlineKeyboardButton(label, callback_data=f"coin_{code}"))
-            rows = build_grid_keyboard(buttons, 2)
-            rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="menu_main")])
-            await query.edit_message_text(
-                rtl_lines(f"⭐ *علاقه‌مندی‌ها*\n{DIVIDER}\n{MENU_PROMPT}"),
-                reply_markup=InlineKeyboardMarkup(rows),
-                parse_mode="Markdown",
-            )
-        set_interactive_screen(chat_id, [query.message.message_id])
-        return
-
-    if data.startswith("toggle_fav_"):
-        code = data.split("toggle_fav_", 1)[1]
-        favs = user_favorites.setdefault(chat_id, set())
-        if code in favs:
-            favs.discard(code)
-            await query.answer(f"❌ {code} از علاقه‌مندی‌ها حذف شد.")
-        else:
-            favs.add(code)
-            await query.answer(f"⭐ {code} به علاقه‌مندی‌ها اضافه شد.")
-        save_state()
-        try:
-            await query.edit_message_reply_markup(reply_markup=kb_coin_detail(code, code in favs, is_admin_role=is_admin_role(chat_id)))
-        except Exception:
-            pass
-        return
-
-    if data == "periodic_report":
-        if not is_admin_role(chat_id):
-            await query.answer("⛔️ فقط ادمین.", show_alert=True); return
-        await query.edit_message_text("📊 لطفاً دوره‌ی گزارش را انتخاب کنید:", reply_markup=kb_periodic_report())
-        return
-
-    if data.startswith("report_period_"):
-        if not is_admin_role(chat_id):
-            await query.answer("⛔️ فقط ادمین.", show_alert=True); return
-        period = data.split("report_period_", 1)[1]
-        text = f"📊 *گزارش {'هفتگی' if period == 'weekly' else 'ماهانه'}*\n" + DIVIDER + "\n"
-        for mode, config in MODE_CONFIGS.items():
-            stats = compute_advanced_stats(signal_history, mode)
-            text += (
-                f"{config['label']}\n"
-                f"تعداد سیگنال‌ها: {stats['total_trades']} | برد: {stats['wins']} | باخت: {stats['losses']} | نرخ برد: {stats['win_rate']:.1f}%\n"
-                f"فاکتور سود: {stats['profit_factor']:.2f} | Expectancy: {stats['expectancy']:.2f} | MaxDD: {stats['max_drawdown']:.2f}\n"
-                f"Sharpe: {stats['sharpe']:.2f} | میانگین اطمینان: {stats['avg_confidence']:.1f}%\n\n"
-            )
-        await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
-        return
-
-    if data == "admin_compare":
-        if not is_admin_role(chat_id):
-            await query.answer("⛔️ فقط ادمین.", show_alert=True); return
-        text = "📊 *گزارش مقایسه‌ای حالت‌های معاملاتی*\n" + DIVIDER + "\n"
-        for mode, config in MODE_CONFIGS.items():
-            stats = compute_advanced_stats(signal_history, mode)
-            text += (
-                f"{config['label']}\n"
-                f"تعداد سیگنال‌ها: {stats['total_trades']} | برد: {stats['wins']} | باخت: {stats['losses']} | نرخ برد: {stats['win_rate']:.1f}%\n"
-                f"فاکتور سود: {stats['profit_factor']:.2f} | Expectancy: {stats['expectancy']:.2f} | MaxDD: {stats['max_drawdown']:.2f}\n"
-                f"Sharpe: {stats['sharpe']:.2f} | میانگین اطمینان: {stats['avg_confidence']:.1f}%\n\n"
-            )
-        await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
-        return
-
-    if data.startswith("coins_page_"):
-        page = int(data.split("_")[2])
-        await query.edit_message_reply_markup(reply_markup=kb_coins(page))
-        return
-
-    if data == "menu_prices":
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        await query.edit_message_text("⏳ در حال دریافت قیمت‌ها...")
-        try:
-            prices = await asyncio.wait_for(cache.update_prices(), timeout=90)
-            await query.edit_message_text(format_prices_pretty(prices, chat_id), reply_markup=kb_back_main(), parse_mode="Markdown")
-            set_interactive_screen(chat_id, [query.message.message_id])
-        except Exception as e:
-            logger.exception("Prices UI error: %s", e)
-            await query.edit_message_text(f"❌ خطا در دریافت قیمت‌ها.\nنوع خطا: `{type(e).__name__}`", reply_markup=kb_back_main(), parse_mode="Markdown")
-        return
-
-    if data == "menu_coins":
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        await query.edit_message_text(rtl_lines(f"🪙 *انتخاب ارز مورد نظر*\n{DIVIDER}\n{MENU_PROMPT}"), reply_markup=kb_coins(0), parse_mode="Markdown")
-        set_interactive_screen(chat_id, [query.message.message_id]); return
-
-    if data.startswith("coin_"):
-        code = data.split("_", 1)[1]
-        if code not in COIN_CODES: return
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        if code in cache.exchange_symbols:
-            status = cache.market_status.get(code, {}).get("status")
-            warning = ""
-            if status == "TICKER ERROR":
-                warning = "⚠️ قیمت لحظه‌ای در دسترس نیست، اما تحلیل‌های دیگر کار می‌کنند.\n\n"
-            favs = user_favorites.get(chat_id, set())
-            is_fav = code in favs
-            admin = is_admin_role(chat_id)
-            await query.edit_message_text(
-                rtl_lines(f"{code}\n{DIVIDER}\n{warning}🟢 وضعیت بازار: *SWAP OK*\n{MENU_PROMPT}"),
-                reply_markup=kb_coin_detail(code, is_fav, is_admin_role=admin),
-                parse_mode="Markdown",
-            )
-            set_interactive_screen(chat_id, [query.message.message_id])
-        else:
-            text = f"{code}\n{DIVIDER}\n⚪ وضعیت: *NO SWAP*\nدر حال حاضر قرارداد USDT Perpetual فعال برای این ارز در KuCoin پیدا نشد."
-            await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
-            set_interactive_screen(chat_id, [query.message.message_id])
-        return
-
-    # ----- بخش ادمین -----
-    if data.startswith("askmode_"):
-        if not is_admin_role(chat_id):
-            await query.answer("⛔️ فقط ادمین.", show_alert=True); return
-        parts = data.split("_", 2)
-        action = parts[1]
-        code = parts[2]
-        if action == "weekly":
-            try:
-                summary = await asyncio.wait_for(generate_weekly_summary_async(code, chat_id), timeout=30)
-                await query.edit_message_text(split_long_message(summary)[0], reply_markup=kb_weekly(code), parse_mode="Markdown")
-                set_interactive_screen(chat_id, [query.message.message_id])
-            except Exception as e:
-                logger.exception("Weekly UI error | code=%s: %s", code, e)
-                await query.edit_message_text(f"❌ خطا در تحلیل جامع ارز {code}.", reply_markup=kb_back_main())
-            return
-        else:
-            await query.edit_message_text(
-                f"🛠️ حالت معاملاتی برای {action} {code} را انتخاب کن:",
-                reply_markup=kb_mode_selection_for_action(action, code),
-            )
-            return
-
-    if data.startswith("run_"):
-        parts = data.split("_", 3)
-        action = parts[1]
-        code = parts[2]
-        mode = parts[3]
-        if code not in COIN_CODES: return
-        status = cache.market_status.get(code, {}).get("status")
-        if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در KuCoin در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
-            return
-        if action == "suggest":
-            try:
-                text = await asyncio.wait_for(generate_status_text_async(code, chat_id, mode), timeout=30)
-                await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
-                set_interactive_screen(chat_id, [query.message.message_id])
-            except Exception as e:
-                logger.exception("Signal UI error | code=%s: %s", code, e)
-                await query.edit_message_text(f"❌ خطا در دریافت اطلاعات {code}.", reply_markup=kb_back_main())
-        elif action == "instant":
-            try:
-                plan = await asyncio.wait_for(generate_trade_plan_v2(code, mode), timeout=30)
-                if plan is None:
-                    await query.edit_message_text(
-                        f"💤 فعلاً سیگنال نهایی برای {code} وجود ندارد.\nدلایل احتمالی: ADX پایین، عدم تأیید کافی لایه‌ها، یا نسبت R/R نامناسب.",
-                        reply_markup=kb_back_to_coin(code),
-                        parse_mode="Markdown"
-                    )
-                    return
-                main_text = format_main_signal_v2(plan, code, chat_id)
-                await query.edit_message_text(main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
-                active_signals.setdefault(chat_id, {})[code] = {"plan": plan, "stage": 0, "last_notified": 0}
-            except Exception as e:
-                logger.exception("Signal UI error | code=%s: %s", code, e)
-                await query.edit_message_text(f"❌ خطا در دریافت اطلاعات {code}.", reply_markup=kb_back_to_coin(code))
-        elif action == "weekly":
-            try:
-                summary = await asyncio.wait_for(generate_weekly_summary_async(code, chat_id), timeout=30)
-                await query.edit_message_text(split_long_message(summary)[0], reply_markup=kb_weekly(code), parse_mode="Markdown")
-                set_interactive_screen(chat_id, [query.message.message_id])
-            except Exception as e:
-                logger.exception("Weekly UI error | code=%s: %s", code, e)
-                await query.edit_message_text(f"❌ خطا در تحلیل جامع ارز {code}.", reply_markup=kb_back_main())
-        return
-
-    # ----- کاربر عادی -----
-    if data.startswith("suggest_"):
-        if is_admin_role(chat_id):
-            return
-        code = data.split("suggest_", 1)[1]
-        if code not in COIN_CODES: return
-        mode = user_trading_mode.get(chat_id, "standard")
-        try:
-            text = await asyncio.wait_for(generate_status_text_async(code, chat_id, mode), timeout=30)
-            await query.edit_message_text(split_long_message(text)[0], reply_markup=kb_suggestion(code), parse_mode="Markdown")
-            set_interactive_screen(chat_id, [query.message.message_id])
-        except Exception as e:
-            logger.exception("Signal UI error | code=%s: %s", code, e)
-            await query.edit_message_text(f"❌ خطا در دریافت اطلاعات {code}.", reply_markup=kb_back_main())
-        return
-
-    if data.startswith("instant_"):
-        if is_admin_role(chat_id):
-            return
-        code = data.split("instant_", 1)[1]
-        if code not in COIN_CODES: return
-        mode = user_trading_mode.get(chat_id, "standard")
-        try:
-            plan = await asyncio.wait_for(generate_trade_plan_v2(code, mode), timeout=30)
-            if plan is None:
-                await query.edit_message_text(
-                    f"💤 فعلاً سیگنال نهایی برای {code} وجود ندارد.\nدلایل احتمالی: ADX پایین، عدم تأیید کافی لایه‌ها، یا نسبت R/R نامناسب.",
-                    reply_markup=kb_back_to_coin(code),
-                    parse_mode="Markdown"
-                )
-                return
-            main_text = format_main_signal_v2(plan, code, chat_id)
-            await query.edit_message_text(main_text, reply_markup=kb_signal_details(code), parse_mode="Markdown")
-            active_signals.setdefault(chat_id, {})[code] = {"plan": plan, "stage": 0, "last_notified": 0}
-        except Exception as e:
-            logger.exception("Signal UI error | code=%s: %s", code, e)
-            await query.edit_message_text(f"❌ خطا در دریافت اطلاعات {code}.", reply_markup=kb_back_to_coin(code))
-        return
-
-    if data.startswith("weekly_"):
-        if is_admin_role(chat_id):
-            return
-        code = data.split("weekly_", 1)[1]
-        if code not in COIN_CODES: return
-        try:
-            summary = await asyncio.wait_for(generate_weekly_summary_async(code, chat_id), timeout=30)
-            await query.edit_message_text(split_long_message(summary)[0], reply_markup=kb_weekly(code), parse_mode="Markdown")
-            set_interactive_screen(chat_id, [query.message.message_id])
-        except Exception as e:
-            logger.exception("Weekly UI error | code=%s: %s", code, e)
-            await query.edit_message_text(f"❌ خطا در تحلیل جامع ارز {code}.", reply_markup=kb_back_main())
-        return
-
-    if data.startswith("details_"):
-        code = data.split("_", 1)[1]
-        mode = user_trading_mode.get(chat_id, "standard")
-        try:
-            ind = await cache.get_indicators(code, mode)
-            if not ind:
-                await query.edit_message_text("⚠️ داده کافی نیست.", reply_markup=kb_back_main())
-                return
-            plan = await generate_trade_plan_v2(code, mode)
-            if not plan:
-                await query.edit_message_text("💤 سیگنال فعلی موجود نیست.\nدلایل احتمالی: ADX پایین یا عدم تأیید کافی لایه‌ها.", reply_markup=kb_back_main())
-                return
-            details_text = format_technical_details(code, plan, ind, chat_id)
-            await query.edit_message_text(split_long_message(details_text)[0], reply_markup=kb_back_to_signal(code), parse_mode="Markdown")
-        except Exception as e:
-            logger.exception("Details UI error | code=%s: %s", code, e)
-            await query.edit_message_text(f"❌ خطا در نمایش جزئیات {code}.", reply_markup=kb_back_main())
-        return
-
-    if data == "admin_panel":
-        if not is_admin_role(chat_id):
-            await query.answer("⛔️ فقط ادمین.", show_alert=True); return
-        ok = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "SWAP OK")
-        no_swap = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "NO SWAP")
-        ticker_error = sum(1 for c in COIN_CODES if cache.market_status.get(c, {}).get("status") == "TICKER ERROR")
-        uptime_sec = time.time() - START_TIME
-        hours, remainder = divmod(uptime_sec, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        uptime_str = f"{int(hours)}:{int(minutes):02d}:{int(seconds):02d}"
-        fg_value, fg_class = await get_fear_greed()
-        macro_data = cache.get_macro_data()
-        text = (
-            f"🛠️ *پنل مدیریت*\n{DIVIDER}\n🕒 {shamsi_now()}\n"
-            f"⏳ مدت اجرا: `{uptime_str}`\n"
-            f"👥 اعضای فعال: {len(subscribed_chat_ids)}\n"
-            f"⚡ سیگنال‌های فعال: {len(last_plans)}\n"
-            f"🔁 سیگنال‌های دنبال‌شده: {sum(len(s) for s in active_signals.values())}\n"
-            f"📊 کل سیگنال‌ها: {len(signal_history)}\n"
-            f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-        )
-        if macro_data:
-            text += f"📊 سلطه BTC: {macro_data.get('btc_dominance', 0):.1f}%\n"
-        text += (
-            f"{DIVIDER}\n"
-            f"🪙 کل ارزها: {len(COIN_CODES)}\n"
-            f"🟢 SWAP OK: {ok}\n⚪ NO SWAP: {no_swap}\n🟠 TICKER ERROR: {ticker_error}\n"
-            f"📊 قیمت‌های دریافت‌شده: {len(cache.prices)} ارز\n"
-            f"📦 داده‌ها: 5m={len(cache.ohlcv.get('5m',{}))} 15m={len(cache.ohlcv.get('15m',{}))} 1h={len(cache.ohlcv.get('1h',{}))} 4h={len(cache.ohlcv.get('4h',{}))} 1d={len(cache.ohlcv.get('1d',{}))}\n"
-            f"{DIVIDER}\n"
-            f"📋 *آمار حالت‌ها:*\n"
-        )
-        for mode, config in MODE_CONFIGS.items():
-            stats = compute_advanced_stats(signal_history, mode)
-            text += f"{config['label']}: {stats['total_trades']} سیگنال | برد {stats['wins']} | باخت {stats['losses']} | نرخ برد {stats['win_rate']:.1f}%\n"
-        text += f"\n🕒 آخرین سیگنال‌ها:\n"
-        for rec in signal_history[-5:]:
-            status_emoji = "🟢" if rec["status"].startswith("tp") else "🔴" if rec["status"] == "sl_hit" else "⏳"
-            text += f"{status_emoji} {rec['symbol']} {rec['direction']} @ {rec['entry_price']:.4f} ({MODE_CONFIGS.get(rec['mode'],{}).get('label','')})\n"
-        await query.edit_message_text(rtl_lines(text), reply_markup=kb_admin_panel(), parse_mode="Markdown")
-        return
-
-    if data == "menu_all":
-        if not is_admin_role(chat_id):
-            await query.answer("⛔️ فقط ادمین.", show_alert=True); return
-        await query.edit_message_text("⏳ در حال تحلیل همه ارزها (برای ادمین)...")
-        try:
-            mode = "standard"
-            plans = {}
-            for code in COIN_CODES[:20]:
-                plan = await generate_trade_plan_v2(code, mode)
-                if plan:
-                    plans[code] = plan
-                await asyncio.sleep(0.5)
-        except Exception as e:
-            logger.exception("menu_all error: %s", e)
-            await query.edit_message_text(f"❌ خطا: {e}", reply_markup=kb_back_main()); return
-        if not plans:
-            text = "📋 فعلاً سیگنال نهایی نداریم."
-        else:
-            sorted_plans = sorted(plans.values(), key=lambda p: p.confidence, reverse=True)
-            full_text = "📋 *نمایش پیشنهادات*\n\n" + "\n\n".join(format_main_signal_v2(p, p.symbol, chat_id) for p in sorted_plans)
-            chunks = split_long_message(full_text)
-            new_ids = []
-            await query.edit_message_text(chunks[0], parse_mode="Markdown"); new_ids.append(query.message.message_id)
-            for chunk in chunks[1:]:
-                m = await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
-                new_ids.append(m.message_id)
-            set_interactive_screen(chat_id, new_ids)
-        return
-
-    # دکمه جدید: نمایش همه سیگنال‌های فعال
-    if data == "active_signals_all":
-        await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        recent_signals = signal_history[-10:]
-        if not recent_signals:
-            text = "📡 *سیگنال‌های فعال*\n\nهنوز سیگنالی ثبت نشده است."
-            await query.edit_message_text(
-                rtl_lines(text),
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")]]),
-                parse_mode="Markdown"
-            )
-        else:
-            text = "📡 *سیگنال‌های فعال*\n" + DIVIDER + "\n"
-            for rec in reversed(recent_signals):
-                direction_emoji = "🟢" if rec["direction"] == "LONG" else "🔴"
-                mode_label = MODE_CONFIGS.get(rec["mode"], MODE_CONFIGS["standard"])["label"]
-                status_text = "باز" if rec["status"] == "open" else rec["status"]
-                text += (
-                    f"{rec['symbol']} | {rec['direction']} {direction_emoji} | {mode_label}\n"
-                    f"   اطمینان: {rec['confidence']:.0f}٪ | RR: {rec['rr']:.2f} | وضعیت: {status_text}\n"
-                    f"   ورود: {fmt_amount(rec['entry_price'], chat_id)}\n"
-                    f"   SL: {fmt_amount(rec['sl_price'], chat_id)}\n"
-                    f"   TP1: {fmt_amount(rec['tp_prices'][0], chat_id)} | TP2: {fmt_amount(rec['tp_prices'][1], chat_id)} | TP3: {fmt_amount(rec['tp_prices'][2], chat_id)}\n"
-                    f"{DIVIDER}\n"
-                )
-            chunks = split_long_message(rtl_lines(text))
-            if chunks:
-                await query.edit_message_text(
-                    chunks[0],
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")]]),
-                    parse_mode="Markdown"
-                )
-                for chunk in chunks[1:]:
-                    await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
-            else:
-                await query.edit_message_text(
-                    "📡 *سیگنال‌های فعال*\n\nهیچ سیگنالی یافت نشد.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")]]),
-                    parse_mode="Markdown"
-                )
-        set_interactive_screen(chat_id, [query.message.message_id])
-        return
-
-def format_technical_details(code, plan, ind, chat_id):
-    direction = "لانگ 🟢" if plan.direction == "LONG" else "شورت 🔴"
-    reasons_text = "\n".join(f" ✅ {x}" for x in plan.reasons[:15])
-    warnings_text = "\n" + "\n".join(f" ⚠️ {x}" for x in plan.warnings) if plan.warnings else ""
-    text = (
-        f"📊 *جزئیات فنی* {code}/USDT\n"
-        f"🕒 {shamsi_now()}\n{DIVIDER}\n"
-        f"جهت: {direction}\n"
-        f"امتیاز نهایی: {plan.confidence:.0f}٪\n"
-        f"{DIVIDER}\n"
-        f"📈 *دلایل سیگنال*\n{reasons_text}{warnings_text}\n\n"
-        f"📐 *اندیکاتورها*\n"
-        f"EMA20: {fmt_amount(ind['ema20'], chat_id)}\n"
-        f"EMA50: {fmt_amount(ind['ema50'], chat_id)}\n"
-        f"EMA200: {fmt_amount(ind['ema200'], chat_id)}\n"
-        f"فاصله EMA50: {ind['price_ema50_pct']:+.2f}%\n"
-        f"فاصله EMA200: {ind['price_ema200_pct']:+.2f}%\n"
-        f"ADX: {ind['adx']:.1f} (DI+ {ind['plus_di']:.1f} / DI- {ind['minus_di']:.1f})\n"
-        f"MACD Hist: {ind['macd_hist']:.4f}\n"
-        f"RSI: {ind['rsi']:.1f}\n"
-        f"Stoch RSI: {ind['stoch_k']:.1f}\n"
-        f"ROC: {ind['roc']:+.2f}%\n"
-        f"CCI: {ind['cci']:.1f}\n"
-        f"Williams %R: {ind['williams_r']:.1f}\n"
-        f"BB %: {ind['bb_percent']:.2f} | BB Width: {ind['bb_width']:.2f}\n"
-        f"Volume Ratio: {ind['volume_ratio']:.2f}×\n"
-        f"VWAP: {fmt_amount(ind['vwap'], chat_id)}\n"
-        f"ATR: {fmt_amount(ind['atr'], chat_id)} ({ind['atr_pct']:.2f}%)\n"
-        f"حمایت: {fmt_amount(ind['support'], chat_id)} | مقاومت: {fmt_amount(ind['resistance'], chat_id)}\n"
-        f"{DIVIDER}\n"
-        f"⚠️ تحلیل تکنیکال است و تضمین سود نیست."
-    )
-    return rtl_lines(text)
-
-async def delete_news_messages_after_delay(app, chat_id, message_id, delay=NEWS_AUTO_DELETE_SECONDS):
-    await asyncio.sleep(delay)
-    try:
-        await app.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
-
-async def post_init(app):
-    await app.bot.set_my_commands([
-        BotCommand("start", "شروع ربات"),
-        BotCommand("menu", "منوی اصلی"),
-        BotCommand("status", "وضعیت سیستم"),
-        BotCommand("dashboard", "داشبورد تحلیلی"),
-        BotCommand("news", "رویدادهای پیش رو"),
-        BotCommand("report", "گزارش دوره‌ای"),
-        BotCommand("stop", "توقف ربات"),
-    ])
-    app.create_task(auto_report_loop(app))
-    app.create_task(trailing_monitor_loop(app))
-    app.create_task(news_monitor_loop(app))
-    app.create_task(whale_monitor_loop(app))
-    app.create_task(macro_event_monitor_loop(app))
-    app.create_task(macro_data_loop(app))
-    app.create_task(optimization_loop(app))
-    app.create_task(channel_broadcast_loop(app))
-    app.create_task(channel_signal_monitor_loop(app))
-    logger.info("Signal Bot V62 (Channel: یک سیگنال معتبر به‌ازای هر ارز + پایش مستقل TP/SL) started")
-
-def main():
-    global app
-    if not BOT_TOKEN:
-        raise RuntimeError("❌ BOT_TOKEN در .env تنظیم نشده است.")
-    if not ALLOWED_USER_IDS:
-        logger.warning("⚠️ ALLOWED_USER_IDS تنظیم نشده؛ ربات برای همه باز است.")
-    load_state()
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stop", stop))
-    app.add_handler(CommandHandler("menu", menu_command))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("dashboard", dashboard))
-    app.add_handler(CommandHandler("news", news))
-    app.add_handler(CommandHandler("report", periodic_report_command))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    logger.info("Bot is running...")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+    running_max = close.cummax(); drawdown = (close / running_max - 1) * 100; max_drawdown = fl
