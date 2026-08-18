@@ -134,7 +134,11 @@ TRAILING_CHECK_SECONDS = 5 * 60
 FEAR_GREED_TTL = 3600
 EVENTS_CHECK_SECONDS = 6 * 3600
 WHALE_CHECK_SECONDS = 30 * 60
-WHALE_MIN_AMOUNT_BTC = 1000
+WHALE_MIN_AMOUNT_BTC = 1000        # آستانه برای Whale Alert API (در صورت داشتن کلید پولی)
+WHALE_MIN_AMOUNT_BTC_FREE = 150    # آستانه برای حالت رایگان (blockchain.info) — اصلاح باگ:
+# قبلاً همان آستانه‌ی ۱۰۰۰ BTC برای حالت رایگان هم استفاده می‌شد؛ تراکنش‌های بیت‌کوینی
+# بالای ۱۰۰۰ BTC (حدود ۱۰۰+ میلیون دلار) در مواقع خیلی نادر اتفاق می‌افتن، یعنی عملاً
+# هیچ‌وقت هیچ هشدار نهنگی از منبع رایگان نمی‌رسید. این یکی از دلایل اصلی «اخبار نمیاد» بود.
 NEWS_AUTO_DELETE_SECONDS = 3600
 OPTIMIZATION_CHECK_SECONDS = 6 * 3600
 MACRO_CHECK_SECONDS = 6 * 3600
@@ -996,11 +1000,16 @@ def add_news_alert(text: str, importance: str = "medium", impact: str = "", deta
     save_state()
 
 def get_win_rate_estimate():
-    if not signal_history:
+    """
+    اصلاح باگ: نسخه‌ی قبل نرخ موفقیت را از روی «همه‌ی» رکوردهای signal_history (از جمله
+    سیگنال‌های هنوز باز/در حال اجرا) حساب می‌کرد که عدد را به‌شدت و نادرست پایین نشان
+    می‌داد. الان فقط سیگنال‌های واقعاً بسته‌شده (TP یا SL) را در نظر می‌گیرد.
+    """
+    closed = [s for s in signal_history if s["status"] in ("tp1_hit", "tp2_hit", "tp3_hit", "sl_hit")]
+    if not closed:
         return 50.0
-    wins = sum(1 for s in signal_history if s["status"].startswith("tp"))
-    total = len(signal_history)
-    return (wins / total * 100) if total > 0 else 50.0
+    wins = sum(1 for s in closed if s["status"].startswith("tp"))
+    return wins / len(closed) * 100
 
 # ---------- نرخ تومان ----------
 def fetch_irt_rate_wallex():
@@ -1132,14 +1141,19 @@ async def fetch_cryptopanic_news():
                 impact = "صعودی 📈"
             elif "bearish" in str(tags).lower() or "negative" in str(tags).lower():
                 impact = "نزولی 📉"
-            if "important" in str(tags).lower() or "high" in str(tags).lower():
-                news_list.append({
-                    "title": escape_markdown(title[:100]),
-                    "impact": impact,
-                    "source": "CryptoPanic",
-                    "url": item.get("url", ""),
-                    "timestamp": time.time()
-                })
+            # اصلاح باگ: قبلاً یک فیلتر دوم و اشتباه این‌جا بود که فقط اخباری رو قبول
+            # می‌کرد که کلمه‌ی «important» یا «high» توی برچسب‌هاشون باشه. اما درخواست
+            # بالا از قبل با &filter=important فقط اخبار مهم رو از سمت خود CryptoPanic
+            # گرفته؛ برچسب‌های واقعی هرگز حاوی کلمه‌ی «important» نیستن (مثلاً
+            # «Bitcoin», «Regulation» و...)، پس این شرط تقریباً همیشه False می‌شد و
+            # لیست خبر همیشه خالی برمی‌گشت — این اصلی‌ترین دلیل «اخبار نمیاد» بود.
+            news_list.append({
+                "title": escape_markdown(title[:100]),
+                "impact": impact,
+                "source": "CryptoPanic",
+                "url": item.get("url", ""),
+                "timestamp": time.time()
+            })
         return news_list
     except Exception as e:
         logger.warning(f"CryptoPanic fetch failed: {e}")
@@ -1166,19 +1180,24 @@ def fetch_whale_alerts():
                 to_is_exchange = any(kw in to_owner.lower() for kw in exchange_keywords) if to_owner else False
                 flow_type = "unknown"
                 if from_is_exchange and not to_is_exchange:
-                    flow_type = "خروج از صرافی (احتمال فروش)"
+                    flow_type = "خروج از صرافی"
                 elif not from_is_exchange and to_is_exchange:
-                    flow_type = "ورود به صرافی (احتمال فروش)"
+                    flow_type = "ورود به صرافی"
                 elif from_is_exchange and to_is_exchange:
                     flow_type = "انتقال بین صرافی‌ها"
                 else:
                     flow_type = "انتقال بین کیف‌پول‌ها"
                 impact = "خنثی"
-                if flow_type == "خروج از صرافی" and amount_btc > 2000:
+                # اصلاح باگ (رگرسیون تکراری): قبلاً flow_type رشته‌ای شامل پسوند
+                # "(احتمال فروش)" بود، در حالی که این مقایسه‌ها دقیقاً با رشته‌ی بدون
+                # پسوند مقایسه می‌شدند و همیشه False می‌شدند — یعنی این دو حالت هرگز به
+                # عنوان impact محاسبه نمی‌شدند و اکثر هشدارها به‌اشتباه «خنثی» می‌ماندند
+                # و توسط فیلتر پایین‌دستی (که فقط نزولی/صعودی رو نشون می‌ده) حذف می‌شدند.
+                if flow_type == "ورود به صرافی" and amount_btc > 500:
                     impact = "نزولی 📉 (احتمال فروش)"
-                elif flow_type == "ورود به صرافی" and amount_btc > 2000:
-                    impact = "نزولی 📉 (احتمال فروش)"
-                elif amount_btc > 5000:
+                elif flow_type == "خروج از صرافی" and amount_btc > 500:
+                    impact = "صعودی 📈 (احتمال انباشت/نگهداری)"
+                elif amount_btc > 2000:
                     impact = "صعودی 📈 (انباشت نهنگ)"
                 alerts.append({
                     "amount_btc": amount_btc,
@@ -1201,7 +1220,7 @@ def fetch_whale_alerts():
             alerts = []
             for tx in txs:
                 total_out = sum(out.get("value", 0) for out in tx.get("out", [])) / 1e8
-                if total_out >= WHALE_MIN_AMOUNT_BTC:
+                if total_out >= WHALE_MIN_AMOUNT_BTC_FREE:
                     alerts.append({
                         "amount_btc": total_out,
                         "symbol": "BTC",
@@ -1211,7 +1230,7 @@ def fetch_whale_alerts():
                         "from_owner": "ناشناس",
                         "to_owner": "ناشناس",
                         "flow_type": "نامشخص",
-                        "impact": "مشخص نیست",
+                        "impact": "🔍 نیاز به بررسی (حرکت بزرگ، جهت دقیق نامشخص)",
                         "value_usd": total_out * cache.prices.get("BTC", 0)
                     })
             return alerts[:5]
@@ -1220,23 +1239,12 @@ def fetch_whale_alerts():
         return []
 
 async def fetch_important_news():
+    # اصلاح باگ: قبلاً این تابع هم (از طریق news_monitor_loop) و هم whale_monitor_loop
+    # به‌صورت جداگانه fetch_whale_alerts() رو صدا می‌زدن و به news_history اضافه
+    # می‌کردن — یعنی هر هشدار نهنگ دوبار پردازش و دوبار به کانال ارسال می‌شد. الان
+    # مسئولیت نهنگ‌ها فقط با whale_monitor_loop هست و این تابع فقط اخبار CryptoPanic
+    # رو برمی‌گردونه.
     all_news = []
-    whale_alerts = fetch_whale_alerts()
-    for alert in whale_alerts:
-        if "نزولی" in alert["impact"] or "صعودی" in alert["impact"]:
-            text = (
-                f"🐋 *حرکت نهنگ بزرگ*\n"
-                f"💰 مقدار: **{alert['amount_btc']:,.0f} {alert['symbol']}** (~{alert['value_usd']:,.0f} دلار)\n"
-                f"📊 نوع تراکنش: {alert['flow_type']}\n"
-                f"📈 تأثیر: {alert['impact']}"
-            )
-            all_news.append({
-                "text": text,
-                "importance": "high",
-                "impact": alert["impact"],
-                "source": "whale",
-                "timestamp": alert["timestamp"]
-            })
     crypto_news = await fetch_cryptopanic_news()
     for item in crypto_news:
         text = f"📰 *{item['title']}*\n📈 تأثیر: {item['impact']}\n📌 منبع: {item['source']}"
@@ -3471,7 +3479,7 @@ async def finish_start(context, chat_id, user_id):
         BotCommand("menu", "منوی اصلی"),
         BotCommand("status", "وضعیت سیستم"),
         BotCommand("dashboard", "داشبورد تحلیلی"),
-        BotCommand("news", "رویدادهای پیش رو"),
+        BotCommand("news", "اخبار و رویدادهای پیش رو"),
         BotCommand("report", "گزارش دوره‌ای"),
         BotCommand("stop", "توقف ربات"),
     ] if is_admin(user_id) else [BotCommand("menu", "منوی اصلی")]
@@ -3544,13 +3552,15 @@ async def news_monitor_loop(app):
     await asyncio.sleep(30)
     while True:
         try:
-            if subscribed_chat_ids:
-                important_news = await fetch_important_news()
-                for news in important_news:
-                    add_news_alert(news["text"], importance="high", impact=news["impact"], details={"source": news.get("source", "")})
-                    if news.get("importance") == "high":
-                        await send_high_importance_news_to_channel(news["text"])
-                await check_and_notify_events(app)
+            # اصلاح باگ: قبلاً کل این حلقه (از جمله ارسال به کانال) فقط وقتی اجرا
+            # می‌شد که حداقل یک subscribed_chat_id وجود داشت. ارسال به کانال هیچ
+            # ربطی به وجود یا عدم وجود کاربر خصوصی نداره؛ این شرط حذف شد.
+            important_news = await fetch_important_news()
+            for news in important_news:
+                add_news_alert(news["text"], importance="high", impact=news["impact"], details={"source": news.get("source", "")})
+                if news.get("importance") == "high":
+                    await send_high_importance_news_to_channel(news["text"])
+            await check_and_notify_events(app)
         except Exception as e:
             logger.exception("News monitor error: %s", e)
         await asyncio.sleep(EVENTS_CHECK_SECONDS)
@@ -3589,37 +3599,46 @@ async def whale_monitor_loop(app):
     await asyncio.sleep(60)
     while True:
         try:
-            if subscribed_chat_ids:
-                alerts = fetch_whale_alerts()
-                if alerts:
-                    for alert in alerts[:5]:
-                        if "نزولی" in alert["impact"] or "صعودی" in alert["impact"]:
-                            amount = alert["amount_btc"]
-                            symbol = alert["symbol"]
-                            flow = alert["flow_type"]
-                            impact = alert["impact"]
-                            value_usd = alert.get("value_usd", 0)
-                            from_addr = escape_markdown(alert.get("from_address", "نامشخص"))
-                            to_addr = escape_markdown(alert.get("to_address", "نامشخص"))
-                            from_owner = escape_markdown(alert.get("from_owner", "ناشناس"))
-                            to_owner = escape_markdown(alert.get("to_owner", "ناشناس"))
-                            whale_emoji = "🐋" if amount > 5000 else "🐳"
-                            text = (
-                                f"{whale_emoji} *حرکت نهنگ بزرگ*\n"
-                                f"💰 مقدار: **{amount:,.0f} {symbol}** (~{value_usd:,.0f} دلار)\n"
-                                f"🔗 شبکه: {symbol}\n"
-                                f"📌 از آدرس: `{from_addr}`\n"
-                                f"📌 به آدرس: `{to_addr}`\n"
-                                f"🏷️ برچسب مبدأ: {from_owner}\n"
-                                f"🏷️ برچسب مقصد: {to_owner}\n"
-                                f"📊 نوع تراکنش: {flow}\n"
-                                f"📈 تأثیر احتمالی: {impact}\n"
-                                f"🕒 {shamsi_now()}"
-                            )
-                            add_news_alert(text, importance="high", impact=impact, details=alert)
-                    latest = news_history[-1] if news_history else None
-                    if latest and latest.get("importance") == "high":
-                        await send_high_importance_news_to_channel(latest["text"])
+            # اصلاح باگ: قبلاً این حلقه فقط وقتی حداقل یک کاربر شخصی subscribe کرده بود
+            # اجرا می‌شد، در حالی که ارسال هشدار به کانال هیچ ربطی به تعداد کاربران خصوصی
+            # نداره. حالا مستقل از subscribed_chat_ids اجرا می‌شه.
+            alerts = fetch_whale_alerts()
+            if alerts:
+                for alert in alerts[:5]:
+                    impact = alert["impact"]
+                    # اصلاح باگ: قبلاً فقط هشدارهایی که impact دقیقاً شامل «نزولی» یا
+                    # «صعودی» بود رد می‌شدن؛ اما حالت رایگان (بدون کلید Whale Alert)
+                    # هیچ‌وقت این کلمه‌ها رو تولید نمی‌کرد، پس تمام هشدارهای رایگان
+                    # همیشه فیلتر و حذف می‌شدن. الان هر هشدار «قابل‌بررسی» (بزرگ) هم
+                    # قبول می‌شه، نه فقط اون‌هایی که جهت دقیقشون مشخصه.
+                    if not ("نزولی" in impact or "صعودی" in impact or "بررسی" in impact):
+                        continue
+                    amount = alert["amount_btc"]
+                    symbol = alert["symbol"]
+                    flow = alert["flow_type"]
+                    value_usd = alert.get("value_usd", 0)
+                    from_addr = escape_markdown(alert.get("from_address", "نامشخص"))
+                    to_addr = escape_markdown(alert.get("to_address", "نامشخص"))
+                    from_owner = escape_markdown(alert.get("from_owner", "ناشناس"))
+                    to_owner = escape_markdown(alert.get("to_owner", "ناشناس"))
+                    whale_emoji = "🐋" if amount > 2000 else "🐳"
+                    text = (
+                        f"{whale_emoji} *حرکت نهنگ بزرگ*\n"
+                        f"💰 مقدار: **{amount:,.0f} {symbol}** (~{value_usd:,.0f} دلار)\n"
+                        f"🔗 شبکه: {symbol}\n"
+                        f"📌 از آدرس: `{from_addr}`\n"
+                        f"📌 به آدرس: `{to_addr}`\n"
+                        f"🏷️ برچسب مبدأ: {from_owner}\n"
+                        f"🏷️ برچسب مقصد: {to_owner}\n"
+                        f"📊 نوع تراکنش: {flow}\n"
+                        f"📈 تأثیر احتمالی: {impact}\n"
+                        f"🕒 {shamsi_now()}"
+                    )
+                    add_news_alert(text, importance="high", impact=impact, details=alert)
+                    # اصلاح باگ: قبلاً فقط آخرین آیتم news_history به کانال ارسال می‌شد،
+                    # یعنی اگه در یک دور چند هشدار جدید اضافه می‌شد، بقیه هیچ‌وقت به
+                    # کانال نمی‌رسیدن. الان هر هشدار واجد شرایط جداگانه ارسال می‌شه.
+                    await send_high_importance_news_to_channel(text)
         except Exception as e:
             logger.exception("Whale monitor error: %s", e)
         await asyncio.sleep(WHALE_CHECK_SECONDS)
@@ -3906,23 +3925,43 @@ async def dashboard(update, context):
 
 async def news(update, context):
     if not await guard(update): return
+    # اصلاح/بهبود: قبلاً دستور /news فقط رویدادهای تقویمی رو نشون می‌داد و هیچ خبر
+    # واقعی (نهنگ‌ها/CryptoPanic که در news_history جمع می‌شن) رو نمایش نمی‌داد —
+    # با این‌که اسم دستور «news» بود. الان هر دو بخش با فرمت مرتب‌تر نمایش داده می‌شن.
+    parts = []
+
+    if news_history:
+        recent = list(reversed(news_history[-5:]))
+        news_block = "📰 *آخرین اخبار و هشدارها:*\n" + DIVIDER + "\n\n"
+        for item in recent:
+            importance_emoji = "🔴" if item.get("importance") == "high" else "🟡" if item.get("importance") == "medium" else "🟢"
+            news_block += f"{importance_emoji} 🕒 {item['time']}\n{item['text']}\n\n"
+        news_block += "برای مشاهده‌ی ۲۰ مورد آخر: منوی اصلی ← 📰 اخبار و هشدارها\n"
+        parts.append(news_block)
+    else:
+        parts.append("📰 *آخرین اخبار و هشدارها:*\n\nهنوز خبری ثبت نشده است.\n")
+
     events = await get_upcoming_events(force=True)
     now_utc = datetime.now(tz=TEHRAN_TZ) if TEHRAN_TZ else datetime.now()
     upcoming = [ev for ev in events if ev["time"].tzinfo is None or (ev["time"] - now_utc) >= timedelta(0)]
-    if not upcoming:
-        await update.message.reply_text("📅 رویداد مهمی در آینده نزدیک یافت نشد.")
-        return
-    text = "📅 *رویدادهای کریپتویی پیش رو:*\n" + DIVIDER + "\n"
-    for ev in upcoming[:10]:
-        importance_emoji = "🔴" if ev.get("importance") == "high" else "🟡" if ev.get("importance") == "medium" else "🟢"
-        text += f"{importance_emoji} *{ev['name']}*\n"
-        text += f"🕒 {shamsi_date(ev['time'])} {ev['time'].strftime('%H:%M')}\n"
-        if ev.get("description"):
-            text += f"📝 {ev['description'][:100]}...\n"
-        if ev.get("impact"):
-            text += f"📊 تأثیر مورد انتظار: {ev['impact']}\n"
-        text += "\n"
-    await update.message.reply_text(rtl_lines(text), parse_mode="Markdown")
+    if upcoming:
+        events_block = "📅 *رویدادهای کریپتویی پیش رو:*\n" + DIVIDER + "\n\n"
+        for ev in upcoming[:10]:
+            importance_emoji = "🔴" if ev.get("importance") == "high" else "🟡" if ev.get("importance") == "medium" else "🟢"
+            events_block += f"{importance_emoji} *{ev['name']}*\n"
+            events_block += f"🕒 {shamsi_date(ev['time'])} {ev['time'].strftime('%H:%M')}\n"
+            if ev.get("description"):
+                events_block += f"📝 {ev['description'][:100]}...\n"
+            if ev.get("impact"):
+                events_block += f"📊 تأثیر مورد انتظار: {ev['impact']}\n"
+            events_block += "\n"
+        parts.append(events_block)
+    else:
+        parts.append("📅 *رویدادهای کریپتویی پیش رو:*\n\nرویداد مهمی در آینده نزدیک یافت نشد.\n")
+
+    full_text = f"{DIVIDER}\n".join(parts)
+    for chunk in split_long_message(rtl_lines(full_text)):
+        await update.message.reply_text(chunk, parse_mode="Markdown")
 
 async def periodic_report_command(update, context):
     if not await guard(update): return
@@ -4186,13 +4225,22 @@ async def button_handler(update, context):
     if data == "events_news":
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         if not news_history:
-            text = "📰 *تاریخچه اخبار و هشدارها*\n" + DIVIDER + "\n\nهیچ خبری ثبت نشده است."
+            text = (
+                "📰 *تاریخچه اخبار و هشدارها*\n" + DIVIDER + "\n\n"
+                "هنوز خبری ثبت نشده است.\n"
+                "این بخش به‌صورت خودکار با هشدارهای حرکت نهنگ‌ها و اخبار مهم بازار پر می‌شود."
+            )
         else:
-            text = "📰 *تاریخچه اخبار و هشدارها*\n" + DIVIDER + "\n"
+            text = f"📰 *تاریخچه اخبار و هشدارها* (۲۰ مورد آخر)\n" + DIVIDER + "\n\n"
             for item in reversed(news_history[-20:]):
                 importance_emoji = "🔴" if item.get("importance") == "high" else "🟡" if item.get("importance") == "medium" else "🟢"
-                text += f"{importance_emoji} {item['time']}\n{item['text']}\n\n"
-        await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_to_events(), parse_mode="Markdown")
+                source = item.get("details", {}).get("source", "")
+                source_icon = "🐋" if source == "whale" else "📰" if source == "crypto" else "🔔"
+                text += f"{importance_emoji} {source_icon} 🕒 {item['time']}\n{item['text']}\n\n{DIVIDER}\n\n"
+        chunks = split_long_message(rtl_lines(text))
+        await query.edit_message_text(chunks[0], reply_markup=kb_back_to_events(), parse_mode="Markdown")
+        for chunk in chunks[1:]:
+            await context.bot.send_message(chat_id=chat_id, text=chunk, reply_markup=kb_back_to_events(), parse_mode="Markdown")
         set_interactive_screen(chat_id, [query.message.message_id])
         return
 
@@ -4574,33 +4622,75 @@ async def button_handler(update, context):
 
     # دکمه جدید: نمایش همه سیگنال‌های فعال
     if data == "active_signals_all":
-        # اصلاح باگ اصلی: قبلاً signal_history[-10:] بدون فیلتر status نمایش داده می‌شد —
-        # یعنی سیگنال‌های بسته‌شده (tp/sl) هم به‌اشتباه زیر عنوان «فعال» می‌آمدند، و اگر
-        # ۱۰ رکورد آخر همه بسته‌شده بودند نتیجه گمراه‌کننده بود. الان واقعاً فقط سیگنال‌های
-        # status == "open" نمایش داده می‌شوند. کل هندلر هم در try/except قرار گرفت تا یک
-        # خطای غیرمنتظره (مثلاً رکورد قدیمی و ناقص) به‌جای «هیچ اتفاقی نیفتد»، پیام خطای
-        # قابل‌فهم نشان بدهد.
+        # اصلاح باگ: قبلاً signal_history[-10:] بدون فیلتر status نمایش داده می‌شد —
+        # یعنی سیگنال‌های بسته‌شده (tp/sl) هم به‌اشتباه زیر عنوان «فعال» می‌آمدند. سپس
+        # فیلتر به status == "open" محدود شد که خودش هم باگ داشت: بعد از برخورد به TP1
+        # یا TP2، وضعیت رکورد دیگه "open" نیست (می‌شه "tp1_hit"/"tp2_hit") در حالی که
+        # معامله هنوز واقعاً باز و در حال پیگیریه — پس این سیگنال‌ها به‌اشتباه از لیست
+        # «فعال» حذف می‌شدن. الان هر چیزی که به وضعیت نهایی (TP3/SL/نامعتبر) نرسیده،
+        # «فعال» حساب می‌شه. همچنین اطلاعات هر سیگنال کامل‌تر و مرتب‌تر نمایش داده می‌شه:
+        # قیمت لحظه‌ای، سود/زیان شناور، فاصله تا هدف بعدی، مرحله‌ی فعلی، و مدت‌زمان باز بودن.
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
         back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")]])
         try:
-            open_signals = [r for r in signal_history if r.get("status") == "open"]
+            open_signals = [r for r in signal_history if r.get("status") not in CLOSED_STATUSES]
             open_signals.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
             if not open_signals:
                 text = "📡 *سیگنال‌های فعال*\n\nدر حال حاضر هیچ سیگنال بازی وجود ندارد."
                 await query.edit_message_text(rtl_lines(text), reply_markup=back_kb, parse_mode="Markdown")
             else:
-                text = f"📡 *سیگنال‌های فعال* ({len(open_signals)} مورد)\n" + DIVIDER + "\n"
+                await cache.update_prices(force=False)
+                stage_labels = {
+                    "open": "🆕 تازه باز شده",
+                    "tp1_hit": "✅ TP1 خورده — در مسیر TP2",
+                    "tp2_hit": "✅✅ TP2 خورده — در مسیر TP3",
+                }
+                text = f"📡 *سیگنال‌های فعال* ({len(open_signals)} مورد)\n" + DIVIDER + "\n\n"
                 for rec in open_signals:
-                    direction_emoji = "🟢" if rec.get("direction") == "LONG" else "🔴"
+                    symbol = rec.get("symbol", "?")
+                    direction = rec.get("direction", "?")
+                    direction_emoji = "🟢" if direction == "LONG" else "🔴"
                     mode_label = MODE_CONFIGS.get(rec.get("mode"), MODE_CONFIGS["standard"])["label"]
                     tp_prices = rec.get("tp_prices") or [0, 0, 0]
+                    entry_price = rec.get("entry_price", 0)
+                    sl_price = rec.get("sl_price", 0)
+                    status = rec.get("status", "open")
+                    stage_txt = stage_labels.get(status, status)
+
+                    current_price = cache.prices.get(symbol)
+                    pnl_line = ""
+                    target_line = ""
+                    if current_price and entry_price:
+                        if direction == "LONG":
+                            pnl_pct = (current_price - entry_price) / entry_price * 100
+                        else:
+                            pnl_pct = (entry_price - current_price) / entry_price * 100
+                        pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
+                        pnl_line = f"   💹 وضعیت لحظه‌ای: {fmt_amount(current_price, chat_id)} ({pnl_emoji} {pnl_pct:+.2f}%)\n"
+
+                        # نزدیک‌ترین هدف باقی‌مانده (بسته به مرحله‌ای که سیگنال توش هست)
+                        next_idx = {"open": 0, "tp1_hit": 1, "tp2_hit": 2}.get(status, 0)
+                        next_tp = tp_prices[next_idx] if next_idx < len(tp_prices) else tp_prices[-1]
+                        if next_tp:
+                            if direction == "LONG":
+                                dist_pct = (next_tp - current_price) / current_price * 100
+                            else:
+                                dist_pct = (current_price - next_tp) / current_price * 100
+                            target_line = f"   🎯 فاصله تا TP{next_idx + 1}: {dist_pct:+.2f}%\n"
+
+                    opened_at = rec.get("opened_at", rec.get("timestamp", time.time()))
+                    duration_txt = _format_duration(time.time() - opened_at)
+
                     text += (
-                        f"{rec.get('symbol', '?')} | {rec.get('direction', '?')} {direction_emoji} | {mode_label}\n"
-                        f"   اطمینان: {rec.get('confidence', 0):.0f}٪ | RR: {rec.get('rr', 0):.2f}\n"
-                        f"   ورود: {fmt_amount(rec.get('entry_price', 0), chat_id)}\n"
-                        f"   SL: {fmt_amount(rec.get('sl_price', 0), chat_id)}\n"
+                        f"*{symbol}* | {direction} {direction_emoji} | {mode_label}\n"
+                        f"   {stage_txt}\n"
+                        f"{pnl_line}"
+                        f"{target_line}"
+                        f"   ⏱️ مدت باز بودن: {duration_txt}\n"
+                        f"   🎯 اطمینان اولیه: {rec.get('confidence', 0):.0f}٪ | RR: {rec.get('rr', 0):.2f}\n"
+                        f"   📥 ورود: {fmt_amount(entry_price, chat_id)} | 🛑 حد ضرر: {fmt_amount(sl_price, chat_id)}\n"
                         f"   TP1: {fmt_amount(tp_prices[0], chat_id)} | TP2: {fmt_amount(tp_prices[1], chat_id)} | TP3: {fmt_amount(tp_prices[2], chat_id)}\n"
-                        f"{DIVIDER}\n"
+                        f"{DIVIDER}\n\n"
                     )
                 chunks = split_long_message(rtl_lines(text))
                 await query.edit_message_text(chunks[0], reply_markup=back_kb, parse_mode="Markdown")
@@ -4659,7 +4749,7 @@ async def post_init(app):
         BotCommand("menu", "منوی اصلی"),
         BotCommand("status", "وضعیت سیستم"),
         BotCommand("dashboard", "داشبورد تحلیلی"),
-        BotCommand("news", "رویدادهای پیش رو"),
+        BotCommand("news", "اخبار و رویدادهای پیش رو"),
         BotCommand("report", "گزارش دوره‌ای"),
         BotCommand("stop", "توقف ربات"),
     ])
