@@ -3157,7 +3157,8 @@ async def comprehensive_analysis(update, context):
         chunks = split_long_message(text)
         await query.edit_message_text(chunks[0], reply_markup=kb_back_to_admin_panel(), parse_mode="Markdown")
         for chunk in chunks[1:]:
-            await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
+            # همون باگ «چانک بعدی دکمه‌ی بازگشت نداره» این‌جا هم بود؛ اصلاح شد.
+            await context.bot.send_message(chat_id=chat_id, text=chunk, reply_markup=kb_back_to_admin_panel(), parse_mode="Markdown")
     except Exception as e:
         logger.exception(f"Comprehensive analysis error: {e}")
         await query.edit_message_text(f"❌ خطا در تحلیل جامع:\n{str(e)}", reply_markup=kb_back_to_admin_panel())
@@ -4608,14 +4609,17 @@ async def button_handler(update, context):
             await query.edit_message_text(f"❌ خطا: {e}", reply_markup=kb_back_to_admin_panel()); return
         if not plans:
             text = "📋 فعلاً سیگنال نهایی نداریم."
+            await query.edit_message_text(text, reply_markup=kb_back_to_admin_panel())
         else:
             sorted_plans = sorted(plans.values(), key=lambda p: p.confidence, reverse=True)
             full_text = "📋 *نمایش پیشنهادات*\n\n" + "\n\n".join(format_main_signal_v2(p, p.symbol, chat_id) for p in sorted_plans)
             chunks = split_long_message(full_text)
             new_ids = []
-            await query.edit_message_text(chunks[0], parse_mode="Markdown"); new_ids.append(query.message.message_id)
+            # اصلاح باگ: این صفحه اصلاً دکمه‌ی بازگشت نداشت (نه روی چانک اول، نه بقیه).
+            await query.edit_message_text(chunks[0], reply_markup=kb_back_to_admin_panel(), parse_mode="Markdown")
+            new_ids.append(query.message.message_id)
             for chunk in chunks[1:]:
-                m = await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
+                m = await context.bot.send_message(chat_id=chat_id, text=chunk, reply_markup=kb_back_to_admin_panel(), parse_mode="Markdown")
                 new_ids.append(m.message_id)
             set_interactive_screen(chat_id, new_ids)
         return
@@ -4635,6 +4639,7 @@ async def button_handler(update, context):
         try:
             open_signals = [r for r in signal_history if r.get("status") not in CLOSED_STATUSES]
             open_signals.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
+            sent_ids = [query.message.message_id]
             if not open_signals:
                 text = "📡 *سیگنال‌های فعال*\n\nدر حال حاضر هیچ سیگنال بازی وجود ندارد."
                 await query.edit_message_text(rtl_lines(text), reply_markup=back_kb, parse_mode="Markdown")
@@ -4695,8 +4700,13 @@ async def button_handler(update, context):
                 chunks = split_long_message(rtl_lines(text))
                 await query.edit_message_text(chunks[0], reply_markup=back_kb, parse_mode="Markdown")
                 for chunk in chunks[1:]:
-                    await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
-            set_interactive_screen(chat_id, [query.message.message_id])
+                    # اصلاح باگ: قبلاً فقط chunk اول دکمه‌ی بازگشت داشت؛ وقتی تعداد
+                    # سیگنال‌های فعال زیاد بود و پیام به چند تکه تقسیم می‌شد، تکه‌های
+                    # بعدی (که کاربر معمولاً همون‌ها رو پایین صفحه می‌بینه) هیچ دکمه‌ای
+                    # نداشتن. الان هر تکه دکمه‌ی بازگشت خودش رو داره.
+                    sent = await context.bot.send_message(chat_id=chat_id, text=chunk, reply_markup=back_kb, parse_mode="Markdown")
+                    sent_ids.append(sent.message_id)
+            set_interactive_screen(chat_id, sent_ids)
         except Exception as e:
             logger.exception("active_signals_all error: %s", e)
             await query.edit_message_text(f"❌ خطا در نمایش سیگنال‌های فعال: {type(e).__name__}", reply_markup=back_kb)
