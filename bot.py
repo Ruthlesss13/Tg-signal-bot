@@ -1563,6 +1563,22 @@ async def get_upcoming_events(force=False):
 
 # ---------- توابع تحلیل لایه‌ها ----------
 async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None):
+    """
+    اصلاح مهم (علت اصلی «بیشتر سیگنال‌ها اشتباه دارد»): با اینکه سیستم «۱۰ لایه تاییدی»
+    نامیده می‌شد، اکثر لایه‌ها با شرط‌های بسیار سهل‌گیرانه تقریباً همیشه True برمی‌گشتند
+    (مثلاً momentum فقط با ۱ از ۴ شرط تایید می‌شد، order_flow/breadth وقتی داده کافی
+    نداشتند به‌طور خودکار True می‌شدند، volume با حجم زیر میانگین هم قبول می‌شد). نتیجه
+    این بود که هم سیگنال لانگ و هم شورت یک نماد هم‌زمان امتیاز بالا می‌گرفتند و انتخاب
+    جهت نهایی عملاً به یک اختلاف امتیاز کوچک و نه‌چندان معنادار وابسته می‌شد. هر لایه
+    اکنون واقعاً باید چیزی را تایید کند، نه اینکه پیش‌فرض تایید باشد:
+    - structure: فقط نیمه‌ی درست رنج ۲۰ کندلی (نه هر قیمتی بالاتر از کف).
+    - mtf: اکثریت تایم‌فریم‌ها (۲ از ۳) هم‌جهت باشند، نه فقط ۱ مورد.
+    - momentum: حداقل ۳ از ۴ شرط (نه فقط ۱).
+    - volume: حجم واقعاً هم‌سطح یا بالاتر از میانگین (۱.۰x به‌جای ۰.۸x).
+    - sentiment: باید واقعاً هم‌جهت باشد (نه فقط «خیلی منفی نباشد»).
+    - order_flow / breadth: نبود داده دیگر به‌معنای تایید خودکار نیست؛ یعنی «نامشخص»
+      همان «تاییدنشده» است، نه «تاییدشده».
+    """
     config = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
     df = cache_obj.ohlcv.get(config["main_tf"], {}).get(code)
     results = {}
@@ -1572,29 +1588,23 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
         price = float(df["close"].iloc[-1])
         prev_high = float(high.max())
         prev_low = float(low.min())
+        midpoint = (prev_high + prev_low) / 2
         if direction == "LONG":
-            structure_ok = price > prev_low * 0.999
-            last = df.iloc[-1]
-            if not structure_ok and last["close"] > last["open"] and (last["close"] - last["low"]) > 2 * (last["high"] - last["close"]):
-                structure_ok = True
-            if not structure_ok and price <= (prev_high + prev_low) / 2:
-                structure_ok = True
+            # ساختار فقط وقتی تایید می‌شود که قیمت واقعاً در نیمه‌ی پایینی رنج اخیر باشد
+            # (خرید نزدیک حمایت) — نه صرفاً «بالاتر از کف».
+            results["structure"] = price <= midpoint
         else:
-            structure_ok = price < prev_high * 1.001
-            last = df.iloc[-1]
-            if not structure_ok and last["close"] < last["open"] and (last["high"] - last["close"]) > 2 * (last["close"] - last["low"]):
-                structure_ok = True
-            if not structure_ok and price >= (prev_high + prev_low) / 2:
-                structure_ok = True
-        results["structure"] = structure_ok
+            results["structure"] = price >= midpoint
     else:
         results["structure"] = False
 
     main_tf = config["main_tf"]
     confirm_tfs = config["confirm_tfs"]
+    mtf_total = 0
     mtf_count = 0
     df_main = cache_obj.ohlcv.get(main_tf, {}).get(code)
     if df_main is not None and len(df_main) > 50:
+        mtf_total += 1
         price = float(df_main["close"].iloc[-1])
         ema200 = EMAIndicator(df_main["close"], window=200).ema_indicator().iloc[-1]
         if direction == "LONG" and price > ema200:
@@ -1604,13 +1614,15 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
     for tf in confirm_tfs:
         df_tf = cache_obj.ohlcv.get(tf, {}).get(code)
         if df_tf is not None and len(df_tf) > 50:
+            mtf_total += 1
             price = float(df_tf["close"].iloc[-1])
             ema200 = EMAIndicator(df_tf["close"], window=200).ema_indicator().iloc[-1]
             if direction == "LONG" and price > ema200:
                 mtf_count += 1
             elif direction == "SHORT" and price < ema200:
                 mtf_count += 1
-    results["mtf"] = mtf_count >= 1
+    # اکثریت واقعی لازم است (حداقل ۲ تایم‌فریم هم‌جهت)، نه فقط یکی از سه‌تا.
+    results["mtf"] = mtf_total >= 2 and mtf_count >= 2
 
     momentum_score = 0
     if direction == "LONG":
@@ -1623,37 +1635,44 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
         if ind["rsi"] < 50: momentum_score += 1
         if ind["roc"] < 0: momentum_score += 1
         if ind["bearish_div"] or ind["macd_bearish_div"]: momentum_score += 1
-    results["momentum"] = momentum_score >= 1
+    results["momentum"] = momentum_score >= 3
 
-    results["volume"] = ind["volume_ratio"] >= 0.8 or ind["volume_spike"] or ind["volume_trend_up"]
+    results["volume"] = ind["volume_ratio"] >= 1.0 or ind["volume_spike"] or ind["volume_trend_up"]
 
     sentiment_score = await cache_obj._calculate_sentiment_score(code, ind)
     if direction == "LONG":
-        results["sentiment"] = sentiment_score > -0.2
+        results["sentiment"] = sentiment_score > 0.05
     else:
-        results["sentiment"] = sentiment_score < 0.2
+        results["sentiment"] = sentiment_score < -0.05
 
     results["trend"] = ind["price_above_ema200"] if direction == "LONG" else not ind["price_above_ema200"]
 
     if order_flow is None:
         order_flow = await cache_obj._get_order_flow(code)
-    if order_flow == 0 or (0.9 <= order_flow <= 1.1):
+    if order_flow == 0:
+        # داده جریان سفارشات در دسترس نبود؛ «نامشخص» دیگر به‌معنای تایید خودکار نیست.
+        results["order_flow"] = False
+    elif 0.95 <= order_flow <= 1.05:
+        # جریان سفارشات واقعاً متعادل است — نه به‌نفع لانگ نه شورت، هر دو جهت را می‌پذیرد.
         results["order_flow"] = True
     else:
         if direction == "LONG":
-            results["order_flow"] = order_flow > 1.1
+            results["order_flow"] = order_flow > 1.05
         else:
-            results["order_flow"] = order_flow < 0.9
+            results["order_flow"] = order_flow < 0.95
 
     breadth = cache_obj._get_market_breadth()
     sample_count = getattr(cache_obj, "_breadth_sample_count", 0)
-    if direction == "LONG":
-        results["breadth"] = (breadth >= 45) if sample_count >= 5 else True
+    if sample_count < 5:
+        # نمونه کافی برای قضاوت در مورد کل بازار نداریم؛ «نامشخص» تایید محسوب نمی‌شود.
+        results["breadth"] = False
+    elif direction == "LONG":
+        results["breadth"] = breadth >= 50
     else:
-        results["breadth"] = (breadth <= 55) if sample_count >= 5 else True
+        results["breadth"] = breadth <= 50
 
     bb_percent = ind.get("bb_percent", 0.5)
-    results["smart_vol"] = 0.1 <= bb_percent <= 0.9
+    results["smart_vol"] = 0.15 <= bb_percent <= 0.85
 
     if direction == "LONG":
         results["comp_trend"] = ind["plus_di"] > ind["minus_di"]
@@ -2347,20 +2366,31 @@ async def send_signal_to_channel(plan, signal_id):
             try:
                 await app.bot.delete_message(chat_id=CHANNEL_ID, message_id=existing["message_id"])
             except Exception as e:
-                logger.error(f"Failed to delete old channel message for {key}: {e}")
+                logger.error(
+                    f"Failed to delete old channel message ({existing['message_id']}) for {key}: {e}. "
+                    f"اگر این خطا مکرر تکرار می‌شود، احتمالاً ربات در کانال دسترسی «حذف پیام‌ها» ندارد."
+                )
             old_signal_id = existing.get("signal_id")
             if old_signal_id and old_signal_id != signal_id:
                 channel_signal_messages.pop(old_signal_id, None)
 
         direction_emoji = "🟢" if plan.direction == "LONG" else "🔴"
-        header = "🔄 *سیگنال اصلاح شد*" if is_correction else "🔔 *سیگنال جدید*"
+        # اصلاح طبق درخواست: قبلاً هدر «اصلاح شد» فقط یک 🔄 کوچک داشت (به‌سختی از «سیگنال
+        # جدید» قابل تشخیص بود) و به‌جایش یک جمله‌ی طولانیِ ⚠️ در پایین پیام می‌آمد که فقط
+        # شلوغی/نویز بصری اضافه می‌کرد. الان — هماهنگ با سبکی که برای پیام‌های بسته‌شدن
+        # سیگنال (🟢🟢🟢/🔴🔴🔴) استفاده می‌شود — «اصلاح شد» با 🔄🔄🔄 در ابتدا و انتهای
+        # هدر مشخص می‌شود تا حتی در پیش‌نمایش/نوتیفیکیشن تلگرام هم در نگاه اول از یک سیگنال
+        # تازه قابل تشخیص باشد؛ به‌جای جمله‌ی توضیحیِ بلند، فقط یک خط خیلی کوتاه اضافه شده.
         if is_correction:
-            footer_note = "\n\n⚠️ سیگنال قبلی با داده‌های جدید اصلاح شد."
+            header = "🔄🔄🔄 *سیگنال اصلاح شد* 🔄🔄🔄"
+            footer_note = ""
         elif existing:
             # سیگنال قبلی همین ارز به‌خاطر برعکس شدن کامل جهت بازار نامعتبر شد (نه TP/SL)؛
-            # تا این تغییر برای اعضای کانال شفاف باشد، در پیام سیگنال تازه ذکر می‌شود.
-            footer_note = "\n\n⚠️ سیگنال قبلی این ارز به‌دلیل تغییر کامل جهت بازار نامعتبر و بسته شد؛ این یک سیگنال کاملاً تازه است."
+            # این خودش یک سیگنال کاملاً تازه است، فقط یک خط کوتاه توضیح اضافه می‌شود.
+            header = "🔔 *سیگنال جدید*"
+            footer_note = "\n\nℹ️ سیگنال قبلی این ارز به‌دلیل تغییر جهت بازار بسته شد."
         else:
+            header = "🔔 *سیگنال جدید*"
             footer_note = ""
         mode_label = MODE_CONFIGS.get(plan.mode, MODE_CONFIGS["standard"])["label"]
         text = (
@@ -2501,36 +2531,49 @@ async def update_channel_signal_message(signal_id):
     پیام قبلی حذف و پیام تازه با متن بروزشده ارسال می‌شود. فقط وقتی سیگنال به‌طور نهایی
     بسته می‌شود (TP3 یا SL) رهگیری آن متوقف و امکان صدور سیگنال جدید برای همان ارز
     (پس از کول‌داون) باز می‌شود.
+
+    اصلاح باگ مهم («پیام‌های قبلی پاک نمی‌شوند»): این تابع قبلاً از channel_lock استفاده
+    نمی‌کرد، در حالی‌که send_signal_to_channel از همان قفل استفاده می‌کند. اگر همزمان با
+    هم روی یک ارز اجرا می‌شدند (مثلاً دقیقاً وقتی TP1 زده می‌شد و هم‌زمان یک چرخه‌ی
+    broadcast در حال اصلاح همان سیگنال بود)، هر دو می‌توانستند channel_message_map را
+    هم‌زمان بخوانند/بنویسند و یکی از پیام‌ها بدون ردیابی (و در نتیجه بدون حذف در آینده)
+    باقی می‌ماند. با گرفتن همان قفل، این دو تابع دیگر هرگز هم‌زمان روی وضعیت کانال کار
+    نمی‌کنند.
     """
-    if signal_id not in channel_signal_messages:
-        return
-    rec = next((r for r in signal_history if r.get("signal_id") == signal_id), None)
-    if not rec:
-        return
-    new_text = build_signal_update_text_from_record(rec)
-    if not new_text:
-        return
-    old_message_id = channel_signal_messages[signal_id]
-    try:
-        await app.bot.delete_message(chat_id=CHANNEL_ID, message_id=old_message_id)
-    except Exception as e:
-        logger.error(f"Failed to delete old channel message for signal {signal_id}: {e}")
-    try:
-        new_msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(new_text), parse_mode="Markdown")
-        channel_signal_messages[signal_id] = new_msg.message_id
-        key = rec["symbol"]
-        if channel_message_map.get(key, {}).get("signal_id") == signal_id:
-            channel_message_map[key]["message_id"] = new_msg.message_id
-    except Exception as e:
-        logger.error(f"Failed to send new final channel message for signal {signal_id}: {e}")
-        return
-    if rec["status"] in ("tp3_hit", "sl_hit"):
-        last_channel_signal_close_time[rec["symbol"]] = time.time()
-        key = rec["symbol"]
-        if channel_message_map.get(key, {}).get("signal_id") == signal_id:
-            del channel_message_map[key]
-        channel_signal_messages.pop(signal_id, None)
-    save_state()
+    async with channel_lock:
+        if signal_id not in channel_signal_messages:
+            return
+        rec = next((r for r in signal_history if r.get("signal_id") == signal_id), None)
+        if not rec:
+            return
+        new_text = build_signal_update_text_from_record(rec)
+        if not new_text:
+            return
+        old_message_id = channel_signal_messages[signal_id]
+        try:
+            await app.bot.delete_message(chat_id=CHANNEL_ID, message_id=old_message_id)
+        except Exception as e:
+            logger.error(
+                f"Failed to delete old channel message ({old_message_id}) for signal {signal_id}: {e}. "
+                f"اگر این خطا مکرر تکرار می‌شود، احتمالاً ربات در کانال دسترسی «حذف پیام‌ها» ندارد — "
+                f"از تنظیمات ادمین‌های کانال در تلگرام بررسی کنید."
+            )
+        try:
+            new_msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(new_text), parse_mode="Markdown")
+            channel_signal_messages[signal_id] = new_msg.message_id
+            key = rec["symbol"]
+            if channel_message_map.get(key, {}).get("signal_id") == signal_id:
+                channel_message_map[key]["message_id"] = new_msg.message_id
+        except Exception as e:
+            logger.error(f"Failed to send new final channel message for signal {signal_id}: {e}")
+            return
+        if rec["status"] in ("tp3_hit", "sl_hit"):
+            last_channel_signal_close_time[rec["symbol"]] = time.time()
+            key = rec["symbol"]
+            if channel_message_map.get(key, {}).get("signal_id") == signal_id:
+                del channel_message_map[key]
+            channel_signal_messages.pop(signal_id, None)
+        save_state()
 
 async def send_high_importance_news_to_channel(news_text):
     if not CHANNEL_ID:
@@ -2590,6 +2633,80 @@ async def channel_broadcast_loop(app):
 # کانال حتی وقتی هیچ کاربری آن‌ها را شخصاً دنبال نکرده باشد هم به‌درستی بسته/بروزرسانی می‌شوند.
 CHANNEL_MONITOR_INTERVAL_SECONDS = int(os.getenv("CHANNEL_MONITOR_INTERVAL_SECONDS", "90"))
 
+# ---------- هشدار تغییر روند برای سیگنال‌های در حال سود (بعد از TP1/TP2) ----------
+def check_trend_reversed(ind, original_direction):
+    """
+    بررسی محافظه‌کارانه‌ی «تغییر روند»: فقط وقتی هر سه شاخص اصلیِ روند (قیمت نسبت به
+    EMA200)، مومنتوم (MACD Histogram) و جهت‌ حرکت (DI+/DI-) هم‌زمان برخلاف جهت اولیه‌ی
+    سیگنال شده باشند، تغییر روند تایید می‌شود — تا هشدار کاذب از نوسان یک اندیکاتور
+    به‌تنهایی صادر نشود.
+    """
+    price_above_ema200 = ind.get("price_above_ema200", True)
+    macd_bullish = ind.get("macd_hist", 0) > 0
+    di_bullish = ind.get("plus_di", 0) > ind.get("minus_di", 0)
+    if original_direction == "LONG":
+        return (not price_above_ema200) and (not macd_bullish) and (not di_bullish)
+    else:
+        return price_above_ema200 and macd_bullish and di_bullish
+
+def build_trend_reversal_text(rec):
+    direction_fa = "لانگ 🟢" if rec["direction"] == "LONG" else "شورت 🔴"
+    mode_label = MODE_CONFIGS.get(rec.get("mode"), MODE_CONFIGS["standard"])["label"]
+    hit_label = "TP1" if rec["status"] == "tp1_hit" else "TP2"
+    next_target = "TP2 و TP3" if rec["status"] == "tp1_hit" else "TP3"
+    protect_hint = (
+        "زیر سطح حمایت اخیر" if rec["direction"] == "LONG" else "بالای سطح مقاومت اخیر"
+    )
+    lines = [
+        "🚨🔀🚨 *هشدار تغییر روند* 🚨🔀🚨",
+        f"{rec['symbol']}/USDT | {direction_fa} | {mode_label}",
+        DIVIDER,
+        f"✅ این سیگنال قبلاً به {hit_label} رسیده، اما روند بازار در حال حاضر برخلاف جهت "
+        f"اولیه‌ی این معامله برگشته است.",
+        f"🎯 با این تغییر، احتمال رسیدن به {next_target} کاهش یافته است.",
+        DIVIDER,
+        "💡 *پیشنهاد:*",
+        "• در صورت تمایل، بخشی یا کل سود فعلی را همین‌جا ذخیره کنید.",
+        "• حد ضرر را نزدیک‌تر به قیمت فعلی بیاورید تا سود به‌دست‌آمده حفظ شود.",
+        f"• اگر شکست واقعی {protect_hint} رخ داد، از ادامه‌ی این معامله صرف‌نظر کنید.",
+        DIVIDER,
+        f"🕒 {shamsi_now()}",
+        "⚠️ این هشدار تکنیکال است، نه توصیه مالی؛ تصمیم نهایی با شماست.",
+    ]
+    return "\n".join(lines)
+
+async def send_trend_reversal_warning(rec):
+    """
+    هشدار را به‌صورت ریپلای روی همان پیام سیگنال اصلی در کانال ارسال می‌کند (اگر پیام
+    اصلی هنوز موجود باشد) تا برای اعضای کانال کاملاً مشخص باشد این هشدار مربوط به کدام
+    سیگنال است. اگر ریپلای به هر دلیلی (مثلاً پیام اصلی حذف شده) شکست بخورد، پیام به‌طور
+    عادی (بدون ریپلای) ارسال می‌شود تا هشدار در هر صورت به دست کاربران برسد.
+    """
+    if not CHANNEL_ID:
+        return
+    signal_id = rec.get("signal_id")
+    original_message_id = channel_signal_messages.get(signal_id)
+    text = build_trend_reversal_text(rec)
+    try:
+        try:
+            await app.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=rtl_lines(text),
+                parse_mode="Markdown",
+                reply_to_message_id=original_message_id,
+            )
+        except Exception as reply_err:
+            if original_message_id:
+                logger.warning(f"Reply to original signal message failed ({reply_err}); sending without reply.")
+                await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(text), parse_mode="Markdown")
+            else:
+                raise
+        rec["reversal_warned"] = True
+        save_state()
+        logger.info(f"Trend reversal warning sent for {rec.get('symbol')} (signal_id {signal_id})")
+    except Exception as e:
+        logger.error(f"Failed to send trend reversal warning for {rec.get('symbol')}: {e}")
+
 async def channel_signal_monitor_loop(app):
     await asyncio.sleep(30)
     while True:
@@ -2611,6 +2728,23 @@ async def channel_signal_monitor_loop(app):
                         await update_channel_signal_message(sid)
                 except Exception as e:
                     logger.debug(f"Error monitoring channel signal for {code}: {e}")
+
+                # هشدار تغییر روند: فقط برای سیگنال‌هایی که هنوز باز هستند و قبلاً حداقل
+                # TP1 را زده‌اند (یعنی الان در سود هستند)، و فقط یک‌بار به‌ازای هر سیگنال.
+                try:
+                    entry = channel_message_map.get(code)
+                    if not entry:
+                        continue
+                    rec = next((r for r in signal_history if r.get("signal_id") == entry.get("signal_id")), None)
+                    if not rec or rec.get("status") not in ("tp1_hit", "tp2_hit") or rec.get("reversal_warned"):
+                        continue
+                    ind = await cache.get_indicators(code, rec.get("mode", "standard"))
+                    if not ind:
+                        continue
+                    if check_trend_reversed(ind, rec["direction"]):
+                        await send_trend_reversal_warning(rec)
+                except Exception as e:
+                    logger.debug(f"Error checking trend reversal for {code}: {e}")
 
         except Exception as e:
             logger.exception("Channel signal monitor error: %s", e)
@@ -2693,7 +2827,9 @@ def format_coin_ranking(success: bool = True, top_n: int = 20):
         text += f"{DIVIDER}\n"
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="stats_menu")]
+        # اصلاح: قبلاً به‌جای منوی بلافصل قبلی (بیشترین ارزها) مستقیم به «آمار سیگنال‌ها»
+        # می‌پرید و یک لایه از مسیر برگشت را حذف می‌کرد.
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="stats_top_coins_menu")]
     ])
     return text, keyboard
 
@@ -4149,7 +4285,13 @@ async def button_handler(update, context):
                 f"فاکتور سود: {stats['profit_factor']:.2f} | Expectancy: {stats['expectancy']:.2f} | MaxDD: {stats['max_drawdown']:.2f}\n"
                 f"Sharpe: {stats['sharpe']:.2f} | میانگین اطمینان: {stats['avg_confidence']:.1f}%\n\n"
             )
-        await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
+        # اصلاح: قبلاً به‌جای بازگشت به صفحه‌ی انتخاب دوره (هفتگی/ماهانه)، مستقیم به منوی
+        # اصلی می‌رفت و یک لایه از مسیر برگشت را رد می‌کرد.
+        await query.edit_message_text(
+            rtl_lines(text),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="periodic_report")]]),
+            parse_mode="Markdown"
+        )
         return
 
     if data == "admin_compare":
@@ -4209,7 +4351,13 @@ async def button_handler(update, context):
             set_interactive_screen(chat_id, [query.message.message_id])
         else:
             text = f"{code}\n{DIVIDER}\n⚪ وضعیت: *NO SWAP*\nدر حال حاضر قرارداد USDT Perpetual فعال برای این ارز در KuCoin پیدا نشد."
-            await query.edit_message_text(rtl_lines(text), reply_markup=kb_back_main(), parse_mode="Markdown")
+            # اصلاح: قبلاً مستقیم به منوی اصلی می‌رفت (یک لایه را رد می‌کرد)؛ الان مثل حالت
+            # موفق، به لیست ارزها برمی‌گردد.
+            await query.edit_message_text(
+                rtl_lines(text),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 لیست ارزها", callback_data="menu_coins")]]),
+                parse_mode="Markdown"
+            )
             set_interactive_screen(chat_id, [query.message.message_id])
         return
 
@@ -4227,7 +4375,7 @@ async def button_handler(update, context):
                 set_interactive_screen(chat_id, [query.message.message_id])
             except Exception as e:
                 logger.exception("Weekly UI error | code=%s: %s", code, e)
-                await query.edit_message_text(f"❌ خطا در تحلیل جامع ارز {code}.", reply_markup=kb_back_main())
+                await query.edit_message_text(f"❌ خطا در تحلیل جامع ارز {code}.", reply_markup=kb_back_to_coin(code))
             return
         else:
             await query.edit_message_text(
@@ -4244,7 +4392,7 @@ async def button_handler(update, context):
         if code not in COIN_CODES: return
         status = cache.market_status.get(code, {}).get("status")
         if status != "SWAP OK":
-            await query.edit_message_text(f"⚠️ قرارداد {code} در KuCoin در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_main())
+            await query.edit_message_text(f"⚠️ قرارداد {code} در KuCoin در دسترس نیست.\nوضعیت: {status}", reply_markup=kb_back_to_coin(code))
             return
         if action == "suggest":
             try:
@@ -4253,7 +4401,7 @@ async def button_handler(update, context):
                 set_interactive_screen(chat_id, [query.message.message_id])
             except Exception as e:
                 logger.exception("Signal UI error | code=%s: %s", code, e)
-                await query.edit_message_text(f"❌ خطا در دریافت اطلاعات {code}.", reply_markup=kb_back_main())
+                await query.edit_message_text(f"❌ خطا در دریافت اطلاعات {code}.", reply_markup=kb_back_to_coin(code))
         elif action == "instant":
             try:
                 plan = await asyncio.wait_for(generate_trade_plan_v2(code, mode), timeout=30)
@@ -4277,7 +4425,7 @@ async def button_handler(update, context):
                 set_interactive_screen(chat_id, [query.message.message_id])
             except Exception as e:
                 logger.exception("Weekly UI error | code=%s: %s", code, e)
-                await query.edit_message_text(f"❌ خطا در تحلیل جامع ارز {code}.", reply_markup=kb_back_main())
+                await query.edit_message_text(f"❌ خطا در تحلیل جامع ارز {code}.", reply_markup=kb_back_to_coin(code))
         return
 
     # ----- کاربر عادی -----
@@ -4293,7 +4441,7 @@ async def button_handler(update, context):
             set_interactive_screen(chat_id, [query.message.message_id])
         except Exception as e:
             logger.exception("Signal UI error | code=%s: %s", code, e)
-            await query.edit_message_text(f"❌ خطا در دریافت اطلاعات {code}.", reply_markup=kb_back_main())
+            await query.edit_message_text(f"❌ خطا در دریافت اطلاعات {code}.", reply_markup=kb_back_to_coin(code))
         return
 
     if data.startswith("instant_"):
@@ -4330,7 +4478,7 @@ async def button_handler(update, context):
             set_interactive_screen(chat_id, [query.message.message_id])
         except Exception as e:
             logger.exception("Weekly UI error | code=%s: %s", code, e)
-            await query.edit_message_text(f"❌ خطا در تحلیل جامع ارز {code}.", reply_markup=kb_back_main())
+            await query.edit_message_text(f"❌ خطا در تحلیل جامع ارز {code}.", reply_markup=kb_back_to_coin(code))
         return
 
     if data.startswith("details_"):
@@ -4339,17 +4487,17 @@ async def button_handler(update, context):
         try:
             ind = await cache.get_indicators(code, mode)
             if not ind:
-                await query.edit_message_text("⚠️ داده کافی نیست.", reply_markup=kb_back_main())
+                await query.edit_message_text("⚠️ داده کافی نیست.", reply_markup=kb_back_to_coin(code))
                 return
             plan = await generate_trade_plan_v2(code, mode)
             if not plan:
-                await query.edit_message_text("💤 سیگنال فعلی موجود نیست.\nدلایل احتمالی: ADX پایین یا عدم تأیید کافی لایه‌ها.", reply_markup=kb_back_main())
+                await query.edit_message_text("💤 سیگنال فعلی موجود نیست.\nدلایل احتمالی: ADX پایین یا عدم تأیید کافی لایه‌ها.", reply_markup=kb_back_to_coin(code))
                 return
             details_text = format_technical_details(code, plan, ind, chat_id)
             await query.edit_message_text(split_long_message(details_text)[0], reply_markup=kb_back_to_signal(code), parse_mode="Markdown")
         except Exception as e:
             logger.exception("Details UI error | code=%s: %s", code, e)
-            await query.edit_message_text(f"❌ خطا در نمایش جزئیات {code}.", reply_markup=kb_back_main())
+            await query.edit_message_text(f"❌ خطا در نمایش جزئیات {code}.", reply_markup=kb_back_to_coin(code))
         return
 
     if data == "admin_panel":
@@ -4408,7 +4556,8 @@ async def button_handler(update, context):
                 await asyncio.sleep(0.5)
         except Exception as e:
             logger.exception("menu_all error: %s", e)
-            await query.edit_message_text(f"❌ خطا: {e}", reply_markup=kb_back_main()); return
+            # اصلاح: این صفحه از پنل مدیریت باز می‌شود؛ بازگشت باید به همان‌جا برود نه منوی اصلی.
+            await query.edit_message_text(f"❌ خطا: {e}", reply_markup=kb_back_to_admin_panel()); return
         if not plans:
             text = "📋 فعلاً سیگنال نهایی نداریم."
         else:
@@ -4425,45 +4574,42 @@ async def button_handler(update, context):
 
     # دکمه جدید: نمایش همه سیگنال‌های فعال
     if data == "active_signals_all":
+        # اصلاح باگ اصلی: قبلاً signal_history[-10:] بدون فیلتر status نمایش داده می‌شد —
+        # یعنی سیگنال‌های بسته‌شده (tp/sl) هم به‌اشتباه زیر عنوان «فعال» می‌آمدند، و اگر
+        # ۱۰ رکورد آخر همه بسته‌شده بودند نتیجه گمراه‌کننده بود. الان واقعاً فقط سیگنال‌های
+        # status == "open" نمایش داده می‌شوند. کل هندلر هم در try/except قرار گرفت تا یک
+        # خطای غیرمنتظره (مثلاً رکورد قدیمی و ناقص) به‌جای «هیچ اتفاقی نیفتد»، پیام خطای
+        # قابل‌فهم نشان بدهد.
         await clear_interactive_screen(context, chat_id, keep_id=query.message.message_id)
-        recent_signals = signal_history[-10:]
-        if not recent_signals:
-            text = "📡 *سیگنال‌های فعال*\n\nهنوز سیگنالی ثبت نشده است."
-            await query.edit_message_text(
-                rtl_lines(text),
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")]]),
-                parse_mode="Markdown"
-            )
-        else:
-            text = "📡 *سیگنال‌های فعال*\n" + DIVIDER + "\n"
-            for rec in reversed(recent_signals):
-                direction_emoji = "🟢" if rec["direction"] == "LONG" else "🔴"
-                mode_label = MODE_CONFIGS.get(rec["mode"], MODE_CONFIGS["standard"])["label"]
-                status_text = "باز" if rec["status"] == "open" else rec["status"]
-                text += (
-                    f"{rec['symbol']} | {rec['direction']} {direction_emoji} | {mode_label}\n"
-                    f"   اطمینان: {rec['confidence']:.0f}٪ | RR: {rec['rr']:.2f} | وضعیت: {status_text}\n"
-                    f"   ورود: {fmt_amount(rec['entry_price'], chat_id)}\n"
-                    f"   SL: {fmt_amount(rec['sl_price'], chat_id)}\n"
-                    f"   TP1: {fmt_amount(rec['tp_prices'][0], chat_id)} | TP2: {fmt_amount(rec['tp_prices'][1], chat_id)} | TP3: {fmt_amount(rec['tp_prices'][2], chat_id)}\n"
-                    f"{DIVIDER}\n"
-                )
-            chunks = split_long_message(rtl_lines(text))
-            if chunks:
-                await query.edit_message_text(
-                    chunks[0],
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")]]),
-                    parse_mode="Markdown"
-                )
+        back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")]])
+        try:
+            open_signals = [r for r in signal_history if r.get("status") == "open"]
+            open_signals.sort(key=lambda r: r.get("timestamp", 0), reverse=True)
+            if not open_signals:
+                text = "📡 *سیگنال‌های فعال*\n\nدر حال حاضر هیچ سیگنال بازی وجود ندارد."
+                await query.edit_message_text(rtl_lines(text), reply_markup=back_kb, parse_mode="Markdown")
+            else:
+                text = f"📡 *سیگنال‌های فعال* ({len(open_signals)} مورد)\n" + DIVIDER + "\n"
+                for rec in open_signals:
+                    direction_emoji = "🟢" if rec.get("direction") == "LONG" else "🔴"
+                    mode_label = MODE_CONFIGS.get(rec.get("mode"), MODE_CONFIGS["standard"])["label"]
+                    tp_prices = rec.get("tp_prices") or [0, 0, 0]
+                    text += (
+                        f"{rec.get('symbol', '?')} | {rec.get('direction', '?')} {direction_emoji} | {mode_label}\n"
+                        f"   اطمینان: {rec.get('confidence', 0):.0f}٪ | RR: {rec.get('rr', 0):.2f}\n"
+                        f"   ورود: {fmt_amount(rec.get('entry_price', 0), chat_id)}\n"
+                        f"   SL: {fmt_amount(rec.get('sl_price', 0), chat_id)}\n"
+                        f"   TP1: {fmt_amount(tp_prices[0], chat_id)} | TP2: {fmt_amount(tp_prices[1], chat_id)} | TP3: {fmt_amount(tp_prices[2], chat_id)}\n"
+                        f"{DIVIDER}\n"
+                    )
+                chunks = split_long_message(rtl_lines(text))
+                await query.edit_message_text(chunks[0], reply_markup=back_kb, parse_mode="Markdown")
                 for chunk in chunks[1:]:
                     await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="Markdown")
-            else:
-                await query.edit_message_text(
-                    "📡 *سیگنال‌های فعال*\n\nهیچ سیگنالی یافت نشد.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="menu_coins")]]),
-                    parse_mode="Markdown"
-                )
-        set_interactive_screen(chat_id, [query.message.message_id])
+            set_interactive_screen(chat_id, [query.message.message_id])
+        except Exception as e:
+            logger.exception("active_signals_all error: %s", e)
+            await query.edit_message_text(f"❌ خطا در نمایش سیگنال‌های فعال: {type(e).__name__}", reply_markup=back_kb)
         return
 
 def format_technical_details(code, plan, ind, chat_id):
@@ -4528,6 +4674,29 @@ async def post_init(app):
     app.create_task(channel_signal_monitor_loop(app))
     logger.info("Signal Bot V62 (Channel: یک سیگنال معتبر به‌ازای هر ارز + پایش مستقل TP/SL) started")
 
+async def global_error_handler(update, context):
+    """
+    اصلاح مهم: قبلاً هیچ error handler سراسری ثبت نشده بود. یعنی اگر داخل هر کدام از
+    handlerها (مثلاً button_handler) یک استثنای پیش‌بینی‌نشده رخ می‌داد (KeyError روی یک
+    رکورد قدیمی، تایم‌اوت شبکه و ...)، کاربر هیچ پیامی نمی‌دید و دکمه از دید او «اصلاً کار
+    نمی‌کرد» — دقیقاً همان رفتاری که باعث سردرگمی در باگ «دکمه سیگنال‌های فعال» هم شده بود.
+    این تابع (۱) خطا را کامل با traceback لاگ می‌کند تا در آینده مشکل‌یابی ممکن باشد و
+    (۲) در صورت امکان یک پیام کوتاه به کاربر نشان می‌دهد تا حداقل بداند خطایی رخ داده،
+    نه اینکه فکر کند ربات هنگ کرده.
+    """
+    logger.error("Unhandled exception while processing update: %s", update, exc_info=context.error)
+    try:
+        if isinstance(update, object) and getattr(update, "callback_query", None):
+            await update.callback_query.answer("❌ خطای غیرمنتظره‌ای رخ داد. لطفاً دوباره تلاش کنید.", show_alert=True)
+        elif isinstance(update, object) and getattr(update, "effective_chat", None):
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ خطای غیرمنتظره‌ای رخ داد. لطفاً دوباره تلاش کنید یا از /menu استفاده کنید."
+            )
+    except Exception:
+        # حتی اگر اطلاع‌رسانی به کاربر هم ناموفق بود، دیگر بالاتر از این‌جا نباید propagate شود
+        logger.exception("Failed to notify user about the original error.")
+
 def main():
     global app
     if not BOT_TOKEN:
@@ -4544,6 +4713,7 @@ def main():
     app.add_handler(CommandHandler("news", news))
     app.add_handler(CommandHandler("report", periodic_report_command))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_error_handler(global_error_handler)
     logger.info("Bot is running...")
     app.run_polling()
 
