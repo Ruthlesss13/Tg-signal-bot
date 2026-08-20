@@ -1868,6 +1868,20 @@ async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False,
             logger.info(f"Confidence too low for {code}: {confidence:.1f} < {effective_min_confidence}")
             return None
 
+        # اصلاح مهم (بخشی از بررسی سخت‌گیری هر ۴ حالت): با ۲۰ لایه، از نظر ریاضی ممکن
+        # بود یک سیگنال فقط با تجمیع تعداد زیادی لایه‌ی «کم‌اهمیت» (وزن ۱ تا ۴، مثل
+        # StochRSI/CCI/Williams %R/شکست/باند بولینگر) هم به حداقل تعداد لایه (min_confirmations)
+        # و هم به حداقل اطمینان وزنی (MIN_SIGNAL_CONFIDENCE) برسد، بدون این‌که حتی یکی از
+        # مهم‌ترین لایه‌های «بنیادین» (ساختار بازار، هم‌گرایی تایم‌فریم، مومنتوم، آرایش EMA)
+        # تایید شده باشد. چنین سیگنالی از نظر آماری موجه است ولی از نظر تحلیلی ضعیف و
+        # مصداق «سیگنال کاذب» است. الان حداقل ۲ مورد از این ۴ لایه‌ی بنیادین باید تایید
+        # شده باشند، وگرنه سیگنال (چه شخصی چه کانال) صادر نمی‌شود.
+        CORE_LAYERS = ("structure", "mtf", "momentum", "ema_stack")
+        core_confirmed = sum(1 for l in CORE_LAYERS if layers.get(l, False))
+        if core_confirmed < 2:
+            logger.info(f"Core layers insufficient for {code}: only {core_confirmed}/4 ({CORE_LAYERS}) confirmed")
+            return None
+
         if send_to_channel and ind.get("adx", 0) < effective_adx_min:
             logger.info(f"ADX too low for channel signal {code}: {ind.get('adx', 0):.1f} < {effective_adx_min}")
             return None
@@ -3845,23 +3859,38 @@ async def whale_monitor_loop(app):
                     symbol = alert["symbol"]
                     flow = alert["flow_type"]
                     value_usd = alert.get("value_usd", 0)
-                    from_addr = escape_markdown(alert.get("from_address", "نامشخص"))
-                    to_addr = escape_markdown(alert.get("to_address", "نامشخص"))
-                    from_owner = escape_markdown(alert.get("from_owner", "ناشناس"))
-                    to_owner = escape_markdown(alert.get("to_owner", "ناشناس"))
                     whale_emoji = "🐋" if amount > 2000 else "🐳"
-                    text = (
-                        f"{whale_emoji} *حرکت نهنگ بزرگ*\n"
-                        f"💰 مقدار: **{amount:,.0f} {symbol}** (~{value_usd:,.0f} دلار)\n"
-                        f"🔗 شبکه: {symbol}\n"
-                        f"📌 از آدرس: `{from_addr}`\n"
-                        f"📌 به آدرس: `{to_addr}`\n"
-                        f"🏷️ برچسب مبدأ: {from_owner}\n"
-                        f"🏷️ برچسب مقصد: {to_owner}\n"
-                        f"📊 نوع تراکنش: {flow}\n"
-                        f"📈 تأثیر احتمالی: {impact}\n"
-                        f"🕒 {shamsi_now()}"
-                    )
+
+                    # اصلاح طبق درخواست: قبلاً حتی وقتی منبع رایگان (blockchain.info)
+                    # اطلاعاتی برای آدرس/برچسب مبدأ-مقصد نداشت، این خطوط با مقدار ثابت
+                    # «نامشخص»/«ناشناس» چاپ می‌شدن که پیام رو ناقص و گیج‌کننده نشون می‌داد.
+                    # الان فقط فیلدهایی که واقعاً مقدار معتبر دارن (نه مقادیر placeholder)
+                    # توی پیام نمایش داده می‌شن.
+                    lines = [
+                        f"{whale_emoji} *حرکت نهنگ بزرگ*",
+                        f"💰 مقدار: **{amount:,.0f} {symbol}** (~{value_usd:,.0f} دلار)",
+                        f"🔗 شبکه: {symbol}",
+                    ]
+                    from_addr = alert.get("from_address", "")
+                    to_addr = alert.get("to_address", "")
+                    from_owner = alert.get("from_owner", "")
+                    to_owner = alert.get("to_owner", "")
+                    if from_addr and from_addr != "مشخص نیست":
+                        lines.append(f"📌 از آدرس: `{escape_markdown(from_addr)}`")
+                    if to_addr and to_addr != "مشخص نیست":
+                        lines.append(f"📌 به آدرس: `{escape_markdown(to_addr)}`")
+                    if from_owner and from_owner != "ناشناس":
+                        lines.append(f"🏷️ برچسب مبدأ: {escape_markdown(from_owner)}")
+                    if to_owner and to_owner != "ناشناس":
+                        lines.append(f"🏷️ برچسب مقصد: {escape_markdown(to_owner)}")
+                    if flow and flow != "نامشخص":
+                        lines.append(f"📊 نوع تراکنش: {flow}")
+                    lines.append(f"📈 تأثیر احتمالی: {impact}")
+                    if flow == "نامشخص" or not from_owner or from_owner == "ناشناس":
+                        # توضیح شفاف برای کاربر که چرا جزئیات کامل نیست، به‌جای سکوت یا مقدار جعلی
+                        lines.append("ℹ️ این هشدار از منبع رایگان دریافت شده و اطلاعات صرافی مبدأ/مقصد ندارد.")
+                    lines.append(f"🕒 {shamsi_now()}")
+                    text = "\n".join(lines)
                     add_news_alert(text, importance="high", impact=impact, details=alert)
                     # اصلاح باگ: قبلاً فقط آخرین آیتم news_history به کانال ارسال می‌شد،
                     # یعنی اگه در یک دور چند هشدار جدید اضافه می‌شد، بقیه هیچ‌وقت به
