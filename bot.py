@@ -227,7 +227,7 @@ CHANNEL_CHECK_INTERVAL_SECONDS = 20 * 60       # هر ۲۰ دقیقه یک دو�
 CHANNEL_REOPEN_COOLDOWN_SECONDS = 45 * 60      # بعد از بسته‌شدن یک سیگنال، حداقل فاصله تا سیگنال بعدی همان ارز
 CHANNEL_MIN_SIGNAL_CONFIDENCE = 78             # قبلاً 68 — حداقل اطمینان برای انتشار در کانال
 CHANNEL_MIN_DIRECTION_GAP = 25                 # قبلاً 18 — اختلاف امتیاز لانگ/شورت باید کاملاً واضح باشد
-CHANNEL_MIN_CONFIRMATIONS_BONUS = 1            # لایه تاییدی اضافه نسبت به حداقل حالت پایه (که خودش بالا رفته)
+CHANNEL_MIN_CONFIRMATIONS_BONUS = 2            # لایه تاییدی اضافه نسبت به حداقل حالت پایه (متناسب با ۲۰ لایه، قبلاً 1 بود روی مبنای ۱۰ لایه)
 CHANNEL_ADX_MIN = 22                           # قبلاً 20 — فقط در بازار با روند نسبتاً قوی سیگنال کانال صادر شود
 
 MODE_CONFIGS = {
@@ -241,7 +241,7 @@ MODE_CONFIGS = {
         "max_leverage": 10,
         "min_rr": 1.00,          # قبلاً 0.50
         "adx_min": 8,            # قبلاً 5
-        "min_confirmations": 5,  # قبلاً 3 (تقریباً معادل سخت‌گیری «استاندارد» قدیم)
+        "min_confirmations": 9,  # قبلاً 5 از ۱۰ لایه؛ حالا از ۲۰ لایه (تناسب حفظ شد)
         "check_interval": 5 * 60,
     },
     "semi_fast": {
@@ -254,7 +254,7 @@ MODE_CONFIGS = {
         "max_leverage": 7,
         "min_rr": 1.30,          # قبلاً 0.80
         "adx_min": 11,           # قبلاً 7
-        "min_confirmations": 6,  # قبلاً 4
+        "min_confirmations": 11,  # قبلاً 6 از ۱۰ لایه؛ حالا از ۲۰ لایه
         "check_interval": 10 * 60,
     },
     "standard": {
@@ -267,7 +267,7 @@ MODE_CONFIGS = {
         "max_leverage": 5,
         "min_rr": 1.60,          # قبلاً 1.20
         "adx_min": 14,           # قبلاً 8
-        "min_confirmations": 7,  # قبلاً 5
+        "min_confirmations": 13,  # قبلاً 7 از ۱۰ لایه؛ حالا از ۲۰ لایه
         "check_interval": 30 * 60,
     },
     "conservative": {
@@ -280,7 +280,7 @@ MODE_CONFIGS = {
         "max_leverage": 3,
         "min_rr": 2.00,          # قبلاً 1.50
         "adx_min": 18,           # قبلاً 10
-        "min_confirmations": 8,  # قبلاً 6
+        "min_confirmations": 15,  # قبلاً 8 از ۱۰ لایه؛ حالا از ۲۰ لایه
         "check_interval": 60 * 60,
     },
 }
@@ -293,16 +293,28 @@ MIN_TP_PERCENTAGES = {
 }
 
 LAYER_WEIGHTS = {
-    "structure": 15,
-    "mtf": 15,
-    "momentum": 15,
-    "volume": 10,
-    "sentiment": 10,
-    "trend": 10,
-    "order_flow": 10,
-    "breadth": 5,
-    "smart_vol": 5,
-    "comp_trend": 5,
+    # --- ۱۰ لایه‌ی اصلی قبلی (وزن‌ها کمی کاهش یافت تا جا برای لایه‌های جدید باز شود) ---
+    "structure": 10,
+    "mtf": 10,
+    "momentum": 10,
+    "volume": 6,
+    "sentiment": 6,
+    "trend": 6,
+    "order_flow": 6,
+    "breadth": 4,
+    "smart_vol": 4,
+    "comp_trend": 6,
+    # --- ۱۰ لایه‌ی جدید (طبق درخواست: افزایش از ۱۰ به ۲۰، مبتنی بر اندیکاتورهای مهم) ---
+    "rsi_zone": 5,          # RSI در محدوده‌ی سالم روند (نه در اشباع خرید/فروش)
+    "stoch_rsi": 3,         # تایید مومنتوم کوتاه‌مدت با StochRSI
+    "cci_confirm": 3,       # هم‌جهتی CCI
+    "williams_r": 3,        # هم‌جهتی Williams %R
+    "ema_stack": 5,         # آرایش کامل EMA20/50/200 (مهم‌ترین لایه‌ی جدید)
+    "vwap_confirm": 4,      # قیمت نسبت به VWAP (معیار نهادی)
+    "breakout_confirm": 3,  # شکست واقعی سقف/کف اخیر
+    "bb_position": 3,       # موقعیت در باند بولینگر
+    "volatility_sane": 2,   # نوسان غیرعادی/بیش‌ازحد نباشد
+    "no_counter_div": 1,    # واگرایی خلاف جهت سیگنال شکل نگرفته باشد
 }
 
 LAYER_NAMES = {
@@ -316,6 +328,16 @@ LAYER_NAMES = {
     "breadth": "تنوع بازار",
     "smart_vol": "نوسان‌پذیری",
     "comp_trend": "قدرت روند",
+    "rsi_zone": "محدوده RSI",
+    "stoch_rsi": "StochRSI",
+    "cci_confirm": "CCI",
+    "williams_r": "Williams %R",
+    "ema_stack": "آرایش EMA",
+    "vwap_confirm": "موقعیت نسبت به VWAP",
+    "breakout_confirm": "شکست قیمتی",
+    "bb_position": "موقعیت باند بولینگر",
+    "volatility_sane": "نوسان منطقی (ATR)",
+    "no_counter_div": "نبود واگرایی مخالف",
 }
 
 @dataclass
@@ -1689,6 +1711,59 @@ async def analyze_layers(code, direction, ind, mode, cache_obj, order_flow=None)
     else:
         results["comp_trend"] = ind["minus_di"] > ind["plus_di"]
 
+    # ==================== ۱۰ لایه‌ی جدید (تا رسیدن به ۲۰ لایه) ====================
+    # طبق درخواست: مبتنی بر اندیکاتورهای مهمی که از قبل محاسبه می‌شدند ولی هیچ‌کدام
+    # به‌عنوان یک لایه‌ی مستقل امتیازدهی نمی‌شدند (RSI، EMA stack، VWAP، CCI،
+    # Williams %R، StochRSI، شکست قیمتی، موقعیت باند بولینگر، نوسان، واگرایی).
+
+    rsi_val = ind["rsi"]
+    if direction == "LONG":
+        # روند سالم صعودی: RSI بالای ۵۰ ولی هنوز در اشباع خرید افراطی نیست
+        results["rsi_zone"] = 50 < rsi_val < 75
+    else:
+        results["rsi_zone"] = 25 < rsi_val < 50
+
+    stoch_k = ind.get("stoch_k", 50)
+    results["stoch_rsi"] = stoch_k > 50 if direction == "LONG" else stoch_k < 50
+
+    cci_val = ind.get("cci", 0)
+    results["cci_confirm"] = cci_val > 0 if direction == "LONG" else cci_val < 0
+
+    williams_val = ind.get("williams_r", -50)
+    # محدوده‌ی Williams %R بین ۰ و ۱۰۰-‌ است؛ بالای ۵۰- یعنی مومنتوم رو به بالا
+    results["williams_r"] = williams_val > -50 if direction == "LONG" else williams_val < -50
+
+    # آرایش کامل میانگین‌های متحرک — مهم‌ترین لایه‌ی جدید؛ فقط وقتی هر سه EMA
+    # به ترتیب درست چیده شده باشند تایید می‌شود (نه صرفاً یکی دو تا).
+    price = ind["price"]
+    ema20, ema50, ema200 = ind["ema20"], ind["ema50"], ind["ema200"]
+    if direction == "LONG":
+        results["ema_stack"] = price > ema20 > ema50 > ema200
+    else:
+        results["ema_stack"] = price < ema20 < ema50 < ema200
+
+    results["vwap_confirm"] = ind["price_above_vwap"] if direction == "LONG" else not ind["price_above_vwap"]
+
+    results["breakout_confirm"] = ind["breakout_up"] if direction == "LONG" else ind["breakout_down"]
+
+    bb_pct = ind.get("bb_percent", 0.5)
+    # موقعیت در باند بولینگر: برای لانگ باید در نیمه‌ی بالایی (نه در سقف کامل باند)،
+    # برای شورت در نیمه‌ی پایینی باشد (نه در کف کامل باند که ممکن است برگشت بخورد).
+    if direction == "LONG":
+        results["bb_position"] = 0.45 <= bb_pct <= 0.95
+    else:
+        results["bb_position"] = 0.05 <= bb_pct <= 0.55
+
+    atr_pct = ind.get("atr_pct", 1.0)
+    # نوسان خیلی پایین (بازار خواب) یا خیلی بالا (نامنظم/خطرناک برای حد ضرر) رد می‌شود.
+    results["volatility_sane"] = 0.15 <= atr_pct <= 8.0
+
+    # واگرایی خلاف جهت سیگنال نباید شکل گرفته باشد (هشدار برگشت روند زودهنگام)
+    if direction == "LONG":
+        results["no_counter_div"] = not (ind.get("bearish_div") or ind.get("macd_bearish_div"))
+    else:
+        results["no_counter_div"] = not (ind.get("bullish_div") or ind.get("macd_bullish_div"))
+
     return results
 
 # ---------- تولید سیگنال جدید ----------
@@ -2095,7 +2170,7 @@ def format_main_signal_v2(plan, code, chat_id):
         f"🕒 {shamsi_now()}\n"
         f"🛠️ حالت: {mode_label} | درجه: {plan.signal_grade}\n"
         f"{DIVIDER}\n"
-        f"🧩 *تحلیل ۱۰ لایه‌ای:*\n{layers_text}\n"
+        f"🧩 *تحلیل ۲۰ لایه‌ای:*\n{layers_text}\n"
         f"🎯 *اطمینان:* {plan.confidence:.0f}٪ ({confidence_badge(plan.confidence)})\n"
         f"📊 *نرخ موفقیت:* {plan.win_rate_estimate:.1f}٪\n"
         f"📐 *نسبت ریسک به بازده:* 1:{plan.rr:.2f}\n"
@@ -2142,12 +2217,12 @@ def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, sh
     if plan and plan.layer_results:
         confirmed = sum(1 for v in plan.layer_results.values() if v)
         total_weight = sum(LAYER_WEIGHTS.get(layer, 0) for layer, ok in plan.layer_results.items() if ok)
-        layers_summary = "📋 *خلاصه تحلیل لایه‌ها (۱۰ لایه):*\n"
+        layers_summary = "📋 *خلاصه تحلیل لایه‌ها (۲۰ لایه):*\n"
         for layer, ok in plan.layer_results.items():
             emoji = "✅" if ok else "❌"
             weight = LAYER_WEIGHTS.get(layer, 0)
             layers_summary += f"{emoji} {LAYER_NAMES.get(layer, layer)} (وزن: {weight}%)\n"
-        layers_summary += f"\n💡 *جمع‌بندی:* {confirmed} از ۱۰ لایه تأیید شد | امتیاز وزنی: {total_weight}%"
+        layers_summary += f"\n💡 *جمع‌بندی:* {confirmed} از ۲۰ لایه تأیید شد | امتیاز وزنی: {total_weight}%"
     else:
         if long_layers is not None and short_layers is not None:
             long_confirmed = sum(1 for v in long_layers.values() if v)
@@ -3527,7 +3602,7 @@ def help_text(step):
         return rtl_lines(
             "📖 *شروع کار با ربات*\n"
             f"{DIVIDER}\n"
-            "این ربات با تحلیل ۱۰ لایه‌ای، سیگنال‌های معاملاتی فیوچرز تولید می‌کند.\n"
+            "این ربات با تحلیل ۲۰ لایه‌ای، سیگنال‌های معاملاتی فیوچرز تولید می‌کند.\n"
             "پس از شروع، ابتدا واحد پولی را انتخاب کنید.\n"
             "سپس سبک معاملاتی خود را از چهار حالت انتخاب کنید.\n"
             "در نهایت منوی اصلی نمایش داده می‌شود."
@@ -3552,9 +3627,9 @@ def help_text(step):
         )
     elif step == 3:
         return rtl_lines(
-            "📊 *تحلیل‌ها و سیگنال‌ها (۱۰ لایه)*\n"
+            "📊 *تحلیل‌ها و سیگنال‌ها (۲۰ لایه)*\n"
             f"{DIVIDER}\n"
-            "سیگنال‌ها بر اساس ۱۰ لایه تحلیل تولید می‌شوند:\n"
+            "سیگنال‌ها بر اساس ۲۰ لایه تحلیل تولید می‌شوند:\n"
             "۱. ساختار بازار | ۲. هم‌گرایی تایم‌فریم | ۳. مومنتوم\n"
             "۴. حجم معاملات | ۵. احساسات بازار (جایگزین فاندینگ)\n"
             "۶. روند | ۷. جریان سفارشات | ۸. تنوع بازار\n"
@@ -3609,7 +3684,7 @@ def welcome_text():
     return rtl_lines(
         "🌟✨ *به سیگنال‌یار حرفه‌ای خوش آمدید!* ✨🌟\n"
         f"{DIVIDER}\n"
-        "🤖 *ربات معاملاتی هوشمند* با تحلیل ۱۰ لایه‌ای\n"
+        "🤖 *ربات معاملاتی هوشمند* با تحلیل ۲۰ لایه‌ای\n"
         "🎯 *سیگنال‌های لحظه‌ای* با دقت بالا و مدیریت ریسک پویا\n"
         "📊 *تحلیل جامع ارزها* در تایم‌فریم‌های مختلف\n"
         "🔔 *اخبار نهنگ‌ها و رویدادهای مهم* به‌صورت خودکار\n"
