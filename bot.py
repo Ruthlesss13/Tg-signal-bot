@@ -226,9 +226,9 @@ CHANNEL_SIGNAL_MODE = "standard"
 CHANNEL_CHECK_INTERVAL_SECONDS = 20 * 60       # هر ۲۰ دقیقه یک دور بررسی کامل روی همه ارزها
 CHANNEL_REOPEN_COOLDOWN_SECONDS = 45 * 60      # بعد از بسته‌شدن یک سیگنال، حداقل فاصله تا سیگنال بعدی همان ارز
 CHANNEL_MIN_SIGNAL_CONFIDENCE = 78             # قبلاً 68 — حداقل اطمینان برای انتشار در کانال
-CHANNEL_MIN_DIRECTION_GAP = 25                 # قبلاً 18 — اختلاف امتیاز لانگ/شورت باید کاملاً واضح باشد
+CHANNEL_MIN_DIRECTION_GAP = 20                 # قبلاً 18 — اختلاف امتیاز لانگ/شورت باید کاملاً واضح باشد
 CHANNEL_MIN_CONFIRMATIONS_BONUS = 2            # لایه تاییدی اضافه نسبت به حداقل حالت پایه (متناسب با ۲۰ لایه، قبلاً 1 بود روی مبنای ۱۰ لایه)
-CHANNEL_ADX_MIN = 22                           # قبلاً 20 — فقط در بازار با روند نسبتاً قوی سیگنال کانال صادر شود
+CHANNEL_ADX_MIN = 18                           # قبلاً 20 — فقط در بازار با روند نسبتاً قوی سیگنال کانال صادر شود
 
 MODE_CONFIGS = {
     "fast": {
@@ -375,6 +375,7 @@ class TradePlan:
     layer_results: dict = field(default_factory=dict)
     signal_grade: str = ""
     adx_at_time: float = 0.0
+    early_entry: bool = False
     rsi_at_time: float = 0.0
     market_condition: str = ""
     rr: float = 0.0
@@ -962,6 +963,37 @@ price_sources = {}
 last_mode_broadcast_time = {}
 
 # ---------- توابع کمکی ----------
+def detect_early_entry(df):
+    """Detect an EMA(fast/slow) or MACD/signal cross within the last 3 closed candles.
+    Returns 'LONG', 'SHORT', or None."""
+    try:
+        if df is None or len(df) < 4:
+            return None
+        recent = df.iloc[-4:]
+        e_fast = recent['ema20'].values
+        e_slow = recent['ema50'].values
+        m = recent['macd'].values
+        s = recent['macd_signal'].values
+        long_cross = short_cross = False
+        for i in range(1, len(recent)):
+            if e_fast[i-1] <= e_slow[i-1] and e_fast[i] > e_slow[i]:
+                long_cross = True
+            if e_fast[i-1] >= e_slow[i-1] and e_fast[i] < e_slow[i]:
+                short_cross = True
+            if m[i-1] <= s[i-1] and m[i] > s[i]:
+                long_cross = True
+            if m[i-1] >= s[i-1] and m[i] < s[i]:
+                short_cross = True
+        if long_cross and not short_cross:
+            return 'LONG'
+        if short_cross and not long_cross:
+            return 'SHORT'
+        return None
+    except Exception:
+        return None
+
+
+
 def is_allowed(user_id):
     if user_id in ALWAYS_ALLOWED_USER_IDS or user_id in ADMIN_USER_IDS:
         return True
@@ -1175,7 +1207,7 @@ async def fetch_cryptopanic_news():
                 "title": escape_markdown(title[:100]),
                 "impact": impact,
                 "source": "CryptoPanic",
-                "url": item.get("url", ""),
+                "url": item.get("url", "") if isinstance(item.get("url", ""), str) and item.get("url", "").strip().startswith("http") else "",
                 "timestamp": time.time()
             })
         return news_list
@@ -1272,11 +1304,15 @@ async def fetch_important_news():
     crypto_news = await fetch_cryptopanic_news()
     for item in crypto_news:
         text = f"📰 *{item['title']}*\n📈 تأثیر: {item['impact']}\n📌 منبع: {item['source']}"
+        news_url = item.get("url", "")
+        if isinstance(news_url, str) and news_url.strip().startswith("http"):
+            text += f"\n🔗 لینک: {news_url.strip()}"
         all_news.append({
             "text": text,
             "importance": "high",
             "impact": item["impact"],
             "source": "crypto",
+            "url": news_url.strip() if isinstance(news_url, str) and news_url.strip().startswith("http") else "",
             "timestamp": item["timestamp"]
         })
     return all_news
@@ -1876,14 +1912,33 @@ async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False,
         # تایید شده باشد. چنین سیگنالی از نظر آماری موجه است ولی از نظر تحلیلی ضعیف و
         # مصداق «سیگنال کاذب» است. الان حداقل ۲ مورد از این ۴ لایه‌ی بنیادین باید تایید
         # شده باشند، وگرنه سیگنال (چه شخصی چه کانال) صادر نمی‌شود.
+        # Early-entry detection uses the same main-timeframe cache entry as analyze_layers.
+        early_entry = False
+        try:
+            df_early = cache.ohlcv.get(config["main_tf"], {}).get(code)
+            if df_early is not None:
+                df_early = df_early.copy()
+                close_early = df_early["close"]
+                df_early["ema20"] = EMAIndicator(close_early, window=20).ema_indicator()
+                df_early["ema50"] = EMAIndicator(close_early, window=50).ema_indicator()
+                macd_early = MACD(close_early, window_slow=26, window_fast=12, window_sign=9)
+                df_early["macd"] = macd_early.macd()
+                df_early["macd_signal"] = macd_early.macd_signal()
+                early_dir = detect_early_entry(df_early)
+                early_entry = (early_dir == direction)
+        except Exception as e:
+            logger.debug(f"Early-entry detection unavailable for {code}: {e}")
+            early_entry = False
+
         CORE_LAYERS = ("structure", "mtf", "momentum", "ema_stack")
         core_confirmed = sum(1 for l in CORE_LAYERS if layers.get(l, False))
-        if core_confirmed < 2:
+        if core_confirmed < (2 - (1 if early_entry else 0)):
             logger.info(f"Core layers insufficient for {code}: only {core_confirmed}/4 ({CORE_LAYERS}) confirmed")
             return None
 
-        if send_to_channel and ind.get("adx", 0) < effective_adx_min:
-            logger.info(f"ADX too low for channel signal {code}: {ind.get('adx', 0):.1f} < {effective_adx_min}")
+        adx_floor = effective_adx_min - (3 if early_entry else 0)
+        if send_to_channel and ind.get("adx", 0) < adx_floor:
+            logger.info(f"ADX too low for channel signal {code}: {ind.get('adx', 0):.1f} < {adx_floor}")
             return None
 
         levels = build_ladder_weighted(ind, direction, mode)
@@ -1950,6 +2005,7 @@ async def generate_trade_plan_v2(code, mode="standard", send_to_channel=False,
             timestamp=time.time(),
             mode=mode,
             layer_results=layers,
+            early_entry=early_entry,
             signal_grade=grade,
             adx_at_time=ind["adx"],
             rsi_at_time=ind["rsi"],
@@ -2205,6 +2261,8 @@ def format_main_signal_v2(plan, code, chat_id):
         f"{DIVIDER}\n"
         f"⚠️ تحلیل تکنیکال است و تضمین سود یا توصیه مالی نیست."
     )
+    if fg_value is not None:
+        text += f"🧭 شاخص ترس و طمع: {fg_value} ({fg_class if fg_class else '-'})\n"
     return rtl_lines(text)
 
 def format_status_dashboard(code, ind, plan, chat_id, mode, long_layers=None, short_layers=None):
@@ -2413,7 +2471,6 @@ async def generate_weekly_summary_async(code, chat_id):
         text += f"• حجم کل بازار: {macro_data.get('total_volume', 0):.0f}\n"
     text += (
         f"\n{DIVIDER}\n"
-        f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
         f"{DIVIDER}\nℹ️ داده‌ها از Gate.io (اصلی)، کوکوین اسپات و CoinGecko (پشتیبان) محاسبه شده‌اند."
     )
     return rtl_lines(text)
@@ -2528,6 +2585,8 @@ async def send_signal_to_channel(plan, signal_id):
             f"🕒 {shamsi_now()}"
             f"{footer_note}"
         )
+        if getattr(plan, "early_entry", False):
+            text += "\n⚡️ ورود زودهنگام (Early Entry)"
         try:
             msg = await app.bot.send_message(chat_id=CHANNEL_ID, text=rtl_lines(text), parse_mode="Markdown")
             channel_message_map[key] = {
@@ -2753,20 +2812,23 @@ async def channel_broadcast_loop(app):
 CHANNEL_MONITOR_INTERVAL_SECONDS = int(os.getenv("CHANNEL_MONITOR_INTERVAL_SECONDS", "90"))
 
 # ---------- هشدار تغییر روند برای سیگنال‌های در حال سود (بعد از TP1/TP2) ----------
+last_known_direction = {}
+
 def check_trend_reversed(ind, original_direction):
     """
-    بررسی محافظه‌کارانه‌ی «تغییر روند»: فقط وقتی هر سه شاخص اصلیِ روند (قیمت نسبت به
-    EMA200)، مومنتوم (MACD Histogram) و جهت‌ حرکت (DI+/DI-) هم‌زمان برخلاف جهت اولیه‌ی
-    سیگنال شده باشند، تغییر روند تایید می‌شود — تا هشدار کاذب از نوسان یک اندیکاتور
-    به‌تنهایی صادر نشود.
+    بررسی محافظه‌کارانه‌ی «تغییر روند»: وقتی حداقل دو شاخص از سه شاخص اصلیِ روند
+    (قیمت نسبت به EMA200)، مومنتوم (MACD Histogram) و جهت‌ حرکت (DI+/DI-) برخلاف جهت
+    اولیه‌ی سیگنال شده باشند، تغییر روند تایید می‌شود.
     """
     price_above_ema200 = ind.get("price_above_ema200", True)
     macd_bullish = ind.get("macd_hist", 0) > 0
     di_bullish = ind.get("plus_di", 0) > ind.get("minus_di", 0)
-    if original_direction == "LONG":
-        return (not price_above_ema200) and (not macd_bullish) and (not di_bullish)
-    else:
-        return price_above_ema200 and macd_bullish and di_bullish
+    conditions = [
+        not price_above_ema200 if original_direction == "LONG" else price_above_ema200,
+        not macd_bullish if original_direction == "LONG" else macd_bullish,
+        not di_bullish if original_direction == "LONG" else di_bullish,
+    ]
+    return sum(conditions) >= 2
 
 def build_trend_reversal_text(rec):
     direction_fa = "لانگ 🟢" if rec["direction"] == "LONG" else "شورت 🔴"
@@ -2805,6 +2867,11 @@ async def send_trend_reversal_warning(rec):
         return
     signal_id = rec.get("signal_id")
     original_message_id = channel_signal_messages.get(signal_id)
+    symbol = rec.get("symbol")
+    direction = rec.get("direction")
+    if last_known_direction.get(symbol) == direction:
+        rec["reversal_warned"] = True
+        return
     text = build_trend_reversal_text(rec)
     try:
         try:
@@ -2821,6 +2888,7 @@ async def send_trend_reversal_warning(rec):
             else:
                 raise
         rec["reversal_warned"] = True
+        last_known_direction[symbol] = direction
         save_state()
         logger.info(f"Trend reversal warning sent for {rec.get('symbol')} (signal_id {signal_id})")
     except Exception as e:
@@ -2842,20 +2910,21 @@ async def channel_signal_monitor_loop(app):
                 if not current_price:
                     continue
                 try:
+                    entry = channel_message_map.get(code)
+                    rec = next((r for r in signal_history if r.get("signal_id") == entry.get("signal_id")), None) if entry else None
+                    rec_status_before_update = rec.get("status") if rec else None
+                    rec_reversal_warned = bool(rec.get("reversal_warned")) if rec else False
                     changed = update_signal_status(code, current_price)
                     for sid in changed:
                         await update_channel_signal_message(sid)
                 except Exception as e:
                     logger.debug(f"Error monitoring channel signal for {code}: {e}")
 
-                # هشدار تغییر روند: فقط برای سیگنال‌هایی که هنوز باز هستند و قبلاً حداقل
-                # TP1 را زده‌اند (یعنی الان در سود هستند)، و فقط یک‌بار به‌ازای هر سیگنال.
+                # هشدار تغییر روند: مستقل از بروزرسانی وضعیت همین چرخه، برای سیگنال‌هایی که
+                # هنوز به TP1/TP2 رسیده بودند بررسی می‌شود تا اگر هم‌زمان به TP3/SL رفتند،
+                # هشدار از دست نرود.
                 try:
-                    entry = channel_message_map.get(code)
-                    if not entry:
-                        continue
-                    rec = next((r for r in signal_history if r.get("signal_id") == entry.get("signal_id")), None)
-                    if not rec or rec.get("status") not in ("tp1_hit", "tp2_hit") or rec.get("reversal_warned"):
+                    if not rec or rec_status_before_update not in ("tp1_hit", "tp2_hit") or rec_reversal_warned:
                         continue
                     ind = await cache.get_indicators(code, rec.get("mode", "standard"))
                     if not ind:
@@ -3799,7 +3868,11 @@ async def news_monitor_loop(app):
             # ربطی به وجود یا عدم وجود کاربر خصوصی نداره؛ این شرط حذف شد.
             important_news = await fetch_important_news()
             for news in important_news:
-                add_news_alert(news["text"], importance="high", impact=news["impact"], details={"source": news.get("source", "")})
+                news_url = news.get("url", "")
+                details = {"source": news.get("source", "")}
+                if isinstance(news_url, str) and news_url.strip().startswith("http"):
+                    details["url"] = news_url.strip()
+                add_news_alert(news["text"], importance="high", impact=news["impact"], details=details)
                 if news.get("importance") == "high":
                     await send_high_importance_news_to_channel(news["text"])
             await check_and_notify_events(app)
@@ -3855,40 +3928,42 @@ async def whale_monitor_loop(app):
                     # قبول می‌شه، نه فقط اون‌هایی که جهت دقیقشون مشخصه.
                     if not ("نزولی" in impact or "صعودی" in impact or "بررسی" in impact):
                         continue
-                    amount = alert["amount_btc"]
-                    symbol = alert["symbol"]
-                    flow = alert["flow_type"]
-                    value_usd = alert.get("value_usd", 0)
-                    whale_emoji = "🐋" if amount > 2000 else "🐳"
+                    amount = alert.get("amount_btc", alert.get("amount"))
+                    symbol = alert.get("symbol", "")
+                    flow = alert.get("flow_type", alert.get("flow"))
+                    value_usd = alert.get("value_usd")
+                    whale_emoji = "🐋" if isinstance(amount, (int, float)) and amount > 2000 else "🐳"
 
-                    # اصلاح طبق درخواست: قبلاً حتی وقتی منبع رایگان (blockchain.info)
-                    # اطلاعاتی برای آدرس/برچسب مبدأ-مقصد نداشت، این خطوط با مقدار ثابت
-                    # «نامشخص»/«ناشناس» چاپ می‌شدن که پیام رو ناقص و گیج‌کننده نشون می‌داد.
-                    # الان فقط فیلدهایی که واقعاً مقدار معتبر دارن (نه مقادیر placeholder)
-                    # توی پیام نمایش داده می‌شن.
-                    lines = [
-                        f"{whale_emoji} *حرکت نهنگ بزرگ*",
-                        f"💰 مقدار: **{amount:,.0f} {symbol}** (~{value_usd:,.0f} دلار)",
-                        f"🔗 شبکه: {symbol}",
-                    ]
+                    def _valid(v):
+                        if v is None or (isinstance(v, str) and not v.strip()):
+                            return False
+                        if isinstance(v, (int, float)) and v == 0:
+                            return False
+                        return str(v).strip().lower() not in {"unknown", "n/a", "none", "ناشناس", "نامشخص"}
+
+                    lines = [f"{whale_emoji} *حرکت نهنگ بزرگ*"]
+                    if _valid(amount) and _valid(symbol):
+                        lines.append(f"💰 مقدار: **{amount:,.0f} {symbol}**")
+                    if _valid(value_usd):
+                        lines.append(f"💵 ارزش تقریبی: ~{value_usd:,.0f} دلار")
+                    if _valid(symbol):
+                        lines.append(f"🔗 شبکه: {symbol}")
                     from_addr = alert.get("from_address", "")
                     to_addr = alert.get("to_address", "")
                     from_owner = alert.get("from_owner", "")
                     to_owner = alert.get("to_owner", "")
-                    if from_addr and from_addr != "مشخص نیست":
+                    if _valid(from_addr):
                         lines.append(f"📌 از آدرس: `{escape_markdown(from_addr)}`")
-                    if to_addr and to_addr != "مشخص نیست":
+                    if _valid(to_addr):
                         lines.append(f"📌 به آدرس: `{escape_markdown(to_addr)}`")
-                    if from_owner and from_owner != "ناشناس":
+                    if _valid(from_owner):
                         lines.append(f"🏷️ برچسب مبدأ: {escape_markdown(from_owner)}")
-                    if to_owner and to_owner != "ناشناس":
+                    if _valid(to_owner):
                         lines.append(f"🏷️ برچسب مقصد: {escape_markdown(to_owner)}")
-                    if flow and flow != "نامشخص":
+                    if _valid(flow):
                         lines.append(f"📊 نوع تراکنش: {flow}")
-                    lines.append(f"📈 تأثیر احتمالی: {impact}")
-                    if flow == "نامشخص" or not from_owner or from_owner == "ناشناس":
-                        # توضیح شفاف برای کاربر که چرا جزئیات کامل نیست، به‌جای سکوت یا مقدار جعلی
-                        lines.append("ℹ️ این هشدار از منبع رایگان دریافت شده و اطلاعات صرافی مبدأ/مقصد ندارد.")
+                    if _valid(impact):
+                        lines.append(f"📈 تأثیر احتمالی: {impact}")
                     lines.append(f"🕒 {shamsi_now()}")
                     text = "\n".join(lines)
                     add_news_alert(text, importance="high", impact=impact, details=alert)
@@ -3953,8 +4028,9 @@ async def send_periodic_report(app, period="weekly"):
         f"📊 نسبت شارپ: {stats['sharpe']:.2f}\n"
         f"⚠️ ریسک ورشکستگی: {stats['risk_of_ruin']:.1f}%\n"
         f"🎯 میانگین اطمینان سیگنال‌ها: {stats['avg_confidence']:.1f}%\n"
-        f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
     )
+    if fg_value is not None:
+        text += f"🧭 شاخص ترس و طمع: {fg_value} ({fg_class if fg_class else '-'})\n"
     if macro_data:
         text += f"\n📊 *داده‌های کلان بازار:*\n"
         text += f"• سلطه بیت‌کوین: {macro_data.get('btc_dominance', 0):.1f}%\n"
@@ -4129,8 +4205,9 @@ async def status(update, context):
         f"🔁 سیگنال‌های دنبال‌شده (تریلینگ): {active_trailing_count}\n"
         f"📊 کل سیگنال‌های تولیدشده: {TOTAL_SIGNALS_GENERATED}\n"
         f"🕒 آخرین بروزرسانی سیگنال: {last_update_str}\n"
-        f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
     )
+    if fg_value is not None:
+        text += f"🧭 شاخص ترس و طمع: {fg_value} ({fg_class if fg_class else '-'})\n"
     if macro_data:
         text += f"📊 سلطه BTC: {macro_data.get('btc_dominance', 0):.1f}%\n"
     text += (
@@ -4170,8 +4247,9 @@ async def dashboard(update, context):
         f"📊 Sharpe Ratio: {stats['sharpe']:.2f}\n"
         f"⚠️ Risk of Ruin: {stats['risk_of_ruin']:.1f}%\n"
         f"🎯 میانگین اطمینان: {stats['avg_confidence']:.1f}%\n"
-        f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
     )
+    if fg_value is not None:
+        text += f"🧭 شاخص ترس و طمع: {fg_value} ({fg_class if fg_class else '-'})\n"
     if macro_data:
         text += f"📊 سلطه BTC: {macro_data.get('btc_dominance', 0):.1f}%\n"
     text += f"{DIVIDER}\n🕒 آخرین سیگنال‌ها:\n"
@@ -4611,8 +4689,9 @@ async def button_handler(update, context):
             f"📊 Sharpe Ratio: {stats['sharpe']:.2f}\n"
             f"⚠️ Risk of Ruin: {stats['risk_of_ruin']:.1f}%\n"
             f"🎯 میانگین اطمینان: {stats['avg_confidence']:.1f}%\n"
-            f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-        )
+            )
+    if fg_value is not None:
+        text += f"🧭 شاخص ترس و طمع: {fg_value} ({fg_class if fg_class else '-'})\n"
         if macro_data:
             text += f"📊 سلطه BTC: {macro_data.get('btc_dominance', 0):.1f}%\n"
         text += f"{DIVIDER}\n🕒 آخرین سیگنال‌ها:\n"
@@ -4916,8 +4995,9 @@ async def button_handler(update, context):
             f"⚡ سیگنال‌های فعال: {len(last_plans)}\n"
             f"🔁 سیگنال‌های دنبال‌شده: {sum(len(s) for s in active_signals.values())}\n"
             f"📊 کل سیگنال‌ها: {len(signal_history)}\n"
-            f"🧭 شاخص ترس و طمع: {fg_value if fg_value is not None else '-'} ({fg_class if fg_class else '-'})\n"
-        )
+            )
+    if fg_value is not None:
+        text += f"🧭 شاخص ترس و طمع: {fg_value} ({fg_class if fg_class else '-'})\n"
         if macro_data:
             text += f"📊 سلطه BTC: {macro_data.get('btc_dominance', 0):.1f}%\n"
         text += (
