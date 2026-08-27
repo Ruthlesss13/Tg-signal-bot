@@ -21,7 +21,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "2.5.0"
+VERSION = "2.5.1"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 try:
@@ -44,7 +44,7 @@ ADMIN_USER_IDS = {
 }
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 
-# جایگزینی MATIC با UNI (Uniswap) - ارز معتبر و محبوب
+# جایگزینی MATIC با UNI (Uniswap)
 COIN_CODES = [
     "BTC", "ETH", "SOL", "BNB", "XRP",
     "ADA", "DOGE", "AVAX", "LINK", "DOT",
@@ -392,6 +392,24 @@ async def version_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+async def info_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش اطلاعات کامل ربات"""
+    user_id = update.effective_user.id
+    is_adm = user_id in ADMIN_USER_IDS
+    await update.message.reply_text(
+        f"📌 **اطلاعات ربات هوشمند تحلیل ارزهای دیجیتال**\n"
+        f"{DIVIDER}\n"
+        f"🤖 **نسخه:** `{VERSION}`\n"
+        f"📅 **ساخت:** `{BUILD_TIME}`\n"
+        f"🆔 **شناسه:** `{context.bot.id}`\n"
+        f"👤 **وضعیت شما:** {'👑 ادمین' if is_adm else '👤 کاربر عادی'}\n"
+        f"📊 **تعداد ارزهای پشتیبانی:** `{len(COIN_CODES)}`\n"
+        f"🏛 **صرافی فعال:** `{cache.active_exchange_name}`\n"
+        f"{DIVIDER}\n"
+        f"⚡️ *برای شروع از دستور /start استفاده کنید.*",
+        parse_mode="Markdown"
+    )
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     registered_users.add(user_id)
@@ -694,6 +712,7 @@ async def post_init_setup(app: Application):
     commands = [
         BotCommand("start", "شروع و نمایش منو"),
         BotCommand("version", "نمایش نسخه ربات"),
+        BotCommand("info", "اطلاعات کامل ربات"),
         BotCommand("admin", "پنل مدیریت ادمین"),
         BotCommand("stop", "توقف فعالیت ربات"),
     ]
@@ -712,6 +731,7 @@ def main():
 
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("version", version_handler))
+    application.add_handler(CommandHandler("info", info_handler))
     application.add_handler(CommandHandler("admin", admin_command_handler))
     application.add_handler(CommandHandler("stop", stop_command_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
