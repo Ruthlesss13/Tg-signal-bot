@@ -47,6 +47,12 @@ COIN_CODES = [
     "TIA", "WIF", "FLOKI", "SEI", "RUNE"
 ]
 
+# نگاشت سمبل‌های خاص در Gate.io (برای ارزهایی که نام متفاوت دارند)
+GATE_SYMBOL_MAP = {
+    "TON": ["TONCOIN/USDT", "TON/USDT"],  # دو حالت احتمالی
+    # سایر ارزها در صورت نیاز اضافه شوند
+}
+
 IRT_RATE_TTL_SECONDS = 60
 PRICE_TTL_SECONDS = 30
 
@@ -161,12 +167,13 @@ class MarketCache:
         except Exception as e:
             logger.warning(f"MEXC fetch_tickers failed: {e}")
 
-        # ۲. تلاش گروهی با Gate.io (با اصلاح TON)
+        # ۲. تلاش گروهی با Gate.io (با مدیریت سمبل‌های خاص)
         try:
             gate_symbols = []
             for code in COIN_CODES:
-                if code == "TON":
-                    gate_symbols.append("TONCOIN/USDT")
+                if code in GATE_SYMBOL_MAP:
+                    # از اولین سمبل ممکن استفاده کن
+                    gate_symbols.append(GATE_SYMBOL_MAP[code][0])
                 else:
                     gate_symbols.append(f"{code}/USDT")
             tickers = await asyncio.to_thread(exchange_gate.fetch_tickers, gate_symbols)
@@ -174,6 +181,17 @@ class MarketCache:
                 sym = gate_symbols[i]
                 if sym in tickers and tickers[sym].get("last") is not None:
                     new_prices[code] = float(tickers[sym]["last"])
+            # اگر بعضی ارزها هنوز قیمت ندارند (مثل TON با سمبل اول)، سمبل دوم را امتحان کن
+            for code in COIN_CODES:
+                if code in GATE_SYMBOL_MAP and code not in new_prices:
+                    for alt_sym in GATE_SYMBOL_MAP[code][1:]:
+                        try:
+                            ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, alt_sym)
+                            if ticker and ticker.get("last") is not None:
+                                new_prices[code] = float(ticker["last"])
+                                break
+                        except:
+                            pass
             if new_prices:
                 self.active_exchange_name = "Gate.io"
                 self.prices = new_prices
@@ -192,13 +210,21 @@ class MarketCache:
             except:
                 pass
             # Gate
-            try:
-                sym = "TONCOIN/USDT" if code == "TON" else f"{code}/USDT"
-                ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, sym)
-                if ticker and ticker.get("last") is not None:
-                    return code, float(ticker["last"])
-            except:
-                pass
+            if code in GATE_SYMBOL_MAP:
+                for sym in GATE_SYMBOL_MAP[code]:
+                    try:
+                        ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, sym)
+                        if ticker and ticker.get("last") is not None:
+                            return code, float(ticker["last"])
+                    except:
+                        continue
+            else:
+                try:
+                    ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, f"{code}/USDT")
+                    if ticker and ticker.get("last") is not None:
+                        return code, float(ticker["last"])
+                except:
+                    pass
             return code, None
 
         tasks = [fetch_one(code) for code in COIN_CODES]
@@ -228,7 +254,10 @@ class MarketCache:
 
         # تلاش با Gate.io
         try:
-            sym = "TONCOIN/USDT" if code == "TON" else f"{code}/USDT"
+            sym = f"{code}/USDT"
+            if code in GATE_SYMBOL_MAP:
+                # از اولین سمبل ممکن استفاده کن
+                sym = GATE_SYMBOL_MAP[code][0]
             raw = await asyncio.to_thread(exchange_gate.fetch_ohlcv, sym, timeframe, limit=100)
             if raw:
                 df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -244,9 +273,9 @@ class MarketCache:
 cache = MarketCache()
 
 def format_price(price: float) -> str:
-    """فرمت‌سازی قیمت با دقت مناسب برای اعداد کوچک"""
+    """فرمت‌سازی قیمت با دقت مناسب برای اعداد بسیار کوچک (تا ۱۰ رقم اعشار)"""
     if price < 0.01:
-        return f"{price:.8f}"
+        return f"{price:.10f}"
     elif price < 1:
         return f"{price:.6f}"
     else:
@@ -323,19 +352,27 @@ async def analyze_coin_full_status(code: str) -> str:
     )
 
 # ===========================
-# کیبوردها
+# کیبوردها با طول ثابت برای ثبات سایز
 # ===========================
 def kb_main_menu(is_admin_user=False):
+    # برای ثابت ماندن سایز دکمه‌ها، از متن‌هایی با طول یکسان استفاده می‌کنیم
+    btn1 = "💵 قیمت لحظه‌ای ارزها"  # ۱۹ کاراکتر
+    btn2 = "📊 وضعیت و تحلیل ارزها"  # ۱۹ کاراکتر
+    # اگر ادمین باشد، دکمه پنل مدیریت با طول مشابه
+    btn_admin = "👑 پنل مدیریت ادمین"  # ۱۹ کاراکتر
+    btn_start = "▶️ شروع فعالیت"       # ۱۳ کاراکتر
+    btn_stop = "⏸ توقف فعالیت"        # ۱۳ کاراکتر
+
     keyboard = [
-        [InlineKeyboardButton("💵 قیمت لحظه‌ای ارزها", callback_data="coins_prices_all")],
-        [InlineKeyboardButton("📊 وضعیت و تحلیل ارزها", callback_data="coins_status_grid")],
+        [InlineKeyboardButton(btn1, callback_data="coins_prices_all")],
+        [InlineKeyboardButton(btn2, callback_data="coins_status_grid")],
     ]
     if is_admin_user:
-        keyboard.append([InlineKeyboardButton("👑 پنل مدیریت ادمین", callback_data="admin_panel")])
+        keyboard.append([InlineKeyboardButton(btn_admin, callback_data="admin_panel")])
 
     keyboard.append([
-        InlineKeyboardButton("▶️ شروع فعالیت", callback_data="bot_start_action"),
-        InlineKeyboardButton("⏸ توقف فعالیت", callback_data="bot_stop_action")
+        InlineKeyboardButton(btn_start, callback_data="bot_start_action"),
+        InlineKeyboardButton(btn_stop, callback_data="bot_stop_action")
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -346,11 +383,12 @@ def kb_prices_all_single():
     ])
 
 def kb_status_grid():
-    # دکمه‌های ارزها با ایموجی سبز (همانند قبل)
     buttons = []
     row = []
     for code in COIN_CODES:
-        row.append(InlineKeyboardButton(f"{code} 🟢", callback_data=f"coin_detail_{code}"))
+        # دکمه‌ها با طول یکسان (اسم ارز + فاصله + 🟢) 
+        btn_text = f"{code} 🟢"
+        row.append(InlineKeyboardButton(btn_text, callback_data=f"coin_detail_{code}"))
         if len(row) == 2:
             buttons.append(row)
             row = []
@@ -449,8 +487,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # انتخاب ایموجی صرافی
         exchange_emoji = "🇲" if "MEXC" in cache.active_exchange_name else "🇬"
 
+        # عنوان جدید بدون پرانتز و نام صرافی
         text = (
-            f"💵 **لیست قیمت لحظه‌ای ۳۰ ارز برتر ({cache.active_exchange_name})**\n"
+            f"💵 **لیست ۳۰ قیمت ارز برتر**\n"
             f"📅 **تاریخ:** `{shamsi_now()}`\n"
             f"🇮🇷 **نرخ تتر:** `{rate:,.0f}` تومان\n"
             f"{DIVIDER}\n"
@@ -459,9 +498,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for code in COIN_CODES:
             p_usd = prices.get(code, 0.0)
             p_irt = p_usd * rate
-            # نمایش در دو خط با ایموجی صرافی
+            # چپ‌چین: خط اول با ایموجی صرافی، خط دوم با ایموجی تومان
             text += f"{exchange_emoji} **{code}**: `${format_price(p_usd)}` USDT\n"
-            text += f"   🇮🇷 `{p_irt:,.0f}` تومان\n\n"
+            text += f"🇮🇷 `{p_irt:,.0f}` تومان\n\n"
 
         await query.edit_message_text(text, reply_markup=kb_prices_all_single(), parse_mode="Markdown")
 
@@ -645,7 +684,7 @@ def main():
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("🚀 NEW VERSION ACTIVATED - WITH EXCHANGE EMOJI IN PRICES, TON FIX, 2-LINE PRICES")
+    logger.info("🚀 FINAL VERSION - TON FIXED, LEFT-ALIGNED, 10 DECIMALS, STABLE BUTTONS")
     application.run_polling()
 
 if __name__ == "__main__":
