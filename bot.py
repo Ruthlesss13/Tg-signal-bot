@@ -15,13 +15,13 @@ from dotenv import load_dotenv
 from ta.momentum import RSIIndicator, StochRSIIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator
 from ta.volatility import AverageTrueRange, BollingerBands
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotCommandScopeDefault, BotCommandScopeAllPrivateChats
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "2.2.0"
+VERSION = "2.4.0"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 try:
@@ -318,25 +318,29 @@ async def analyze_coin_full_status(code: str) -> str:
 # ===========================
 # کیبوردها
 # ===========================
+MAIN_MENU_TEXT = (
+    "🤖 **ربات هوشمند تحلیل ارزهای دیجیتال**\n"
+    "📊 قیمت لحظه‌ای | تحلیل تکنیکال | سیگنال معاملاتی\n"
+    "⚡️ سریع و دقیق\n\n"
+    "👇 **منوی اصلی:**"
+)
+
 def kb_main_menu(is_admin_user=False):
     keyboard = [
         [InlineKeyboardButton("💵 قیمت لحظه‌ای", callback_data="coins_prices_all"),
          InlineKeyboardButton("📊 وضعیت و تحلیل", callback_data="coins_status_grid")],
     ]
     if is_admin_user:
-        keyboard.append([
-            InlineKeyboardButton("👑 پنل مدیریت", callback_data="admin_panel"),
-            InlineKeyboardButton(" ", callback_data="dummy")
-        ])
+        keyboard.append([InlineKeyboardButton("👑 پنل مدیریت ادمین", callback_data="admin_panel")])
     keyboard.append([
-        InlineKeyboardButton("▶️ شروع فعالیت", callback_data="bot_start_action"),
-        InlineKeyboardButton("⏸ توقف فعالیت", callback_data="bot_stop_action")
+        InlineKeyboardButton("✅ شروع فعالیت", callback_data="bot_start_action"),
+        InlineKeyboardButton("⛔ توقف فعالیت", callback_data="bot_stop_action")
     ])
     return InlineKeyboardMarkup(keyboard)
 
 def kb_start_only():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("▶️ شروع مجدد ربات", callback_data="bot_start_action")]
+        [InlineKeyboardButton("✅ شروع مجدد ربات", callback_data="bot_start_action")]
     ])
 
 def kb_prices_all_single():
@@ -394,13 +398,37 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_state()
 
     is_adm = user_id in ADMIN_USER_IDS
-    text = (
-        "🤖 **به ربات دستیار تحلیل و قیمت‌دهی ارزهای دیجیتال خوش آمدید.**\n\n"
-        "لطفاً یکی از گزینه‌های زیر را انتخاب کنید:"
-    )
     await update.message.reply_text(
-        text,
+        MAIN_MENU_TEXT,
         reply_markup=kb_main_menu(is_adm),
+        parse_mode="Markdown"
+    )
+
+async def stop_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دستور /stop برای توقف ربات"""
+    user_id = update.effective_user.id
+    paused_users.add(user_id)
+    save_state()
+    
+    await update.message.reply_text(
+        "⛔ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه زیر کلیک کنید.",
+        reply_markup=kb_start_only(),
+        parse_mode="Markdown"
+    )
+
+async def admin_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دستور /admin برای دسترسی به پنل مدیریت"""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_USER_IDS:
+        await update.message.reply_text(
+            "❌ **شما دسترسی به این بخش را ندارید.**",
+            parse_mode="Markdown"
+        )
+        return
+    
+    await update.message.reply_text(
+        f"👑 **پنل مدیریت اختصاصی ادمین**\n{DIVIDER}\nلطفاً از طریق منوی اصلی وارد شوید.",
+        reply_markup=kb_admin_panel(),
         parse_mode="Markdown"
     )
 
@@ -413,15 +441,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     is_adm = user_id in ADMIN_USER_IDS
 
-    if data == "dummy":
-        return
-
     if data == "bot_start_action":
         paused_users.discard(user_id)
         registered_users.add(user_id)
         save_state()
         await query.edit_message_text(
-            "✅ **ربات برای شما فعال شد.**\nهم‌اکنون می‌توانید از تمام امکانات استفاده کنید.",
+            MAIN_MENU_TEXT,
             reply_markup=kb_main_menu(is_adm),
             parse_mode="Markdown"
         )
@@ -431,7 +456,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         paused_users.add(user_id)
         save_state()
         await query.edit_message_text(
-            "⏹ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه زیر کلیک کنید.",
+            "⛔ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه زیر کلیک کنید.",
             reply_markup=kb_start_only(),
             parse_mode="Markdown"
         )
@@ -447,7 +472,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "main_menu":
         await query.edit_message_text(
-            "👇 **منوی اصلی ربات:**",
+            MAIN_MENU_TEXT,
             reply_markup=kb_main_menu(is_adm),
             parse_mode="Markdown"
         )
@@ -659,10 +684,20 @@ async def channel_signal_monitor_loop(app: Application):
         await asyncio.sleep(600)
 
 async def post_init_setup(app: Application):
+    # حذف منوی قدیمی
     await app.bot.delete_my_commands(scope=BotCommandScopeDefault())
     await app.bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
-    await app.bot.set_my_commands([], scope=BotCommandScopeDefault())
-    await app.bot.set_my_commands([], scope=BotCommandScopeAllPrivateChats())
+    
+    # تنظیم منوی جدید کنار کادر تایپ
+    commands = [
+        BotCommand("start", "شروع و نمایش منو"),
+        BotCommand("version", "نمایش نسخه ربات"),
+        BotCommand("admin", "پنل مدیریت ادمین"),
+        BotCommand("stop", "توقف فعالیت ربات"),
+    ]
+    await app.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+    await app.bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
+    
     asyncio.create_task(channel_signal_monitor_loop(app))
 
 def main():
@@ -675,6 +710,8 @@ def main():
 
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("version", version_handler))
+    application.add_handler(CommandHandler("admin", admin_command_handler))
+    application.add_handler(CommandHandler("stop", stop_command_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
     logger.info(f"🚀 Version {VERSION} started at {BUILD_TIME}")
