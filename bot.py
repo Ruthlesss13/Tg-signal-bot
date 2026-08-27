@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل ارزهای دیجیتال - نسخه ۳.۱.۲
-رفع خطاهای تحلیل ارز، کشیده‌تر کردن دکمه‌های پنل مدیریت، لیست ۴ ستونی
+ربات هوشمند تحلیل ارزهای دیجیتال - نسخه ۳.۱.۳
+رفع خطاهای تحلیل، برگشت ایموجی‌ها، کشیده‌تر کردن دکمه‌ها، حذف پیام‌های اضافی
 """
 
 import asyncio
@@ -50,7 +50,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.1.2"
+VERSION = "3.1.3"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -812,6 +812,9 @@ async def analyze_coin_full_status(code: str) -> str:
         rsi_4h = ind_4h.rsi if ind_4h else None
         adx_4h = ind_4h.adx if ind_4h else None
 
+        # وضعیت Swap (فعال است چون در فیوچرز هستیم)
+        swap_status = "🟢 فعال"
+
         text = (
             f"📊 **تحلیل جامع {code}**\n"
             f"{'────────────────────'}\n"
@@ -827,6 +830,7 @@ async def analyze_coin_full_status(code: str) -> str:
             f"   • روند کلی: {trend_fa}\n"
             f"   • رژیم بازار: {regime} (ADX: {ind.adx:.1f})\n"
             f"   • قدرت سیگنال: {signal_strength}\n"
+            f"   • وضعیت Swap: {swap_status}\n"
             f"{'────────────────────'}\n"
             f"📊 **اندیکاتورهای تکنیکال (۱ساعته):**\n"
             f"   • RSI (14): `{ind.rsi:.1f}` ({rsi_interpret})\n"
@@ -966,6 +970,12 @@ MAIN_MENU_TEXT = (
     "👇 **منوی اصلی:**"
 )
 
+ADMIN_PANEL_HEADER = (
+    "👑 **پنل مدیریت اختصاصی ادمین**\n"
+    "در این بخش می‌توانید آمار، وضعیت سیستم و تنظیمات را مدیریت کنید.\n\n"
+    "👇 **یکی از گزینه‌ها را انتخاب کنید:**"
+)
+
 def kb_main_menu(is_admin_user=False):
     keyboard = [
         [InlineKeyboardButton("💵 قیمت لحظه‌ای ارزها", callback_data="coins_prices_all"),
@@ -989,11 +999,11 @@ def kb_prices_all_single():
     ])
 
 def kb_status_grid():
-    """لیست ارزها در ۴ ستون"""
+    """لیست ارزها با ایموجی سبز در ۴ ستون"""
     buttons = []
     row = []
     for i, code in enumerate(COIN_CODES):
-        row.append(InlineKeyboardButton(f"{code}", callback_data=f"coin_detail_{code}"))
+        row.append(InlineKeyboardButton(f"{code} 🟢", callback_data=f"coin_detail_{code}"))
         if len(row) == 4:
             buttons.append(row)
             row = []
@@ -1003,9 +1013,9 @@ def kb_status_grid():
     return InlineKeyboardMarkup(buttons)
 
 def kb_admin_panel():
-    """پنل مدیریت با دکمه‌های کشیده (یک ستونی)"""
+    """پنل مدیریت با دکمه‌های کشیده (یک ستونی) و متن بلند"""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📈 آمار دقیق سیگنال‌ها", callback_data="admin_signal_stats")],
+        [InlineKeyboardButton("📈 آمار دقیق سیگنال‌ها و عملکرد", callback_data="admin_signal_stats")],
         [InlineKeyboardButton("👥 آمار کاربران و وضعیت سیستم", callback_data="admin_system_stats")],
         [InlineKeyboardButton("🗑 صفر کردن تمام آمار سیگنال‌ها", callback_data="reset_stats_confirm")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")]
@@ -1016,7 +1026,7 @@ def kb_back_admin():
 
 def kb_reset_confirm():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚠️ بله، تمام آمار صفر شود", callback_data="reset_stats_do")],
+        [InlineKeyboardButton("⚠️ بله، تمام آمار سیگنال‌ها صفر شود", callback_data="reset_stats_do")],
         [InlineKeyboardButton("❌ انصراف", callback_data="admin_panel")]
     ])
 
@@ -1073,7 +1083,7 @@ async def admin_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if user_id not in ADMIN_USER_IDS:
         await update.message.reply_text("❌ **شما دسترسی به این بخش را ندارید.**", parse_mode="Markdown")
         return
-    await update.message.reply_text("👑 **پنل مدیریت ادمین**", reply_markup=kb_admin_panel(), parse_mode="Markdown")
+    await update.message.reply_text(ADMIN_PANEL_HEADER, reply_markup=kb_admin_panel(), parse_mode="Markdown")
 
 # ===========================
 # Callback Handler (بخش‌های اصلی)
@@ -1085,23 +1095,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     is_adm = user_id in ADMIN_USER_IDS
 
+    # مدیریت استارت/استاپ با ویرایش پیام قبلی
     if data == "bot_start_action":
         paused_users.discard(user_id)
         registered_users.add(user_id)
-        await query.edit_message_text(MAIN_MENU_TEXT, reply_markup=kb_main_menu(is_adm), parse_mode="Markdown")
+        await query.edit_message_text(
+            MAIN_MENU_TEXT,
+            reply_markup=kb_main_menu(is_adm),
+            parse_mode="Markdown"
+        )
         return
 
     if data == "bot_stop_action":
         paused_users.add(user_id)
-        await query.edit_message_text("⛔ **ربات متوقف شد.**", reply_markup=kb_start_only(), parse_mode="Markdown")
+        await query.edit_message_text(
+            "⛔ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه زیر کلیک کنید.",
+            reply_markup=kb_start_only(),
+            parse_mode="Markdown"
+        )
         return
 
     if user_id in paused_users and data != "main_menu":
-        await query.edit_message_text("⛔️ **ربات برای شما غیرفعال است.**", reply_markup=kb_start_only(), parse_mode="Markdown")
+        await query.edit_message_text(
+            "⛔️ **ربات برای شما غیرفعال است.**\nجهت فعال‌سازی روی دکمه زیر کلیک کنید.",
+            reply_markup=kb_start_only(),
+            parse_mode="Markdown"
+        )
         return
 
     if data == "main_menu":
-        await query.edit_message_text(MAIN_MENU_TEXT, reply_markup=kb_main_menu(is_adm), parse_mode="Markdown")
+        await query.edit_message_text(
+            MAIN_MENU_TEXT,
+            reply_markup=kb_main_menu(is_adm),
+            parse_mode="Markdown"
+        )
         return
 
     if data == "coins_prices_all":
@@ -1117,22 +1144,34 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "coins_status_grid":
-        await query.edit_message_text("📊 **تحلیل تکنیکال ارزها**\nارز مورد نظر را انتخاب کنید:", reply_markup=kb_status_grid(), parse_mode="Markdown")
+        await query.edit_message_text(
+            "📊 **تحلیل تکنیکال ارزها**\nارز مورد نظر را انتخاب کنید:",
+            reply_markup=kb_status_grid(),
+            parse_mode="Markdown"
+        )
         return
 
     if data.startswith("coin_detail_"):
         code = data.split("_")[2]
         await query.edit_message_text(f"⏳ در حال تحلیل جامع {code}...", parse_mode="Markdown")
         text = await analyze_coin_full_status(code)
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 بروزرسانی تحلیل", callback_data=f"coin_detail_{code}")],
-            [InlineKeyboardButton("🔙 لیست ارزها", callback_data="coins_status_grid")]
-        ]), parse_mode="Markdown")
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 بروزرسانی تحلیل", callback_data=f"coin_detail_{code}")],
+                [InlineKeyboardButton("🔙 لیست ارزها", callback_data="coins_status_grid")]
+            ]),
+            parse_mode="Markdown"
+        )
         return
 
     if data == "admin_panel":
         if not is_adm: return
-        await query.edit_message_text("👑 **پنل مدیریت**", reply_markup=kb_admin_panel(), parse_mode="Markdown")
+        await query.edit_message_text(
+            ADMIN_PANEL_HEADER,
+            reply_markup=kb_admin_panel(),
+            parse_mode="Markdown"
+        )
         return
 
     if data == "admin_signal_stats":
@@ -1146,7 +1185,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ سیگنال‌های ناموفق (SL): `{s['losses']}`\n"
             f"🏆 نرخ پیروزی (وین‌ریت): `{winrate}`\n"
             f"🤖 رد شده توسط هوش مصنوعی: `{s['rejected_by_ai']}`",
-            reply_markup=kb_back_admin(), parse_mode="Markdown"
+            reply_markup=kb_back_admin(),
+            parse_mode="Markdown"
         )
         return
 
@@ -1158,14 +1198,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "reset_stats_confirm":
         if not is_adm: return
-        await query.edit_message_text("⚠️ **آیا از صفر کردن تمام آمار سیگنال‌ها اطمینان دارید؟**", reply_markup=kb_reset_confirm(), parse_mode="Markdown")
+        await query.edit_message_text(
+            "⚠️ **آیا از صفر کردن تمام آمار سیگنال‌ها اطمینان دارید؟**",
+            reply_markup=kb_reset_confirm(),
+            parse_mode="Markdown"
+        )
         return
 
     if data == "reset_stats_do":
         if not is_adm: return
         with _conn() as c:
             c.execute("DELETE FROM signals")
-        await query.edit_message_text("✅ **تمامی آمار سیگنال‌ها با موفقیت صفر شد.**", reply_markup=kb_back_admin(), parse_mode="Markdown")
+        await query.edit_message_text(
+            "✅ **تمامی آمار سیگنال‌ها با موفقیت صفر شد.**",
+            reply_markup=kb_back_admin(),
+            parse_mode="Markdown"
+        )
         return
 
 # ===========================
