@@ -56,15 +56,22 @@ STATE_FILE = os.path.join(DATA_DIR, "state.json")
 
 DIVIDER = "────────────────────"
 
+# تنظیمات بهینه‌شده برای دور زدن محدودیت‌های سخت‌گیرانه API
+exchange_headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
+
 exchange_mexc = ccxt.mexc({
     "enableRateLimit": True,
-    "timeout": 10000,
+    "timeout": 15000,
+    "headers": exchange_headers,
     "options": {"defaultType": "spot"}
 })
 
 exchange_gate = ccxt.gate({
     "enableRateLimit": True,
-    "timeout": 10000,
+    "timeout": 15000,
+    "headers": exchange_headers,
     "options": {"defaultType": "spot"}
 })
 
@@ -79,7 +86,6 @@ def shamsi_now() -> str:
     dt = datetime.now(TEHRAN_TZ) if TEHRAN_TZ else datetime.now()
     return jdatetime.datetime.fromgregorian(datetime=dt).strftime("%Y/%m/%d - %H:%M:%S")
 
-# اصلاح ۱: غیرهمگام‌سازی درخواست HTTP تتر جهت جلوگیری از قفل شدن ربات
 async def fetch_irt_rate() -> float:
     now = time.time()
     if _irt_rate_cache["value"] and (now - _irt_rate_cache["ts"] < IRT_RATE_TTL_SECONDS):
@@ -94,7 +100,7 @@ async def fetch_irt_rate() -> float:
             _irt_rate_cache.update(value=rate, ts=now)
             return rate
     except Exception as e:
-        logger.warning(f"Error fetching IRT rate (Wallex IP blocked or timeout): {e}")
+        logger.warning(f"Error fetching IRT rate: {e}")
     
     return _irt_rate_cache["value"] or 65000.0
 
@@ -139,6 +145,7 @@ class MarketCache:
 
         symbols = [f"{code}/USDT" for code in COIN_CODES]
 
+        # ۱. تلاش برای دریافت از MEXC
         try:
             tickers = await asyncio.to_thread(exchange_mexc.fetch_tickers, symbols)
             fetched_any = False
@@ -154,6 +161,7 @@ class MarketCache:
         except Exception as e:
             logger.error(f"MEXC fetch_tickers failed: {e}")
 
+        # ۲. تلاش برای دریافت از Gate.io در صورت شکست MEXC
         try:
             tickers = await asyncio.to_thread(exchange_gate.fetch_tickers, symbols)
             fetched_any = False
@@ -266,6 +274,7 @@ async def analyze_coin_full_status(code: str) -> str:
         f"🌐 **باند پایینی بولینگر:** `${bb_lower:,.4f}`"
     )
 
+# اصلاح چیدمان دکمه‌ها و ایموجی‌ها جهت حفظ سایز ثابت
 def kb_main_menu(is_admin_user=False):
     keyboard = [
         [InlineKeyboardButton("💵 قیمت لحظه‌ای ارزها", callback_data="coins_prices_all")],
@@ -275,8 +284,8 @@ def kb_main_menu(is_admin_user=False):
         keyboard.append([InlineKeyboardButton("👑 پنل مدیریت ادمین", callback_data="admin_panel")])
 
     keyboard.append([
-        InlineKeyboardButton("استارت", callback_data="bot_start_action"),
-        InlineKeyboardButton("استاپ", callback_data="bot_stop_action")
+        InlineKeyboardButton("▶️ شروع فعالیت", callback_data="bot_start_action"),
+        InlineKeyboardButton("⏸ توقف فعالیت", callback_data="bot_stop_action")
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -357,7 +366,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         paused_users.add(user_id)
         save_state()
         await query.edit_message_text(
-            "⏹ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه «استارت» کلیک کنید.",
+            "⏹ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه «▶️ شروع فعالیت» کلیک کنید.",
             reply_markup=kb_main_menu(is_adm),
             parse_mode="Markdown"
         )
@@ -365,8 +374,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id in paused_users and data != "main_menu":
         await query.edit_message_text(
-            "⛔️ **ربات برای شما غیرفعال (متوقف) است.**\nجهت دسترسی به بخش‌های ربات ابتدا روی دکمه **استارت** کلیک کنید.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("استارت", callback_data="bot_start_action")]]),
+            "⛔️ **ربات برای شما غیرفعال (متوقف) است.**\nجهت دسترسی به بخش‌های ربات ابتدا روی دکمه زیر کلیک کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ شروع فعالیت", callback_data="bot_start_action")]]),
             parse_mode="Markdown"
         )
         return
@@ -558,17 +567,14 @@ async def channel_signal_monitor_loop(app: Application):
             logger.error(f"Channel monitor loop error: {e}")
         await asyncio.sleep(600)
 
-# اصلاح ۲: ثبت صحیح تاسک پایش کانال داخل Event Loop فعال تلگرام
 async def post_init_setup(app: Application):
     await app.bot.delete_my_commands(scope=BotCommandScopeDefault())
     await app.bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
     await app.bot.set_my_commands([], scope=BotCommandScopeDefault())
     await app.bot.set_my_commands([], scope=BotCommandScopeAllPrivateChats())
     
-    # راه‌اندازی پس‌زمینه مونیتورینگ به‌صورت کاملاً صحیح
     asyncio.create_task(channel_signal_monitor_loop(app))
 
-# اصلاح ۳: ساده‌سازی و استانداردسازی تابع اصلی
 def main():
     if not BOT_TOKEN:
         logger.error("خطا: BOT_TOKEN تعریف نشده است!")
