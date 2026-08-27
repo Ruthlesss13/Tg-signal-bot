@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل ارزهای دیجیتال - نسخه ۳.۰.۰
+ربات هوشمند تحلیل ارزهای دیجیتال - نسخه ۳.۰.۱
+
 """
 
 import asyncio
@@ -13,15 +14,13 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Set
 
 import ccxt
 import jdatetime
-import mplfinance as mpf
 import pandas as pd
-import pytz
 import requests
 from dotenv import load_dotenv
 from ta.momentum import RSIIndicator, StochRSIIndicator
@@ -31,9 +30,26 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotComm
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ===========================
+# کتابخانه‌های اختیاری (با مدیریت خطا)
+# ===========================
+try:
+    import mplfinance as mpf
+    MPLFINANCE_AVAILABLE = True
+except ImportError:
+    mpf = None
+    MPLFINANCE_AVAILABLE = False
+
+try:
+    import pytz
+    PYTZ_AVAILABLE = True
+except ImportError:
+    pytz = None
+    PYTZ_AVAILABLE = False
+
+# ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 try:
@@ -601,14 +617,21 @@ def build_risk_plan(direction: str, entry: float, atr: float, account_balance_us
     return RiskPlan(direction, entry, stop_loss, targets, leverage, position_size_usdt, risk_reward, True, "ok")
 
 # ===========================
-# چارت
+# چارت (با مدیریت خطا)
 # ===========================
-def render_candles_png(df: pd.DataFrame, title: str) -> bytes:
-    plot_df = df.set_index("timestamp")[["open", "high", "low", "close", "volume"]].tail(120)
-    buf = io.BytesIO()
-    mpf.plot(plot_df, type="candle", style="charles", volume=True, title=title, savefig=dict(fname=buf, dpi=110, bbox_inches="tight"))
-    buf.seek(0)
-    return buf.read()
+def render_candles_png(df: pd.DataFrame, title: str) -> Optional[bytes]:
+    if not MPLFINANCE_AVAILABLE:
+        logger.warning("mplfinance not installed. Chart rendering disabled.")
+        return None
+    try:
+        plot_df = df.set_index("timestamp")[["open", "high", "low", "close", "volume"]].tail(120)
+        buf = io.BytesIO()
+        mpf.plot(plot_df, type="candle", style="charles", volume=True, title=title, savefig=dict(fname=buf, dpi=110, bbox_inches="tight"))
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        logger.warning(f"Chart rendering failed: {e}")
+        return None
 
 # ===========================
 # هوش مصنوعی Gemini
@@ -619,9 +642,11 @@ AI_PROMPT_TEMPLATE = (
     "RSI: {rsi} | ADX: {adx} | حجم: {volume_ratio}\nفاندینگ: {funding_rate} | OI: {oi_change}\n"
 )
 
-def confirm_signal_with_ai(chart_png: bytes, context: dict) -> tuple[str, str]:
+def confirm_signal_with_ai(chart_png: Optional[bytes], context: dict) -> tuple[str, str]:
     if not GEMINI_API_KEY:
         return "unavailable", "GEMINI_API_KEY تنظیم نشده"
+    if chart_png is None:
+        return "unavailable", "چارت در دسترس نیست"
     prompt = AI_PROMPT_TEMPLATE.format(**context)
     image_b64 = base64.b64encode(chart_png).decode("ascii")
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/png", "data": image_b64}}]}]}
@@ -691,7 +716,7 @@ def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
     # AI
     chart_png = render_candles_png(df_main, f"{code} ({MAIN_TF})")
     ai_status, ai_text = "unavailable", ""
-    if GEMINI_API_KEY:
+    if GEMINI_API_KEY and chart_png is not None:
         context = {
             "direction": "لانگ" if direction == "long" else "شورت",
             "ticker": code, "entry": f"{plan.entry:.6f}", "stop_loss": f"{plan.stop_loss:.6f}",
@@ -749,55 +774,67 @@ async def send_signal(app: Application, code: str, signal_id: int, direction: st
 # مانیتورینگ سیگنال‌های باز
 # ===========================
 async def monitor_open_signals(app: Application):
-    for row in open_signals():
-        code = row["ticker"]
-        price = (await cache.update_prices()).get(code, 0.0)
-        if price == 0.0:
-            continue
-        targets = json.loads(row["targets"])
-        direction = row["direction"]
-        stop_loss = row["stop_loss"]
-        hit_sl = (price <= stop_loss) if direction == "long" else (price >= stop_loss)
-        if hit_sl:
-            text = f"❌ **حد ضرر خورد** — {code}\nورود: {row['entry']:.6f} | SL: {stop_loss:.6f}\n{shamsi_now()}"
-            await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
-            update_signal_status(row["id"], "sl")
-            clear_channel_thread(code)
-            continue
+    while True:
+        try:
+            for row in open_signals():
+                code = row["ticker"]
+                price = (await cache.update_prices()).get(code, 0.0)
+                if price == 0.0:
+                    continue
+                targets = json.loads(row["targets"])
+                direction = row["direction"]
+                stop_loss = row["stop_loss"]
+                hit_sl = (price <= stop_loss) if direction == "long" else (price >= stop_loss)
+                if hit_sl:
+                    text = f"❌ **حد ضرر خورد** — {code}\nورود: {row['entry']:.6f} | SL: {stop_loss:.6f}\n{shamsi_now()}"
+                    await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
+                    update_signal_status(row["id"], "sl")
+                    clear_channel_thread(code)
+                    continue
 
-        highest = row["highest_tp_hit"]
-        if highest < 1:
-            if (price >= targets[0] if direction == "long" else price <= targets[0]):
-                text = f"✅ **TP1 زده شد** — {code}\nحد ضرر به نقطه ورود منتقل شد: {row['entry']:.6f}\n{shamsi_now()}"
-                await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
-                update_signal_progress(row["id"], 1, row["entry"])
-                continue
-        if highest < 2:
-            if (price >= targets[1] if direction == "long" else price <= targets[1]):
-                text = f"✅ **TP2 زده شد** — {code}\nحد ضرر به TP1 منتقل شد: {targets[0]:.6f}\n{shamsi_now()}"
-                await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
-                update_signal_progress(row["id"], 2, targets[0])
-                continue
-        if (price >= targets[2] if direction == "long" else price <= targets[2]):
-            text = f"🏆 **TP3 زده شد** — {code}\nسیگنال با موفقیت بسته شد\n{shamsi_now()}"
-            await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
-            update_signal_status(row["id"], "tp3")
-            clear_channel_thread(code)
+                highest = row["highest_tp_hit"]
+                if highest < 1:
+                    if (price >= targets[0] if direction == "long" else price <= targets[0]):
+                        text = f"✅ **TP1 زده شد** — {code}\nحد ضرر به نقطه ورود منتقل شد: {row['entry']:.6f}\n{shamsi_now()}"
+                        await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
+                        update_signal_progress(row["id"], 1, row["entry"])
+                        continue
+                if highest < 2:
+                    if (price >= targets[1] if direction == "long" else price <= targets[1]):
+                        text = f"✅ **TP2 زده شد** — {code}\nحد ضرر به TP1 منتقل شد: {targets[0]:.6f}\n{shamsi_now()}"
+                        await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
+                        update_signal_progress(row["id"], 2, targets[0])
+                        continue
+                if (price >= targets[2] if direction == "long" else price <= targets[2]):
+                    text = f"🏆 **TP3 زده شد** — {code}\nسیگنال با موفقیت بسته شد\n{shamsi_now()}"
+                    await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
+                    update_signal_status(row["id"], "tp3")
+                    clear_channel_thread(code)
+            await asyncio.sleep(CHANNEL_MONITOR_INTERVAL_SECONDS)
+        except Exception as e:
+            logger.error(f"Monitor error: {e}")
+            await asyncio.sleep(60)
 
 # ===========================
 # اسکن دوره‌ای
 # ===========================
 async def periodic_scan(app: Application):
-    logger.info("🔍 اسکن دوره‌ای شروع شد...")
-    for code in COIN_CODES:
+    while True:
         try:
-            signal_id, reason, data = evaluate_coin(code)
-            if signal_id and data:
-                plan, setup_type, ai_status, ai_text, direction = data
-                await send_signal(app, code, signal_id, direction, plan, setup_type, ai_status, ai_text)
+            logger.info("🔍 اسکن دوره‌ای شروع شد...")
+            for code in COIN_CODES:
+                try:
+                    signal_id, reason, data = evaluate_coin(code)
+                    if signal_id and data:
+                        plan, setup_type, ai_status, ai_text, direction = data
+                        await send_signal(app, code, signal_id, direction, plan, setup_type, ai_status, ai_text)
+                except Exception as e:
+                    logger.exception(f"Error scanning {code}: {e}")
+            logger.info("✅ اسکن دوره‌ای تمام شد")
+            await asyncio.sleep(SIGNAL_SCAN_INTERVAL_SECONDS)
         except Exception as e:
-            logger.exception(f"Error scanning {code}: {e}")
-    logger.info("✅ اسکن دوره‌ای تمام شد")
+            logger.error(f"Scan loop error: {e}")
+            await asyncio.sleep(60)
 
 # ===========================
 # کیبوردها
@@ -1004,8 +1041,9 @@ async def post_init(app: Application):
     ]
     await app.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
     await app.bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
-    # اسکن اولیه بعد از ۱۰ ثانیه
+    # شروع وظایف دوره‌ای
     asyncio.create_task(periodic_scan(app))
+    asyncio.create_task(monitor_open_signals(app))
 
 def main():
     if not BOT_TOKEN:
@@ -1018,9 +1056,6 @@ def main():
     app.add_handler(CommandHandler("admin", admin_command_handler))
     app.add_handler(CommandHandler("stop", stop_command_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
-    # زمان‌بندی کارهای دوره‌ای
-    app.job_queue.run_repeating(lambda ctx: asyncio.create_task(periodic_scan(ctx.application)), interval=SIGNAL_SCAN_INTERVAL_SECONDS, first=30)
-    app.job_queue.run_repeating(lambda ctx: asyncio.create_task(monitor_open_signals(ctx.application)), interval=CHANNEL_MONITOR_INTERVAL_SECONDS, first=60)
     logger.info(f"🚀 Version {VERSION} started at {BUILD_TIME}")
     app.run_polling()
 
