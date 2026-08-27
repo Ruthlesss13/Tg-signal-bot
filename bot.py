@@ -161,9 +161,8 @@ class MarketCache:
         except Exception as e:
             logger.warning(f"MEXC fetch_tickers failed: {e}")
 
-        # ۲. تلاش گروهی با Gate.io
+        # ۲. تلاش گروهی با Gate.io (با اصلاح TON)
         try:
-            # Gate.io برای TON از TONCOIN استفاده می‌کند، بنابراین لیست را تنظیم می‌کنیم
             gate_symbols = []
             for code in COIN_CODES:
                 if code == "TON":
@@ -183,7 +182,7 @@ class MarketCache:
         except Exception as e:
             logger.warning(f"Gate.io fetch_tickers failed: {e}")
 
-        # ۳. در صورت شکست هر دو، به صورت تکی و همزمان (برای سرعت)
+        # ۳. در صورت شکست هر دو، به صورت تکی و همزمان (fallback)
         async def fetch_one(code):
             # MEXC
             try:
@@ -314,7 +313,9 @@ async def analyze_coin_full_status(code: str) -> str:
         f"🌐 **باند پایینی بولینگر:** `${bb_lower:,.4f}`"
     )
 
-# توابع کیبورد
+# ===========================
+# کیبوردها (با نماد صرافی)
+# ===========================
 def kb_main_menu(is_admin_user=False):
     keyboard = [
         [InlineKeyboardButton("💵 قیمت لحظه‌ای ارزها", callback_data="coins_prices_all")],
@@ -336,12 +337,12 @@ def kb_prices_all_single():
     ])
 
 def kb_status_grid():
-    # دریافت صرافی فعال برای نمایش نماد
+    # دریافت نماد صرافی فعال (حرف اول)
     exchange_symbol = "M" if cache.active_exchange_name.startswith("MEXC") else "G"
     buttons = []
     row = []
     for code in COIN_CODES:
-        # به جای ایموجی، از نماد صرافی استفاده می‌کنیم
+        # به جای ایموجی، از نماد صرافی استفاده می‌شود
         row.append(InlineKeyboardButton(f"{code} {exchange_symbol}", callback_data=f"coin_detail_{code}"))
         if len(row) == 2:
             buttons.append(row)
@@ -368,7 +369,9 @@ def kb_reset_confirm():
         [InlineKeyboardButton("❌ انصراف", callback_data="admin_panel")]
     ])
 
+# ===========================
 # هندلرها
+# ===========================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     registered_users.add(user_id)
@@ -611,10 +614,13 @@ async def channel_signal_monitor_loop(app: Application):
         await asyncio.sleep(600)
 
 async def post_init_setup(app: Application):
+    # حذف کامل منوی دستورات تلگرام (برای همه کاربران)
     await app.bot.delete_my_commands(scope=BotCommandScopeDefault())
     await app.bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
+    # تنظیم مجدد به لیست خالی برای اطمینان
     await app.bot.set_my_commands([], scope=BotCommandScopeDefault())
     await app.bot.set_my_commands([], scope=BotCommandScopeAllPrivateChats())
+    
     asyncio.create_task(channel_signal_monitor_loop(app))
 
 def main():
