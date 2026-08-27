@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل ارزهای دیجیتال - نسخه ۳.۰.۱
+ربات هوشمند تحلیل ارزهای دیجیتال - نسخه ۳.۱.۰
 
 """
 
@@ -12,9 +12,10 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Set
 
@@ -30,7 +31,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotComm
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ===========================
-# کتابخانه‌های اختیاری (با مدیریت خطا)
+# کتابخانه‌های اختیاری
 # ===========================
 try:
     import mplfinance as mpf
@@ -49,8 +50,9 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.0.1"
+VERSION = "3.1.0"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+START_TIME = time.time()
 
 try:
     from zoneinfo import ZoneInfo
@@ -79,7 +81,7 @@ DB_PATH = os.getenv("DB_PATH", "cryptobot.sqlite3")
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# لیست ۳۰ ارز (همان کد قبلی)
+# لیست ۳۰ ارز
 COIN_CODES = [
     "BTC", "ETH", "SOL", "BNB", "XRP",
     "ADA", "DOGE", "AVAX", "LINK", "DOT",
@@ -151,8 +153,11 @@ def fmt_toman(usd_value: float, rate: float) -> str:
         return f"{toman:,.0f} تومان"
     return f"{toman:.6f}".rstrip("0").rstrip(".") + " تومان"
 
+def format_percent(value: float) -> str:
+    return f"{value:+.2f}%"
+
 # ===========================
-# صرافی‌ها (MEXC + Gate.io)
+# صرافی‌ها
 # ===========================
 exchange_headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -176,9 +181,9 @@ exchange_gate = ccxt.gate({
 })
 
 # ===========================
-# نرخ تومان (Wallex)
+# نرخ تومان
 # ===========================
-_irt_rate_cache = {"value": None, "ts": 0.0}
+_irt_rate_cache = {"value": None, "ts": 0.0, "last_success": None}
 
 async def fetch_irt_rate() -> float:
     now = time.time()
@@ -190,14 +195,19 @@ async def fetch_irt_rate() -> float:
         r = await asyncio.to_thread(_get)
         if r.status_code == 200:
             rate = float(r.json()["result"]["symbols"]["USDTTMN"]["stats"]["lastPrice"])
-            _irt_rate_cache.update(value=rate, ts=now)
+            _irt_rate_cache.update(value=rate, ts=now, last_success=shamsi_now())
             return rate
     except Exception as e:
         logger.warning(f"Error fetching IRT rate: {e}")
     return _irt_rate_cache["value"] or 65000.0
 
+def get_irt_rate_status() -> str:
+    if _irt_rate_cache["value"]:
+        return f"✅ آنلاین (آخرین: {_irt_rate_cache['last_success']})"
+    return "🔴 آفلاین"
+
 # ===========================
-# دیتابیس SQLite
+# دیتابیس
 # ===========================
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -295,15 +305,13 @@ def set_channel_message_id(signal_id: int, message_id: int):
     with _conn() as c:
         c.execute("UPDATE signals SET channel_message_id=? WHERE id=?", (message_id, signal_id))
 
-def stats_summary() -> dict:
+def get_db_stats() -> dict:
     with _conn() as c:
         total = c.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"]
-        wins = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='tp3'").fetchone()["n"]
-        losses = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='sl'").fetchone()["n"]
-        rejected_by_ai = c.execute("SELECT COUNT(*) AS n FROM signals WHERE ai_confirmed=0").fetchone()["n"]
-    total_closed = wins + losses
-    winrate = (wins / total_closed * 100) if total_closed else None
-    return {"total_signals": total, "wins": wins, "losses": losses, "winrate": winrate, "rejected_by_ai": rejected_by_ai}
+        open_count = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='open'").fetchone()["n"]
+        tp3 = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='tp3'").fetchone()["n"]
+        sl = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='sl'").fetchone()["n"]
+        return {"total": total, "open": open_count, "tp3": tp3, "sl": sl}
 
 init_db()
 
@@ -315,6 +323,7 @@ class MarketCache:
         self.prices: Dict[str, float] = {}
         self.last_price_update = 0
         self.active_exchange_name = "MEXC"
+        self.exchange_status = {"MEXC": {"online": False, "last_check": 0}, "Gate.io": {"online": False, "last_check": 0}}
 
     async def update_prices(self) -> Dict[str, float]:
         now = time.time()
@@ -333,11 +342,13 @@ class MarketCache:
                     new_prices[code] = float(tickers[sym]["last"])
             if new_prices:
                 self.active_exchange_name = "MEXC"
+                self.exchange_status["MEXC"] = {"online": True, "last_check": now}
                 self.prices = new_prices
                 self.last_price_update = now
                 return self.prices
         except Exception as e:
             logger.warning(f"MEXC fetch_tickers failed: {e}")
+            self.exchange_status["MEXC"] = {"online": False, "last_check": now}
 
         # ۲. Gate.io
         try:
@@ -349,11 +360,13 @@ class MarketCache:
                     new_prices[code] = float(tickers[sym]["last"])
             if new_prices:
                 self.active_exchange_name = "Gate.io"
+                self.exchange_status["Gate.io"] = {"online": True, "last_check": now}
                 self.prices = new_prices
                 self.last_price_update = now
                 return self.prices
         except Exception as e:
             logger.warning(f"Gate.io fetch_tickers failed: {e}")
+            self.exchange_status["Gate.io"] = {"online": False, "last_check": now}
 
         # ۳. Fallback تکی
         async def fetch_one(code):
@@ -411,6 +424,15 @@ class MarketCache:
 
 cache = MarketCache()
 
+def get_exchange_status_text() -> str:
+    status = []
+    for name, data in cache.exchange_status.items():
+        if data["online"]:
+            status.append(f"🟢 {name}")
+        else:
+            status.append(f"🔴 {name}")
+    return "\n".join(status)
+
 # ===========================
 # اندیکاتورها
 # ===========================
@@ -451,6 +473,10 @@ def compute_indicators(df: pd.DataFrame) -> Optional[IndicatorSnapshot]:
     macd_signal = macd_ind.macd_signal()
     atr = AverageTrueRange(high, low, close, window=ATR_PERIOD).average_true_range()
     adx = ADXIndicator(high, low, close, window=ADX_PERIOD).adx()
+    stoch_rsi = StochRSIIndicator(close, window=14).stochrsi().iloc[-1] * 100 if len(close) > 20 else 50
+    bollinger = BollingerBands(close, window=20)
+    bb_upper = bollinger.bollinger_hband().iloc[-1] if len(close) > 20 else close.iloc[-1] * 1.05
+    bb_lower = bollinger.bollinger_lband().iloc[-1] if len(close) > 20 else close.iloc[-1] * 0.95
 
     last_close = float(close.iloc[-1])
     trend_up = last_close > ema_fast.iloc[-1] > ema_slow.iloc[-1]
@@ -506,14 +532,26 @@ def compute_indicators(df: pd.DataFrame) -> Optional[IndicatorSnapshot]:
 # ===========================
 # فیلترها
 # ===========================
+_fg_cache = {"value": None, "ts": 0.0, "last_update": None}
+
 def get_fear_greed_index() -> Optional[int]:
+    now = time.time()
+    if _fg_cache["value"] is not None and now - _fg_cache["ts"] < FEAR_GREED_TTL_SECONDS:
+        return _fg_cache["value"]
     try:
         r = requests.get("https://api.alternative.me/fng/", timeout=5)
         if r.status_code == 200:
-            return int(r.json()["data"][0]["value"])
+            value = int(r.json()["data"][0]["value"])
+            _fg_cache.update(value=value, ts=now, last_update=shamsi_now())
+            return value
     except:
         pass
-    return None
+    return _fg_cache["value"]
+
+def get_fg_status() -> str:
+    if _fg_cache["value"] is not None:
+        return f"✅ آخرین مقدار: {_fg_cache['value']} ({_fg_cache['last_update']})"
+    return "🔴 در دسترس نیست"
 
 def fetch_funding_rate(code: str) -> Optional[float]:
     try:
@@ -542,38 +580,26 @@ def fetch_open_interest(code: str) -> Optional[float]:
     return None
 
 def check_filters(direction: str, indicators: IndicatorSnapshot, code: str) -> tuple[bool, str]:
-    # ۱. حجم
     if indicators.volume_ratio < VOLUME_MIN_RATIO:
         return False, f"نسبت حجم {indicators.volume_ratio:.2f} کمتر از {VOLUME_MIN_RATIO}"
-
-    # ۲. فاندینگ ریت
     funding = fetch_funding_rate(code)
     if funding is not None and direction == "long" and funding > FUNDING_RATE_MAX_FOR_LONG:
         return False, f"فاندینگ {funding:.4%} برای لانگ خیلی مثبت است"
-
-    # ۳. Open Interest
     oi = fetch_open_interest(code)
     if oi is not None and oi <= 0:
         return False, "Open Interest صفر یا منفی است"
-
-    # ۴. ترس/طمع
     fg = get_fear_greed_index()
     if fg is not None:
         if direction == "long" and fg >= FEAR_GREED_EXTREME_GREED:
             return False, f"شاخص طمع شدید ({fg})"
         if direction == "short" and fg <= FEAR_GREED_EXTREME_FEAR:
             return False, f"شاخص ترس شدید ({fg})"
-
-    # ۵. ساعات کم‌حجم
     h = datetime.now(timezone.utc).hour
     if (h >= LOW_VOLUME_UTC_START_HOUR) or (h < LOW_VOLUME_UTC_END_HOUR):
         return False, f"ساعت {h}:00 UTC در بازه کم‌حجم"
-
-    # ۶. بازار رنج (ADX)
     is_reversal = indicators.edge_reversal_up or indicators.edge_reversal_down
     if indicators.adx < ADX_RANGE_THRESHOLD and not is_reversal:
         return False, f"ADX={indicators.adx:.1f} زیر {ADX_RANGE_THRESHOLD} (بازار رنج)"
-
     return True, "تمام فیلترها عبور کردند"
 
 # ===========================
@@ -617,224 +643,285 @@ def build_risk_plan(direction: str, entry: float, atr: float, account_balance_us
     return RiskPlan(direction, entry, stop_loss, targets, leverage, position_size_usdt, risk_reward, True, "ok")
 
 # ===========================
-# چارت (با مدیریت خطا)
+# تحلیل کامل ارز
 # ===========================
-def render_candles_png(df: pd.DataFrame, title: str) -> Optional[bytes]:
-    if not MPLFINANCE_AVAILABLE:
-        logger.warning("mplfinance not installed. Chart rendering disabled.")
-        return None
-    try:
-        plot_df = df.set_index("timestamp")[["open", "high", "low", "close", "volume"]].tail(120)
-        buf = io.BytesIO()
-        mpf.plot(plot_df, type="candle", style="charles", volume=True, title=title, savefig=dict(fname=buf, dpi=110, bbox_inches="tight"))
-        buf.seek(0)
-        return buf.read()
-    except Exception as e:
-        logger.warning(f"Chart rendering failed: {e}")
-        return None
+async def analyze_coin_full_status(code: str) -> str:
+    """گزارش کامل تحلیل تکنیکال و فیوچرز برای یک ارز"""
+    prices = await cache.update_prices()
+    price = prices.get(code, 0.0)
+    if price == 0.0:
+        return f"❌ قیمت ارز **{code}** در دسترس نیست. لطفاً دوباره تلاش کنید."
 
-# ===========================
-# هوش مصنوعی Gemini
-# ===========================
-AI_PROMPT_TEMPLATE = (
-    "شما یک تحلیل‌گر ریسک‌گریز هستید. فقط اگر روند، حجم، فاندینگ و Open Interest همگی با سیگنال زیر هم‌جهت باشند با کلمه CONFIRM پاسخ دهید، در غیر این صورت REJECT.\n\n"
-    "جهت: {direction}\nنماد: {ticker}\nورود: {entry}\nحد ضرر: {stop_loss}\nتارگت‌ها: {targets}\n"
-    "RSI: {rsi} | ADX: {adx} | حجم: {volume_ratio}\nفاندینگ: {funding_rate} | OI: {oi_change}\n"
-)
+    rate = await fetch_irt_rate()
+    irt_price = price * rate
 
-def confirm_signal_with_ai(chart_png: Optional[bytes], context: dict) -> tuple[str, str]:
-    if not GEMINI_API_KEY:
-        return "unavailable", "GEMINI_API_KEY تنظیم نشده"
-    if chart_png is None:
-        return "unavailable", "چارت در دسترس نیست"
-    prompt = AI_PROMPT_TEMPLATE.format(**context)
-    image_b64 = base64.b64encode(chart_png).decode("ascii")
-    payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/png", "data": image_b64}}]}]}
-    try:
-        resp = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-            params={"key": GEMINI_API_KEY}, json=payload, timeout=AI_TIMEOUT_SECONDS
-        )
-        resp.raise_for_status()
-        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        status = "confirmed" if text.upper().startswith("CONFIRM") else "rejected"
-        return status, text
-    except Exception as e:
-        logger.warning(f"AI failed: {e}")
-        return "unavailable", str(e)
+    # دریافت داده‌های مختلف تایم‌فریم
+    df_1h = await cache.get_ohlcv(code, "1h")
+    df_4h = await cache.get_ohlcv(code, "4h")
+    df_1d = await cache.get_ohlcv(code, "1d")
 
-# ===========================
-# پایپ‌لاین سیگنال
-# ===========================
-def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
-    existing = get_open_signal_for_ticker(code)
-    if existing:
-        return None, "سیگنال باز وجود دارد", None
+    if df_1h is None or len(df_1h) < 20:
+        return f"❌ داده‌های تاریخچه برای ارز **{code}** در دسترس نیست."
 
-    df_main = asyncio.run(cache.get_ohlcv(code, MAIN_TF))
-    df_higher = asyncio.run(cache.get_ohlcv(code, HIGHER_TF))
-    if df_main is None or df_higher is None:
-        return None, "داده OHLCV در دسترس نیست", None
+    ind = compute_indicators(df_1h)
+    ind_4h = compute_indicators(df_4h) if df_4h is not None else None
+    ind_1d = compute_indicators(df_1d) if df_1d is not None else None
 
-    ind_main = compute_indicators(df_main)
-    ind_higher = compute_indicators(df_higher)
-    if ind_main is None or ind_higher is None:
-        return None, "اندیکاتورها محاسبه نشدند", None
+    if ind is None:
+        return f"❌ تحلیل **{code}** ناموفق بود."
 
-    # تعیین جهت
-    direction = None
-    setup_type = ""
-    if ind_main.adx >= ADX_RANGE_THRESHOLD:
-        if ind_main.trend_up and ind_main.rsi_in_zone and (ind_main.macd_cross_up or ind_main.ema_cross_up):
-            direction, setup_type = "long", "trend"
-        elif ind_main.trend_down and ind_main.rsi_in_zone and (ind_main.macd_cross_down or ind_main.ema_cross_down):
-            direction, setup_type = "short", "trend"
+    # داده‌های فیوچرز
+    funding = fetch_funding_rate(code)
+    oi = fetch_open_interest(code)
+
+    # محاسبه تغییرات
+    close_series = df_1h["close"]
+    price_1h_ago = close_series.iloc[-2] if len(close_series) > 1 else price
+    price_4h_ago = close_series.iloc[-5] if len(close_series) > 5 else price
+    change_1h = ((price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago else 0
+
+    # تغییرات ۲۴ ساعته از دیتای روزانه
+    change_24h = 0
+    high_24h = price
+    low_24h = price
+    volume_24h = 0
+    if df_1d is not None and len(df_1d) > 1:
+        close_24h = df_1d["close"].iloc[-2] if len(df_1d) > 1 else price
+        change_24h = ((price - close_24h) / close_24h * 100) if close_24h else 0
+        high_24h = df_1d["high"].iloc[-1]
+        low_24h = df_1d["low"].iloc[-1]
+        volume_24h = df_1d["volume"].iloc[-1]
+
+    if df_1d is not None and len(df_1d) >= 7:
+        support_weekly = df_1d["low"].tail(7).min()
+        resistance_weekly = df_1d["high"].tail(7).max()
     else:
-        if ind_main.edge_reversal_up:
-            direction, setup_type = "long", "range_reversal"
-        elif ind_main.edge_reversal_down:
-            direction, setup_type = "short", "range_reversal"
+        support_weekly = ind.structure_level if ind.structure_breakout_down else None
+        resistance_weekly = ind.structure_level if ind.structure_breakout_up else None
 
-    if direction is None:
-        return None, f"هیچ ستاپ معتبری در رژیم {'روند' if ind_main.adx >= ADX_RANGE_THRESHOLD else 'رنج'} شکل نگرفت", None
+    # EMA مقادیر عددی
+    ema20 = EMAIndicator(df_1h["close"], window=20).ema_indicator().iloc[-1]
+    ema50 = EMAIndicator(df_1h["close"], window=50).ema_indicator().iloc[-1]
+    ema200 = EMAIndicator(df_1h["close"], window=200).ema_indicator().iloc[-1]
 
-    # فیلترها
-    ok, reason = check_filters(direction, ind_main, code)
-    if not ok:
-        return None, reason, None
+    # MACD مقادیر عددی
+    macd_ind = MACD(df_1h["close"], window_fast=MACD_FAST, window_slow=MACD_SLOW, window_sign=MACD_SIGNAL)
+    macd_line = macd_ind.macd().iloc[-1]
+    macd_signal = macd_ind.macd_signal().iloc[-1]
+    macd_hist = macd_ind.macd_diff().iloc[-1]
 
-    # ریسک
-    plan = build_risk_plan(direction, ind_main.close, ind_main.atr, account_balance_usdt, ind_main.structure_level)
-    if not plan.valid:
-        return None, plan.reason, None
+    # بولینگر
+    bb_ind = BollingerBands(df_1h["close"], window=20)
+    bb_upper = bb_ind.bollinger_hband().iloc[-1]
+    bb_middle = bb_ind.bollinger_mavg().iloc[-1]
+    bb_lower = bb_ind.bollinger_lband().iloc[-1]
 
-    # کول‌داون
-    last_closed = get_last_closed_ts(code)
-    if last_closed and time.time() - last_closed < SIGNAL_REOPEN_COOLDOWN_SECONDS:
-        return None, "در کول‌داون بعد از آخرین بسته‌شدن", None
+    # استوکاستیک RSI
+    stoch_rsi = StochRSIIndicator(df_1h["close"], window=14).stochrsi().iloc[-1] * 100 if len(df_1h) > 20 else 50
 
-    # AI
-    chart_png = render_candles_png(df_main, f"{code} ({MAIN_TF})")
-    ai_status, ai_text = "unavailable", ""
-    if GEMINI_API_KEY and chart_png is not None:
-        context = {
-            "direction": "لانگ" if direction == "long" else "شورت",
-            "ticker": code, "entry": f"{plan.entry:.6f}", "stop_loss": f"{plan.stop_loss:.6f}",
-            "targets": ", ".join(f"{t:.6f}" for t in plan.targets),
-            "rsi": f"{ind_main.rsi:.1f}", "adx": f"{ind_main.adx:.1f}", "volume_ratio": f"{ind_main.volume_ratio:.2f}",
-            "funding_rate": f"{fetch_funding_rate(code) or 0:.4%}", "oi_change": "نامشخص",
-        }
-        ai_status, ai_text = confirm_signal_with_ai(chart_png, context)
+    # قدرت سیگنال
+    score = 0
+    if ind.trend_up or ind.trend_down:
+        score += 1
+    if ind.rsi_in_zone:
+        score += 1
+    if ind.macd_cross_up or ind.macd_cross_down:
+        score += 1
+    if ind.volume_ratio > 2.0:
+        score += 1
+    if ind.adx > 30:
+        score += 1
+    if score >= 4:
+        signal_strength = "قوی 🟢"
+    elif score >= 2:
+        signal_strength = "متوسط 🟡"
+    else:
+        signal_strength = "ضعیف 🔴"
 
-    # ثبت
-    signal_id = record_signal(code, direction, plan.entry, plan.stop_loss, plan.targets, plan.leverage, plan.risk_reward, ai_status == "confirmed", ai_text)
-    return signal_id, "سیگنال صادر شد", (plan, setup_type, ai_status, ai_text, direction)
+    regime = "روند" if ind.adx >= ADX_RANGE_THRESHOLD else "رنج"
+    trend_fa = "صعودی 🚀" if ind.trend_up else "نزولی 🔻" if ind.trend_down else "خنثی ⚖️"
 
-# ===========================
-# ارسال به کانال و ادمین‌ها
-# ===========================
-def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type: str, ai_status: str, ai_text: str) -> str:
-    setup_label = "تعقیب روند" if setup_type == "trend" else "برگشت از لبه رنج"
-    dir_fa = "لانگ 🟢" if direction == "long" else "شورت 🔴"
+    # تفسیر RSI
+    if ind.rsi > 70:
+        rsi_interpret = "اشباع خرید (overbought)"
+    elif ind.rsi < 30:
+        rsi_interpret = "اشباع فروش (oversold)"
+    elif 40 <= ind.rsi <= 60:
+        rsi_interpret = "منطقه تعادل"
+    else:
+        rsi_interpret = "منطقه معمولی"
+
+    # تفسیر ADX
+    if ind.adx > 40:
+        adx_interpret = "روند بسیار قوی"
+    elif ind.adx > 25:
+        adx_interpret = "روند قوی"
+    elif ind.adx > 20:
+        adx_interpret = "روند ضعیف"
+    else:
+        adx_interpret = "بازار رنج (بدون روند)"
+
+    # تفسیر فاندینگ
+    if funding is not None:
+        if funding > 0.001:
+            funding_interpret = "منفی (لانگ‌ها هزینه می‌دهند)"
+        elif funding < -0.001:
+            funding_interpret = "مثبت (شورت‌ها هزینه می‌دهند)"
+        else:
+            funding_interpret = "خنثی"
+    else:
+        funding_interpret = "نامشخص"
+
+    # تفسیر OI
+    if oi is not None:
+        if oi > 0:
+            oi_interpret = "وجود دارد"
+        else:
+            oi_interpret = "صفر"
+    else:
+        oi_interpret = "نامشخص"
+
+    # تایم‌فریم بالاتر
+    trend_4h = "صعودی 🚀" if ind_4h and ind_4h.trend_up else "نزولی 🔻" if ind_4h and ind_4h.trend_down else "خنثی ⚖️" if ind_4h else "نامشخص"
+    rsi_4h = ind_4h.rsi if ind_4h else None
+    adx_4h = ind_4h.adx if ind_4h else None
+
     text = (
-        f"🚨 **سیگنال جدید** — {code}\n"
-        f"جهت: {dir_fa} | نوع: {setup_label}\n"
-        f"ورود: {plan.entry:.6f}\n"
-        f"حد ضرر: {plan.stop_loss:.6f}\n"
-        f"تارگت‌ها: {', '.join(f'{t:.6f}' for t in plan.targets)}\n"
-        f"اهرم: {plan.leverage}x | RR: 1:{plan.risk_reward:.2f}\n"
-        f"{shamsi_now()}\n"
+        f"📊 **تحلیل جامع {code}**\n"
+        f"{'────────────────────'}\n"
+        f"💰 **قیمت‌ها و تغییرات:**\n"
+        f"   • دلاری: `{fmt_usd(price)}` USDT\n"
+        f"   • تومانی: `{fmt_toman(price, rate)}`\n"
+        f"   • تغییر ۱ساعته: `{format_percent(change_1h)}`\n"
+        f"   • تغییر ۲۴ساعته: `{format_percent(change_24h)}`\n"
+        f"   • بیشترین ۲۴h: `{fmt_usd(high_24h)}`\n"
+        f"   • کمترین ۲۴h: `{fmt_usd(low_24h)}`\n"
+        f"{'────────────────────'}\n"
+        f"📈 **روند و رژیم بازار:**\n"
+        f"   • روند کلی: {trend_fa}\n"
+        f"   • رژیم بازار: {regime} (ADX: {ind.adx:.1f})\n"
+        f"   • قدرت سیگنال: {signal_strength}\n"
+        f"{'────────────────────'}\n"
+        f"📊 **اندیکاتورهای تکنیکال (۱ساعته):**\n"
+        f"   • RSI (14): `{ind.rsi:.1f}` ({rsi_interpret})\n"
+        f"   • استوکاستیک RSI: `{stoch_rsi:.1f}`\n"
+        f"   • MACD: خط `{macd_line:.4f}` | سیگنال `{macd_signal:.4f}` | هیستوگرام `{macd_hist:.4f}`\n"
+        f"   • EMA 20: `{fmt_usd(ema20)}`\n"
+        f"   • EMA 50: `{fmt_usd(ema50)}`\n"
+        f"   • EMA 200: `{fmt_usd(ema200)}`\n"
+        f"   • ADX: `{ind.adx:.1f}` ({adx_interpret})\n"
+        f"   • ATR: `{fmt_usd(ind.atr)}`\n"
+        f"{'────────────────────'}\n"
+        f"📊 **بولینگر باند (۲۰):**\n"
+        f"   • بالا: `{fmt_usd(bb_upper)}`\n"
+        f"   • وسط: `{fmt_usd(bb_middle)}`\n"
+        f"   • پایین: `{fmt_usd(bb_lower)}`\n"
+        f"   • عرض باند: `{fmt_usd(bb_upper - bb_lower)}`\n"
+        f"{'────────────────────'}\n"
+        f"🎯 **سطوح کلیدی:**\n"
+        f"   • حمایت ۲۴h: `{fmt_usd(low_24h)}`\n"
+        f"   • مقاومت ۲۴h: `{fmt_usd(high_24h)}`\n"
+        f"   • حمایت هفتگی: `{fmt_usd(support_weekly)}`\n"
+        f"   • مقاومت هفتگی: `{fmt_usd(resistance_weekly)}`\n"
+        f"{'────────────────────'}\n"
+        f"📊 **داده‌های فیوچرز:**\n"
+        f"   • فاندینگ‌ریت: `{funding:.4%}` ({funding_interpret})\n"
+        f"   • Open Interest: `{oi:,.0f}` ({oi_interpret})\n"
+        f"{'────────────────────'}\n"
+        f"📊 **حجم معاملات:**\n"
+        f"   • نسبت به میانگین: `{ind.volume_ratio:.2f}x`\n"
+        f"   • حجم ۲۴h: `{volume_24h:,.0f}` USDT\n"
+        f"{'────────────────────'}\n"
+        f"🔄 **تایم‌فریم بالاتر (۴ساعته):**\n"
+        f"   • روند: {trend_4h}\n"
+        f"   • RSI: `{rsi_4h:.1f}`\n"
+        f"   • ADX: `{adx_4h:.1f}`\n"
+        f"{'────────────────────'}\n"
+        f"📅 **بروزرسانی:** `{shamsi_now()}`\n"
+        f"🏛 **صرافی:** `{cache.active_exchange_name}`\n"
     )
-    if ai_status == "confirmed":
-        text += f"\n🤖 **AI:** ✅ تأیید\n{ai_text}"
-    elif ai_status == "rejected":
-        text += f"\n🤖 **AI:** ⚠️ عدم تأیید (فقط اطلاعاتی)\n{ai_text}"
-    else:
-        text += f"\n🤖 **AI:** در دسترس نبود"
     return text
 
-async def send_signal(app: Application, code: str, signal_id: int, direction: str, plan: RiskPlan, setup_type: str, ai_status: str, ai_text: str):
-    text = format_signal_message(code, direction, plan, setup_type, ai_status, ai_text)
-    thread = get_channel_thread(code)
-    reply_to_id = thread["message_id"] if thread else None
-    if CHANNEL_ID:
-        try:
-            msg = await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=reply_to_id)
-            set_channel_thread(code, signal_id, msg.message_id, hashlib.sha256(text.encode()).hexdigest())
-            set_channel_message_id(signal_id, msg.message_id)
-        except Exception as e:
-            logger.warning(f"Send to channel failed: {e}")
-    for admin_id in ADMIN_USER_IDS:
-        try:
-            await app.bot.send_message(admin_id, text, parse_mode="Markdown")
-        except Exception as e:
-            logger.warning(f"Send to admin {admin_id} failed: {e}")
+# ===========================
+# پنل مدیریت کامل
+# ===========================
+def get_admin_stats_text() -> str:
+    db = get_db_stats()
+    uptime = int(time.time() - START_TIME)
+    days = uptime // 86400
+    hours = (uptime % 86400) // 3600
+    minutes = (uptime % 3600) // 60
+
+    total_users = len(registered_users)
+    active_users = len(registered_users - paused_users)
+    paused_users_count = len(paused_users)
+
+    # آمار سیگنال‌ها
+    total_signals = db["total"]
+    open_signals = db["open"]
+    closed = db["tp3"] + db["sl"]
+    wins = db["tp3"]
+    losses = db["sl"]
+    winrate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+
+    # بهترین و بدترین ارز
+    best_coin = "نامشخص"
+    worst_coin = "نامشخص"
+    # این بخش نیاز به کوئری دیتابیس دارد
+
+    text = (
+        f"👑 **پنل مدیریت جامع**\n"
+        f"{'────────────────────'}\n"
+        f"🤖 **اطلاعات برنامه:**\n"
+        f"   • نسخه: `{VERSION}`\n"
+        f"   • زمان ساخت: `{BUILD_TIME}`\n"
+        f"   • زمان اجرا: `{shamsi_now()}`\n"
+        f"   • آپتایم: `{days} روز {hours} ساعت {minutes} دقیقه`\n"
+        f"   • پایتون: `{sys.version.split()[0]}`\n"
+        f"{'────────────────────'}\n"
+        f"👥 **آمار کاربران:**\n"
+        f"   • کل کاربران: `{total_users}`\n"
+        f"   • فعال: `{active_users}`\n"
+        f"   • متوقف: `{paused_users_count}`\n"
+        f"{'────────────────────'}\n"
+        f"📊 **آمار سیگنال‌ها:**\n"
+        f"   • کل تولیدشده: `{total_signals}`\n"
+        f"   • باز: `{open_signals}`\n"
+        f"   • بسته شده: `{closed}`\n"
+        f"   • موفق (TP3): `{wins}`\n"
+        f"   • ناموفق (SL): `{losses}`\n"
+        f"   • وین‌ریت: `{winrate:.1f}%`\n"
+        f"   • بهترین ارز: `{best_coin}`\n"
+        f"   • بدترین ارز: `{worst_coin}`\n"
+        f"{'────────────────────'}\n"
+        f"🏛 **وضعیت سیستم:**\n"
+        f"   • صرافی فعال: `{cache.active_exchange_name}`\n"
+        f"   • صرافی‌ها:\n{get_exchange_status_text()}\n"
+        f"   • نرخ تتر (Wallex): {get_irt_rate_status()}\n"
+        f"   • شاخص ترس/طمع: {get_fg_status()}\n"
+        f"   • هوش مصنوعی (Gemini): {'✅ فعال' if GEMINI_API_KEY else '❌ غیرفعال'}\n"
+        f"{'────────────────────'}\n"
+        f"💾 **دیتابیس:**\n"
+        f"   • مسیر: `{DB_PATH}`\n"
+        f"   • تعداد رکوردها: `{total_signals}`\n"
+        f"{'────────────────────'}\n"
+        f"📢 **کانال تلگرام:**\n"
+        f"   • شناسه: `{CHANNEL_ID if CHANNEL_ID else 'تنظیم نشده'}`\n"
+        f"{'────────────────────'}\n"
+        f"⚙️ **تنظیمات فعال:**\n"
+        f"   • اهرم: `{MIN_LEVERAGE}-{MAX_LEVERAGE}x`\n"
+        f"   • حداقل RR: `1:{MIN_RISK_REWARD}`\n"
+        f"   • ریسک هر معامله: `{RISK_PER_TRADE_PCT}%`\n"
+        f"   • فیلتر حجم: `{VOLUME_MIN_RATIO}x`\n"
+        f"   • کول‌داون: `{SIGNAL_REOPEN_COOLDOWN_SECONDS//60} دقیقه`\n"
+        f"   • پوزیشن‌های همزمان: `{MAX_CONCURRENT_POSITIONS}`\n"
+    )
+    return text
 
 # ===========================
-# مانیتورینگ سیگنال‌های باز
+# بقیه توابع (بدون تغییر)
 # ===========================
-async def monitor_open_signals(app: Application):
-    while True:
-        try:
-            for row in open_signals():
-                code = row["ticker"]
-                price = (await cache.update_prices()).get(code, 0.0)
-                if price == 0.0:
-                    continue
-                targets = json.loads(row["targets"])
-                direction = row["direction"]
-                stop_loss = row["stop_loss"]
-                hit_sl = (price <= stop_loss) if direction == "long" else (price >= stop_loss)
-                if hit_sl:
-                    text = f"❌ **حد ضرر خورد** — {code}\nورود: {row['entry']:.6f} | SL: {stop_loss:.6f}\n{shamsi_now()}"
-                    await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
-                    update_signal_status(row["id"], "sl")
-                    clear_channel_thread(code)
-                    continue
-
-                highest = row["highest_tp_hit"]
-                if highest < 1:
-                    if (price >= targets[0] if direction == "long" else price <= targets[0]):
-                        text = f"✅ **TP1 زده شد** — {code}\nحد ضرر به نقطه ورود منتقل شد: {row['entry']:.6f}\n{shamsi_now()}"
-                        await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
-                        update_signal_progress(row["id"], 1, row["entry"])
-                        continue
-                if highest < 2:
-                    if (price >= targets[1] if direction == "long" else price <= targets[1]):
-                        text = f"✅ **TP2 زده شد** — {code}\nحد ضرر به TP1 منتقل شد: {targets[0]:.6f}\n{shamsi_now()}"
-                        await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
-                        update_signal_progress(row["id"], 2, targets[0])
-                        continue
-                if (price >= targets[2] if direction == "long" else price <= targets[2]):
-                    text = f"🏆 **TP3 زده شد** — {code}\nسیگنال با موفقیت بسته شد\n{shamsi_now()}"
-                    await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
-                    update_signal_status(row["id"], "tp3")
-                    clear_channel_thread(code)
-            await asyncio.sleep(CHANNEL_MONITOR_INTERVAL_SECONDS)
-        except Exception as e:
-            logger.error(f"Monitor error: {e}")
-            await asyncio.sleep(60)
-
-# ===========================
-# اسکن دوره‌ای
-# ===========================
-async def periodic_scan(app: Application):
-    while True:
-        try:
-            logger.info("🔍 اسکن دوره‌ای شروع شد...")
-            for code in COIN_CODES:
-                try:
-                    signal_id, reason, data = evaluate_coin(code)
-                    if signal_id and data:
-                        plan, setup_type, ai_status, ai_text, direction = data
-                        await send_signal(app, code, signal_id, direction, plan, setup_type, ai_status, ai_text)
-                except Exception as e:
-                    logger.exception(f"Error scanning {code}: {e}")
-            logger.info("✅ اسکن دوره‌ای تمام شد")
-            await asyncio.sleep(SIGNAL_SCAN_INTERVAL_SECONDS)
-        except Exception as e:
-            logger.error(f"Scan loop error: {e}")
-            await asyncio.sleep(60)
+# ... (بخش‌های قبلی مانند fetch_irt_rate، کلاس MarketCache، compute_indicators، check_filters، build_risk_plan و ...)
 
 # ===========================
 # کیبوردها
@@ -896,8 +983,15 @@ def kb_reset_confirm():
     ])
 
 # ===========================
-# هندلرها
+# متغیرهای سراسری و هندلرها
 # ===========================
+registered_users: Set[int] = set()
+paused_users: Set[int] = set()
+signal_history: List[Dict] = []
+TOTAL_SIGNALS_GENERATED = 0
+LAST_REPORT_TIME = None
+
+# هندلرهای اصلی
 async def version_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🤖 **نسخه ربات:** `{VERSION}`\n📅 **زمان ساخت:** `{BUILD_TIME}`\n🆔 **شناسه:** `{context.bot.id}`",
@@ -907,7 +1001,8 @@ async def version_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def info_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     is_adm = user_id in ADMIN_USER_IDS
-    await update.message.reply_text(
+    db = get_db_stats()
+    text = (
         f"📌 **اطلاعات ربات هوشمند تحلیل ارزهای دیجیتال**\n"
         f"{'────────────────────'}\n"
         f"🤖 **نسخه:** `{VERSION}`\n"
@@ -916,17 +1011,23 @@ async def info_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👤 **وضعیت شما:** {'👑 ادمین' if is_adm else '👤 کاربر عادی'}\n"
         f"📊 **تعداد ارزها:** `{len(COIN_CODES)}`\n"
         f"🏛 **صرافی فعال:** `{cache.active_exchange_name}`\n"
+        f"📊 **کل سیگنال‌ها:** `{db['total']}`\n"
+        f"🔄 **سیگنال‌های باز:** `{db['open']}`\n"
         f"{'────────────────────'}\n"
-        f"⚡️ *برای شروع از دستور /start استفاده کنید.*",
-        parse_mode="Markdown"
+        f"⚡️ *برای شروع از دستور /start استفاده کنید.*"
     )
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    registered_users.add(user_id)
+    paused_users.discard(user_id)
     is_adm = user_id in ADMIN_USER_IDS
     await update.message.reply_text(MAIN_MENU_TEXT, reply_markup=kb_main_menu(is_adm), parse_mode="Markdown")
 
 async def stop_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    paused_users.add(user_id)
     await update.message.reply_text("⛔ **ربات متوقف شد.**", reply_markup=kb_start_only(), parse_mode="Markdown")
 
 async def admin_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -936,6 +1037,9 @@ async def admin_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
     await update.message.reply_text("👑 **پنل مدیریت ادمین**", reply_markup=kb_admin_panel(), parse_mode="Markdown")
 
+# ===========================
+# Callback Handler (بخش‌های اصلی)
+# ===========================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -944,12 +1048,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_adm = user_id in ADMIN_USER_IDS
 
     if data == "bot_start_action":
+        paused_users.discard(user_id)
+        registered_users.add(user_id)
         await query.edit_message_text(MAIN_MENU_TEXT, reply_markup=kb_main_menu(is_adm), parse_mode="Markdown")
-    elif data == "bot_stop_action":
+        return
+
+    if data == "bot_stop_action":
+        paused_users.add(user_id)
         await query.edit_message_text("⛔ **ربات متوقف شد.**", reply_markup=kb_start_only(), parse_mode="Markdown")
-    elif data == "main_menu":
+        return
+
+    if user_id in paused_users and data != "main_menu":
+        await query.edit_message_text("⛔️ **ربات برای شما غیرفعال است.**", reply_markup=kb_start_only(), parse_mode="Markdown")
+        return
+
+    if data == "main_menu":
         await query.edit_message_text(MAIN_MENU_TEXT, reply_markup=kb_main_menu(is_adm), parse_mode="Markdown")
-    elif data == "coins_prices_all":
+        return
+
+    if data == "coins_prices_all":
         await query.edit_message_text("⏳ در حال دریافت قیمت‌ها...", parse_mode="Markdown")
         prices = await cache.update_prices()
         rate = await fetch_irt_rate()
@@ -959,42 +1076,28 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             p = prices.get(code, 0.0)
             text += f"‎{exchange_emoji} **{code}**: {fmt_usd(p)} USDT\n‎🇮🇷 {fmt_toman(p, rate)}\n\n"
         await query.edit_message_text(text, reply_markup=kb_prices_all_single(), parse_mode="Markdown")
-    elif data == "coins_status_grid":
+        return
+
+    if data == "coins_status_grid":
         await query.edit_message_text("📊 **تحلیل تکنیکال ارزها**\nارز مورد نظر را انتخاب کنید:", reply_markup=kb_status_grid(), parse_mode="Markdown")
-    elif data.startswith("coin_detail_"):
+        return
+
+    if data.startswith("coin_detail_"):
         code = data.split("_")[2]
-        await query.edit_message_text(f"⏳ در حال تحلیل {code}...", parse_mode="Markdown")
-        df = await cache.get_ohlcv(code, "1h")
-        if df is None:
-            await query.edit_message_text(f"❌ داده‌های {code} در دسترس نیست.", reply_markup=kb_status_grid(), parse_mode="Markdown")
-            return
-        ind = compute_indicators(df)
-        if ind is None:
-            await query.edit_message_text(f"❌ تحلیل {code} ناموفق بود.", reply_markup=kb_status_grid(), parse_mode="Markdown")
-            return
-        rate = await fetch_irt_rate()
-        price = (await cache.update_prices()).get(code, 0.0)
-        text = (
-            f"📊 **تحلیل تکنیکال {code}**\n{'────────────────────'}\n"
-            f"💵 قیمت: {fmt_usd(price)} | {fmt_toman(price, rate)}\n"
-            f"📈 روند: {'صعودی 🚀' if ind.trend_up else 'نزولی 🔻' if ind.trend_down else 'خنثی ⚖️'}\n"
-            f"📊 RSI: {ind.rsi:.1f} ({'منطقه' if ind.rsi_in_zone else 'خارج از منطقه'})\n"
-            f"📈 MACD: {'صعودی 🟢' if ind.macd_cross_up else 'نزولی 🔴' if ind.macd_cross_down else 'خنثی'}\n"
-            f"📊 ADX: {ind.adx:.1f} ({'روند' if ind.adx >= ADX_RANGE_THRESHOLD else 'رنج'})\n"
-            f"📊 ATR: {fmt_usd(ind.atr)}\n"
-            f"📊 حجم: نسبت {ind.volume_ratio:.2f} به میانگین\n"
-            f"🎯 سطح کلیدی: {fmt_usd(ind.structure_level)}\n"
-            f"{'────────────────────'}\n"
-            f"{shamsi_now()}"
-        )
+        await query.edit_message_text(f"⏳ در حال تحلیل جامع {code}...", parse_mode="Markdown")
+        text = await analyze_coin_full_status(code)
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"coin_detail_{code}")],
             [InlineKeyboardButton("🔙 لیست ارزها", callback_data="coins_status_grid")]
         ]), parse_mode="Markdown")
-    elif data == "admin_panel":
+        return
+
+    if data == "admin_panel":
         if not is_adm: return
         await query.edit_message_text("👑 **پنل مدیریت**", reply_markup=kb_admin_panel(), parse_mode="Markdown")
-    elif data == "admin_signal_stats":
+        return
+
+    if data == "admin_signal_stats":
         if not is_adm: return
         s = stats_summary()
         winrate = f"{s['winrate']:.1f}%" if s['winrate'] is not None else "بدون داده"
@@ -1007,24 +1110,243 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🤖 رد شده توسط AI: {s['rejected_by_ai']}",
             reply_markup=kb_back_admin(), parse_mode="Markdown"
         )
-    elif data == "admin_system_stats":
+        return
+
+    if data == "admin_system_stats":
         if not is_adm: return
-        await query.edit_message_text(
-            f"👥 **آمار سیستم**\n{'────────────────────'}\n"
-            f"🏛 صرافی: {cache.active_exchange_name}\n"
-            f"📊 تعداد ارزها: {len(COIN_CODES)}\n"
-            f"🤖 نسخه: {VERSION}\n"
-            f"⏱ {shamsi_now()}",
-            reply_markup=kb_back_admin(), parse_mode="Markdown"
-        )
-    elif data == "reset_stats_confirm":
+        text = get_admin_stats_text()
+        await query.edit_message_text(text, reply_markup=kb_back_admin(), parse_mode="Markdown")
+        return
+
+    if data == "reset_stats_confirm":
         if not is_adm: return
         await query.edit_message_text("⚠️ **آیا از صفر کردن آمار اطمینان دارید؟**", reply_markup=kb_reset_confirm(), parse_mode="Markdown")
-    elif data == "reset_stats_do":
+        return
+
+    if data == "reset_stats_do":
         if not is_adm: return
         with _conn() as c:
             c.execute("DELETE FROM signals")
         await query.edit_message_text("✅ **آمار با موفقیت صفر شد.**", reply_markup=kb_back_admin(), parse_mode="Markdown")
+        return
+
+# ===========================
+# توابع اسکن و مانیتورینگ
+# ===========================
+async def periodic_scan(app: Application):
+    while True:
+        try:
+            logger.info("🔍 اسکن دوره‌ای شروع شد...")
+            for code in COIN_CODES:
+                try:
+                    signal_id, reason, data = evaluate_coin(code)
+                    if signal_id and data:
+                        plan, setup_type, ai_status, ai_text, direction = data
+                        await send_signal(app, code, signal_id, direction, plan, setup_type, ai_status, ai_text)
+                except Exception as e:
+                    logger.exception(f"Error scanning {code}: {e}")
+            logger.info("✅ اسکن دوره‌ای تمام شد")
+            await asyncio.sleep(SIGNAL_SCAN_INTERVAL_SECONDS)
+        except Exception as e:
+            logger.error(f"Scan loop error: {e}")
+            await asyncio.sleep(60)
+
+async def monitor_open_signals(app: Application):
+    while True:
+        try:
+            for row in open_signals():
+                code = row["ticker"]
+                price = (await cache.update_prices()).get(code, 0.0)
+                if price == 0.0:
+                    continue
+                targets = json.loads(row["targets"])
+                direction = row["direction"]
+                stop_loss = row["stop_loss"]
+                hit_sl = (price <= stop_loss) if direction == "long" else (price >= stop_loss)
+                if hit_sl:
+                    text = f"❌ **حد ضرر خورد** — {code}\nورود: {row['entry']:.6f} | SL: {stop_loss:.6f}\n{shamsi_now()}"
+                    await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
+                    update_signal_status(row["id"], "sl")
+                    clear_channel_thread(code)
+                    continue
+
+                highest = row["highest_tp_hit"]
+                if highest < 1:
+                    if (price >= targets[0] if direction == "long" else price <= targets[0]):
+                        text = f"✅ **TP1 زده شد** — {code}\nحد ضرر به نقطه ورود منتقل شد: {row['entry']:.6f}\n{shamsi_now()}"
+                        await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
+                        update_signal_progress(row["id"], 1, row["entry"])
+                        continue
+                if highest < 2:
+                    if (price >= targets[1] if direction == "long" else price <= targets[1]):
+                        text = f"✅ **TP2 زده شد** — {code}\nحد ضرر به TP1 منتقل شد: {targets[0]:.6f}\n{shamsi_now()}"
+                        await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
+                        update_signal_progress(row["id"], 2, targets[0])
+                        continue
+                if (price >= targets[2] if direction == "long" else price <= targets[2]):
+                    text = f"🏆 **TP3 زده شد** — {code}\nسیگنال با موفقیت بسته شد\n{shamsi_now()}"
+                    await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=row["channel_message_id"])
+                    update_signal_status(row["id"], "tp3")
+                    clear_channel_thread(code)
+            await asyncio.sleep(CHANNEL_MONITOR_INTERVAL_SECONDS)
+        except Exception as e:
+            logger.error(f"Monitor error: {e}")
+            await asyncio.sleep(60)
+
+# ===========================
+# ارسال سیگنال
+# ===========================
+def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type: str, ai_status: str, ai_text: str) -> str:
+    setup_label = "تعقیب روند" if setup_type == "trend" else "برگشت از لبه رنج"
+    dir_fa = "لانگ 🟢" if direction == "long" else "شورت 🔴"
+    text = (
+        f"🚨 **سیگنال جدید** — {code}\n"
+        f"جهت: {dir_fa} | نوع: {setup_label}\n"
+        f"ورود: {plan.entry:.6f}\n"
+        f"حد ضرر: {plan.stop_loss:.6f}\n"
+        f"تارگت‌ها: {', '.join(f'{t:.6f}' for t in plan.targets)}\n"
+        f"اهرم: {plan.leverage}x | RR: 1:{plan.risk_reward:.2f}\n"
+        f"{shamsi_now()}\n"
+    )
+    if ai_status == "confirmed":
+        text += f"\n🤖 **AI:** ✅ تأیید\n{ai_text}"
+    elif ai_status == "rejected":
+        text += f"\n🤖 **AI:** ⚠️ عدم تأیید (فقط اطلاعاتی)\n{ai_text}"
+    else:
+        text += f"\n🤖 **AI:** در دسترس نبود"
+    return text
+
+async def send_signal(app: Application, code: str, signal_id: int, direction: str, plan: RiskPlan, setup_type: str, ai_status: str, ai_text: str):
+    text = format_signal_message(code, direction, plan, setup_type, ai_status, ai_text)
+    thread = get_channel_thread(code)
+    reply_to_id = thread["message_id"] if thread else None
+    if CHANNEL_ID:
+        try:
+            msg = await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=reply_to_id)
+            set_channel_thread(code, signal_id, msg.message_id, hashlib.sha256(text.encode()).hexdigest())
+            set_channel_message_id(signal_id, msg.message_id)
+        except Exception as e:
+            logger.warning(f"Send to channel failed: {e}")
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await app.bot.send_message(admin_id, text, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"Send to admin {admin_id} failed: {e}")
+
+# ===========================
+# ارزیابی ارز
+# ===========================
+def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
+    existing = get_open_signal_for_ticker(code)
+    if existing:
+        return None, "سیگنال باز وجود دارد", None
+
+    df_main = asyncio.run(cache.get_ohlcv(code, MAIN_TF))
+    df_higher = asyncio.run(cache.get_ohlcv(code, HIGHER_TF))
+    if df_main is None or df_higher is None:
+        return None, "داده OHLCV در دسترس نیست", None
+
+    ind_main = compute_indicators(df_main)
+    ind_higher = compute_indicators(df_higher)
+    if ind_main is None or ind_higher is None:
+        return None, "اندیکاتورها محاسبه نشدند", None
+
+    direction = None
+    setup_type = ""
+    if ind_main.adx >= ADX_RANGE_THRESHOLD:
+        if ind_main.trend_up and ind_main.rsi_in_zone and (ind_main.macd_cross_up or ind_main.ema_cross_up):
+            direction, setup_type = "long", "trend"
+        elif ind_main.trend_down and ind_main.rsi_in_zone and (ind_main.macd_cross_down or ind_main.ema_cross_down):
+            direction, setup_type = "short", "trend"
+    else:
+        if ind_main.edge_reversal_up:
+            direction, setup_type = "long", "range_reversal"
+        elif ind_main.edge_reversal_down:
+            direction, setup_type = "short", "range_reversal"
+
+    if direction is None:
+        return None, f"هیچ ستاپ معتبری در رژیم {'روند' if ind_main.adx >= ADX_RANGE_THRESHOLD else 'رنج'} شکل نگرفت", None
+
+    ok, reason = check_filters(direction, ind_main, code)
+    if not ok:
+        return None, reason, None
+
+    plan = build_risk_plan(direction, ind_main.close, ind_main.atr, account_balance_usdt, ind_main.structure_level)
+    if not plan.valid:
+        return None, plan.reason, None
+
+    last_closed = get_last_closed_ts(code)
+    if last_closed and time.time() - last_closed < SIGNAL_REOPEN_COOLDOWN_SECONDS:
+        return None, "در کول‌داون بعد از آخرین بسته‌شدن", None
+
+    # AI
+    chart_png = render_candles_png(df_main, f"{code} ({MAIN_TF})")
+    ai_status, ai_text = "unavailable", ""
+    if GEMINI_API_KEY and chart_png is not None:
+        context = {
+            "direction": "لانگ" if direction == "long" else "شورت",
+            "ticker": code, "entry": f"{plan.entry:.6f}", "stop_loss": f"{plan.stop_loss:.6f}",
+            "targets": ", ".join(f"{t:.6f}" for t in plan.targets),
+            "rsi": f"{ind_main.rsi:.1f}", "adx": f"{ind_main.adx:.1f}", "volume_ratio": f"{ind_main.volume_ratio:.2f}",
+            "funding_rate": f"{fetch_funding_rate(code) or 0:.4%}", "oi_change": "نامشخص",
+        }
+        ai_status, ai_text = confirm_signal_with_ai(chart_png, context)
+
+    signal_id = record_signal(code, direction, plan.entry, plan.stop_loss, plan.targets, plan.leverage, plan.risk_reward, ai_status == "confirmed", ai_text)
+    return signal_id, "سیگنال صادر شد", (plan, setup_type, ai_status, ai_text, direction)
+
+# ===========================
+# بقیه توابع
+# ===========================
+def render_candles_png(df: pd.DataFrame, title: str) -> Optional[bytes]:
+    if not MPLFINANCE_AVAILABLE:
+        return None
+    try:
+        plot_df = df.set_index("timestamp")[["open", "high", "low", "close", "volume"]].tail(120)
+        buf = io.BytesIO()
+        mpf.plot(plot_df, type="candle", style="charles", volume=True, title=title, savefig=dict(fname=buf, dpi=110, bbox_inches="tight"))
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        logger.warning(f"Chart rendering failed: {e}")
+        return None
+
+def confirm_signal_with_ai(chart_png: Optional[bytes], context: dict) -> tuple[str, str]:
+    if not GEMINI_API_KEY:
+        return "unavailable", "GEMINI_API_KEY تنظیم نشده"
+    if chart_png is None:
+        return "unavailable", "چارت در دسترس نیست"
+    prompt = AI_PROMPT_TEMPLATE.format(**context)
+    image_b64 = base64.b64encode(chart_png).decode("ascii")
+    payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/png", "data": image_b64}}]}]}
+    try:
+        resp = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+            params={"key": GEMINI_API_KEY}, json=payload, timeout=AI_TIMEOUT_SECONDS
+        )
+        resp.raise_for_status()
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        status = "confirmed" if text.upper().startswith("CONFIRM") else "rejected"
+        return status, text
+    except Exception as e:
+        logger.warning(f"AI failed: {e}")
+        return "unavailable", str(e)
+
+def stats_summary() -> dict:
+    with _conn() as c:
+        total = c.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"]
+        wins = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='tp3'").fetchone()["n"]
+        losses = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='sl'").fetchone()["n"]
+        rejected_by_ai = c.execute("SELECT COUNT(*) AS n FROM signals WHERE ai_confirmed=0").fetchone()["n"]
+    total_closed = wins + losses
+    winrate = (wins / total_closed * 100) if total_closed else None
+    return {"total_signals": total, "wins": wins, "losses": losses, "winrate": winrate, "rejected_by_ai": rejected_by_ai}
+
+AI_PROMPT_TEMPLATE = (
+    "شما یک تحلیل‌گر ریسک‌گریز هستید. فقط اگر روند، حجم، فاندینگ و Open Interest همگی با سیگنال زیر هم‌جهت باشند با کلمه CONFIRM پاسخ دهید، در غیر این صورت REJECT.\n\n"
+    "جهت: {direction}\nنماد: {ticker}\nورود: {entry}\nحد ضرر: {stop_loss}\nتارگت‌ها: {targets}\n"
+    "RSI: {rsi} | ADX: {adx} | حجم: {volume_ratio}\nفاندینگ: {funding_rate} | OI: {oi_change}\n"
+)
 
 # ===========================
 # راه‌اندازی
@@ -1041,7 +1363,6 @@ async def post_init(app: Application):
     ]
     await app.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
     await app.bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
-    # شروع وظایف دوره‌ای
     asyncio.create_task(periodic_scan(app))
     asyncio.create_task(monitor_open_signals(app))
 
