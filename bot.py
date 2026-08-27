@@ -1,669 +1,744 @@
-import os
-import sys
-import logging
 import asyncio
-import aiosqlite
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
+import json
+import logging
+import os
+import time
+from datetime import datetime
+from typing import Optional, List, Dict, Set
 
+import ccxt
+import jdatetime
 import pandas as pd
-import numpy as np
-import ccxt.async_support as ccxt
+import requests
+from dotenv import load_dotenv
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
-from telegram.error import TelegramError, BadRequest
+from ta.momentum import RSIIndicator, StochRSIIndicator
+from ta.trend import EMAIndicator, MACD, ADXIndicator
+from ta.volatility import AverageTrueRange, BollingerBands
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommand
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ==========================================
-# 1. CONFIGURATION & ENVIRONMENT SETUP
-# ==========================================
+# ===========================
+# نسخه‌گذاری
+# ===========================
+VERSION = "2.5.1"
+BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-class Config:
-    BOT_TOKEN: str = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-    CHANNEL_ID: str = os.getenv("CHANNEL_ID", "@your_channel_username")
-    ADMIN_IDS: List[int] = [int(x) for x in os.getenv("ADMIN_IDS", "123456789").split(",") if x.strip()]
-    
-    EXCHANGE_NAME: str = os.getenv("EXCHANGE_NAME", "mexc")
-    PRIMARY_TIMEFRAME: str = os.getenv("PRIMARY_TIMEFRAME", "1h")
-    HIGHER_TIMEFRAME: str = os.getenv("HIGHER_TIMEFRAME", "4h")
-    POLL_INTERVAL: int = int(os.getenv("POLL_INTERVAL", "60"))
-    COOLDOWN_HOURS: int = int(os.getenv("COOLDOWN_HOURS", "2"))
-    DB_FILE: str = os.getenv("DB_FILE", "bot_database.db")
-    
-    # اندیکاتورها
-    EMA_PERIOD: int = 200
-    RSI_PERIOD: int = 14
-    ATR_PERIOD: int = 14
-    VOL_SMA_PERIOD: int = 20
+try:
+    from zoneinfo import ZoneInfo
+    TEHRAN_TZ = ZoneInfo("Asia/Tehran")
+except Exception:
+    TEHRAN_TZ = None
 
-    DEFAULT_SYMBOLS: List[str] = [
-        "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT",
-        "XRP/USDT", "ADA/USDT", "DOGE/USDT", "AVAX/USDT",
-        "LINK/USDT", "DOT/USDT", "NEAR/USDT", "PEPE/USDT",
-        "SHIB/USDT", "FLOKI/USDT", "BONK/USDT", "TON/USDT",
-        "SUI/USDT", "APT/USDT", "ARBITRUM/USDT", "1000SATS/USDT"
-    ]
-
-# ==========================================
-# 2. LOGGING CONFIGURATION
-# ==========================================
+load_dotenv()
 
 logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
-    format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("bot.log", encoding="utf-8")
-    ]
 )
-logger = logging.getLogger("SignalBotEngine")
+logger = logging.getLogger("signal_bot")
 
-# ==========================================
-# 3. DATABASE MANAGER (SQLITE ASYNC)
-# ==========================================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_USER_IDS = {
+    int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()
+}
+CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 
-class DatabaseManager:
-    def __init__(self, db_path: str = Config.DB_FILE):
-        self.db_path = db_path
+# جایگزینی MATIC با UNI (Uniswap)
+COIN_CODES = [
+    "BTC", "ETH", "SOL", "BNB", "XRP",
+    "ADA", "DOGE", "AVAX", "LINK", "DOT",
+    "NEAR", "SUI", "APT", "ARB", "OP",
+    "POL", "UNI", "LTC", "BCH", "ATOM",
+    "SHIB", "PEPE", "FET", "RENDER", "INJ",
+    "TIA", "WIF", "FLOKI", "SEI", "RUNE"
+]
 
-    async def init_db(self):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS symbols (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT UNIQUE NOT NULL,
-                    is_active INTEGER DEFAULT 1
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS signals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    signal_type TEXT NOT NULL,
-                    entry_price REAL NOT NULL,
-                    tp1 REAL NOT NULL,
-                    tp2 REAL NOT NULL,
-                    sl REAL NOT NULL,
-                    status TEXT DEFAULT 'OPEN',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS cooldowns (
-                    symbol TEXT PRIMARY KEY,
-                    expire_at TIMESTAMP NOT NULL
-                )
-            """)
-            await db.commit()
+IRT_RATE_TTL_SECONDS = 60
+PRICE_TTL_SECONDS = 30
 
-            cursor = await db.execute("SELECT COUNT(*) FROM symbols")
-            count = await cursor.fetchone()
-            if count and count[0] == 0:
-                for sym in Config.DEFAULT_SYMBOLS:
-                    await db.execute("INSERT OR IGNORE INTO symbols (symbol, is_active) VALUES (?, 1)", (sym,))
-                await db.commit()
+DATA_DIR = os.getenv("DATA_DIR", "./data")
+os.makedirs(DATA_DIR, exist_ok=True)
+STATE_FILE = os.path.join(DATA_DIR, "state.json")
 
-    async def get_active_symbols(self) -> List[str]:
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("SELECT symbol FROM symbols WHERE is_active = 1") as cursor:
-                rows = await cursor.fetchall()
-                return [row[0] for row in rows]
+DIVIDER = "────────────────────"
 
-    async def add_symbol(self, symbol: str) -> bool:
-        formatted = symbol.upper().strip()
-        if "/" not in formatted:
-            formatted += "/USDT"
-        async with aiosqlite.connect(self.db_path) as db:
-            try:
-                await db.execute("INSERT INTO symbols (symbol, is_active) VALUES (?, 1) ON CONFLICT(symbol) DO UPDATE SET is_active=1", (formatted,))
-                await db.commit()
-                return True
-            except Exception as e:
-                logger.error(f"Error adding symbol to DB: {e}")
-                return False
+exchange_headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
 
-    async def remove_symbol(self, symbol: str) -> bool:
-        formatted = symbol.upper().strip()
-        if "/" not in formatted:
-            formatted += "/USDT"
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("UPDATE symbols SET is_active = 0 WHERE symbol = ?", (formatted,))
-            await db.commit()
-            return True
+exchange_mexc = ccxt.mexc({
+    "enableRateLimit": True,
+    "timeout": 10000,
+    "headers": exchange_headers,
+    "options": {
+        "defaultType": "spot",
+        "adjustForTimeDifference": True,
+    }
+})
 
-    async def save_signal(self, symbol: str, signal_type: str, entry: float, tp1: float, tp2: float, sl: float) -> int:
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "INSERT INTO signals (symbol, signal_type, entry_price, tp1, tp2, sl) VALUES (?, ?, ?, ?, ?, ?)",
-                (symbol, signal_type, entry, tp1, tp2, sl)
-            )
-            await db.commit()
-            return cursor.lastrowid
+exchange_gate = ccxt.gate({
+    "enableRateLimit": True,
+    "timeout": 10000,
+    "headers": exchange_headers,
+    "options": {"defaultType": "spot"}
+})
 
-    async def get_open_signals(self) -> List[Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM signals WHERE status = 'OPEN'") as cursor:
-                rows = await cursor.fetchall()
-                return [dict(row) for row in rows]
+registered_users: Set[int] = set()
+paused_users: Set[int] = set()
+signal_history: List[Dict] = []
+TOTAL_SIGNALS_GENERATED = 0
+LAST_REPORT_TIME = None
+_irt_rate_cache = {"value": None, "ts": 0.0}
 
-    async def update_signal_status(self, signal_id: int, status: str):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("UPDATE signals SET status = ? WHERE id = ?", (status, signal_id))
-            await db.commit()
+def shamsi_now() -> str:
+    dt = datetime.now(TEHRAN_TZ) if TEHRAN_TZ else datetime.now()
+    return jdatetime.datetime.fromgregorian(datetime=dt).strftime("%Y/%m/%d - %H:%M:%S")
 
-    async def set_cooldown(self, symbol: str, hours: int):
-        expire_at = datetime.now() + timedelta(hours=hours)
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO cooldowns (symbol, expire_at) VALUES (?, ?)",
-                (symbol, expire_at.isoformat())
-            )
-            await db.commit()
+async def fetch_irt_rate() -> float:
+    now = time.time()
+    if _irt_rate_cache["value"] and (now - _irt_rate_cache["ts"] < IRT_RATE_TTL_SECONDS):
+        return _irt_rate_cache["value"]
+    try:
+        def _get():
+            return requests.get("https://api.wallex.ir/v1/markets", timeout=5)
+        r = await asyncio.to_thread(_get)
+        if r.status_code == 200:
+            rate = float(r.json()["result"]["symbols"]["USDTTMN"]["stats"]["lastPrice"])
+            _irt_rate_cache.update(value=rate, ts=now)
+            return rate
+    except Exception as e:
+        logger.warning(f"Error fetching IRT rate: {e}")
+    return _irt_rate_cache["value"] or 65000.0
 
-    async def is_in_cooldown(self, symbol: str) -> bool:
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("SELECT expire_at FROM cooldowns WHERE symbol = ?", (symbol,)) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    expire_at = datetime.fromisoformat(row[0])
-                    if datetime.now() < expire_at:
-                        return True
-                    else:
-                        await db.execute("DELETE FROM cooldowns WHERE symbol = ?", (symbol,))
-                        await db.commit()
-                return False
-
-    async def clear_all_cooldowns(self):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM cooldowns")
-            await db.commit()
-
-    async def get_stats(self) -> Dict[str, int]:
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("SELECT COUNT(*) FROM signals") as c1:
-                total = (await c1.fetchone())[0]
-            async with db.execute("SELECT COUNT(*) FROM signals WHERE status = 'TP1_HIT' OR status = 'TP2_HIT'") as c2:
-                won = (await c2.fetchone())[0]
-            async with db.execute("SELECT COUNT(*) FROM signals WHERE status = 'SL_HIT'") as c3:
-                lost = (await c3.fetchone())[0]
-            return {"total": total, "won": won, "lost": lost}
-
-db_manager = DatabaseManager()
-
-# ==========================================
-# 4. TECHNICAL INDICATOR CALCULATOR
-# ==========================================
-
-class TechnicalAnalysisEngine:
-    @staticmethod
-    def calculate_all(ohlcv_data: List[List[Any]]) -> Tuple[float, float, float, float, bool]:
-        df = pd.DataFrame(
-            ohlcv_data, 
-            columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        )
-        
-        df['ema200'] = df['close'].ewm(span=Config.EMA_PERIOD, adjust=False).mean()
-        
-        delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=Config.RSI_PERIOD).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=Config.RSI_PERIOD).mean()
-        rs = gain / loss
-        df['rsi'] = 100 - (100 / (1 + rs))
-
-        tr1 = df['high'] - df['low']
-        tr2 = np.abs(df['high'] - df['close'].shift())
-        tr3 = np.abs(df['low'] - df['close'].shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        df['atr'] = tr.rolling(window=Config.ATR_PERIOD).mean()
-
-        df['vol_sma20'] = df['volume'].rolling(window=Config.VOL_SMA_PERIOD).mean()
-
-        last = df.iloc[-1]
-        is_high_volume = float(last['volume']) > float(last['vol_sma20'])
-
-        return (
-            float(last['close']),
-            float(last['ema200']),
-            float(last['rsi']),
-            float(last['atr']),
-            bool(is_high_volume)
-        )
-
-# ==========================================
-# 5. STRATEGY & MULTI-TIMEFRAME ENGINE
-# ==========================================
-
-class StrategyEngine:
-    @staticmethod
-    def evaluate(
-        symbol: str, 
-        price: float, 
-        ema200_1h: float, 
-        rsi_1h: float, 
-        atr_1h: float, 
-        is_vol_high: float,
-        price_4h: float,
-        ema200_4h: float
-    ) -> Tuple[bool, Optional[str], Optional[InlineKeyboardMarkup], Optional[Dict[str, float]]]:
-        
-        if price <= 0 or ema200_1h <= 0 or atr_1h <= 0 or not is_vol_high:
-            return False, None, None, None
-
-        higher_trend_bullish = price_4h > ema200_4h
-        diff_pct = abs(price - ema200_1h) / ema200_1h * 100
-
-        signal_type = None
-        is_long = None
-        confidence = 0
-        leverage = "1x"
-        matched = False
-
-        # ۱. تحلیل رنج (Range)
-        if diff_pct <= 2.0:
-            if rsi_1h <= 30 and higher_trend_bullish:
-                signal_type = "BUY / LONG (Range Low + 4H Bullish)"
-                is_long = True
-                confidence = 82
-                leverage = "2x - 5x"
-                matched = True
-            elif rsi_1h >= 70 and not higher_trend_bullish:
-                signal_type = "SELL / SHORT (Range High + 4H Bearish)"
-                is_long = False
-                confidence = 82
-                leverage = "2x - 5x"
-                matched = True
-
-        # ۲. تحلیل صعودی (Bullish Trend)
-        elif price > ema200_1h and higher_trend_bullish:
-            if rsi_1h <= 35:
-                signal_type = "BUY / LONG (Strong Dip)"
-                is_long = True
-                confidence = 94
-                leverage = "5x - 10x"
-                matched = True
-            elif 40 <= rsi_1h <= 48:
-                signal_type = "BUY / LONG (Trend Continuation)"
-                is_long = True
-                confidence = 88
-                leverage = "3x - 5x"
-                matched = True
-
-        # ۳. تحلیل نزولی (Bearish Trend)
-        elif price < ema200_1h and not higher_trend_bullish:
-            if rsi_1h >= 68:
-                signal_type = "SELL / SHORT (Strong Rejection)"
-                is_long = False
-                confidence = 91
-                leverage = "5x - 10x"
-                matched = True
-            elif 52 <= rsi_1h <= 60:
-                signal_type = "SELL / SHORT (Trend Continuation)"
-                is_long = False
-                confidence = 84
-                leverage = "3x - 5x"
-                matched = True
-
-        if not matched:
-            return False, None, None, None
-
-        if is_long:
-            sl = price - (1.5 * atr_1h)
-            tp1 = price + (1.5 * atr_1h)
-            tp2 = price + (3.0 * atr_1h)
-        else:
-            sl = price + (1.5 * atr_1h)
-            tp1 = price - (1.5 * atr_1h)
-            tp2 = price - (3.0 * atr_1h)
-
-        tp1_pct = abs(tp1 - price) / price * 100
-        tp2_pct = abs(tp2 - price) / price * 100
-        sl_pct = abs(price - sl) / price * 100
-        rr = round(tp2_pct / sl_pct, 2) if sl_pct > 0 else 2.0
-
-        fmt = lambda v: f"{v:.8f}" if price < 0.01 else f"{v:.4f}"
-        clean_symbol = symbol.replace("/", "")
-
-        message = (
-            f"🚨 **سیگنال تحلیلی هوشمند (تایم‌فریم دوگانه)** 🚨\n\n"
-            f"💎 **نماد:** #{clean_symbol}\n"
-            f"📊 **نوع پوزیشن:** {signal_type}\n"
-            f"📌 **قیمت ورود:** `{fmt(price)}`\n"
-            f"📉 **شاخص RSI (1h):** `{rsi_1h:.2f}`\n\n"
-            f"🎯 **حد سود اول (TP1):** `{fmt(tp1)}` (`+{tp1_pct:.2f}%`)\n"
-            f"🚀 **حد سود دوم (TP2):** `{fmt(tp2)}` (`+{tp2_pct:.2f}%`)\n"
-            f"🛑 **حد ضرر (SL):** `{fmt(sl)}` (`-{sl_pct:.2f}%`)\n\n"
-            f"⚖️ **نسبت ریسک به ریوارد:** 1:{rr}\n"
-            f"🔥 **ضریب اطمینان:** %{confidence}\n"
-            f"⚡ **اهرم پیشنهادی:** {leverage}"
-        )
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("📈 TradingView", url=f"https://www.tradingview.com/symbols/{clean_symbol}/"),
-                InlineKeyboardButton("📊 MEXC Exchange", url=f"https://www.mexc.com/exchange/{symbol.replace('/', '_')}")
-            ]
-        ])
-
-        signal_data = {
-            "entry": price,
-            "tp1": tp1,
-            "tp2": tp2,
-            "sl": sl,
-            "is_long": is_long
+def save_state():
+    try:
+        data = {
+            "registered_users": list(registered_users),
+            "paused_users": list(paused_users),
+            "signal_history": signal_history,
+            "total_signals": TOTAL_SIGNALS_GENERATED,
+            "last_report_time": LAST_REPORT_TIME,
         }
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving state: {e}")
 
-        return True, message, keyboard, signal_data
+def load_state():
+    global registered_users, paused_users, signal_history, TOTAL_SIGNALS_GENERATED, LAST_REPORT_TIME
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                registered_users = set(data.get("registered_users", []))
+                paused_users = set(data.get("paused_users", []))
+                signal_history = data.get("signal_history", [])
+                TOTAL_SIGNALS_GENERATED = data.get("total_signals", 0)
+                LAST_REPORT_TIME = data.get("last_report_time", None)
+        except Exception as e:
+            logger.error(f"Error loading state: {e}")
 
-# ==========================================
-# 6. TELEGRAM COMMAND HANDLERS & UI
-# ==========================================
+class MarketCache:
+    def __init__(self):
+        self.prices: Dict[str, float] = {}
+        self.last_price_update = 0
+        self.active_exchange_name = "MEXC"
+        self.semaphore = asyncio.Semaphore(5)
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    is_admin = user_id in Config.ADMIN_IDS
+    async def update_prices(self) -> Dict[str, float]:
+        now = time.time()
+        if now - self.last_price_update < PRICE_TTL_SECONDS and self.prices:
+            return self.prices
 
-    reply_keyboard = [
-        [KeyboardButton("📊 وضعیت سیستم"), KeyboardButton("📋 لیست نمادها")],
-        [KeyboardButton("📈 آمار عملکرد"), KeyboardButton("⚙️ راهنما")]
-    ]
-    if is_admin:
-        reply_keyboard.append([KeyboardButton("🔑 پنل مدیریت")])
+        symbols = [f"{code}/USDT" for code in COIN_CODES]
+        new_prices = {}
 
-    markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True)
-    
-    welcome_text = (
-        "👋 **به ربات تحلیلگر و سیگنال‌دهی پیشرفته خوش آمدید.**\n\n"
-        "این ربات بازار کریپتو را در تایم‌فریم‌های 1h و 4h تحلیل کرده، "
-        "نقاط ورود، TP/SL را محاسبه کرده و پوزیشن‌های فعال را پایش می‌کند."
+        # ۱. MEXC
+        try:
+            tickers = await asyncio.to_thread(exchange_mexc.fetch_tickers, symbols)
+            for code in COIN_CODES:
+                sym = f"{code}/USDT"
+                if sym in tickers and tickers[sym].get("last") is not None:
+                    new_prices[code] = float(tickers[sym]["last"])
+            if new_prices:
+                self.active_exchange_name = "MEXC"
+                self.prices = new_prices
+                self.last_price_update = now
+                return self.prices
+        except Exception as e:
+            logger.warning(f"MEXC fetch_tickers failed: {e}")
+
+        # ۲. Gate.io
+        try:
+            gate_symbols = [f"{code}/USDT" for code in COIN_CODES]
+            tickers = await asyncio.to_thread(exchange_gate.fetch_tickers, gate_symbols)
+            for i, code in enumerate(COIN_CODES):
+                sym = gate_symbols[i]
+                if sym in tickers and tickers[sym].get("last") is not None:
+                    new_prices[code] = float(tickers[sym]["last"])
+            if new_prices:
+                self.active_exchange_name = "Gate.io"
+                self.prices = new_prices
+                self.last_price_update = now
+                return self.prices
+        except Exception as e:
+            logger.warning(f"Gate.io fetch_tickers failed: {e}")
+
+        # ۳. Fallback تکی فقط برای ارزهای بدون قیمت
+        async def fetch_one(code):
+            async with self.semaphore:
+                try:
+                    ticker = await asyncio.to_thread(exchange_mexc.fetch_ticker, f"{code}/USDT")
+                    if ticker and ticker.get("last") is not None:
+                        return code, float(ticker["last"])
+                except:
+                    pass
+                try:
+                    ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, f"{code}/USDT")
+                    if ticker and ticker.get("last") is not None:
+                        return code, float(ticker["last"])
+                except:
+                    pass
+                return code, None
+
+        missing_codes = [code for code in COIN_CODES if code not in new_prices]
+        if missing_codes:
+            tasks = [fetch_one(code) for code in missing_codes]
+            results = await asyncio.gather(*tasks)
+            for code, price in results:
+                if price is not None:
+                    new_prices[code] = price
+
+        if new_prices:
+            self.prices = new_prices
+            self.last_price_update = now
+            self.active_exchange_name = "MEXC/Gate (fallback)"
+        return self.prices
+
+    async def get_ohlcv(self, code: str, timeframe: str = "1h") -> Optional[pd.DataFrame]:
+        try:
+            raw = await asyncio.to_thread(exchange_mexc.fetch_ohlcv, f"{code}/USDT", timeframe, limit=250)
+            if raw:
+                df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                for col in ["open", "high", "low", "close", "volume"]:
+                    df[col] = pd.to_numeric(df[col])
+                return df
+        except Exception as e:
+            logger.warning(f"MEXC OHLCV failed for {code}: {e}")
+
+        try:
+            raw = await asyncio.to_thread(exchange_gate.fetch_ohlcv, f"{code}/USDT", timeframe, limit=250)
+            if raw:
+                df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                for col in ["open", "high", "low", "close", "volume"]:
+                    df[col] = pd.to_numeric(df[col])
+                return df
+        except Exception as e:
+            logger.warning(f"Gate.io OHLCV failed for {code}: {e}")
+
+        return None
+
+cache = MarketCache()
+
+def format_price(price: float) -> str:
+    if price < 0.01:
+        return f"{price:.10f}"
+    elif price < 1:
+        return f"{price:.6f}"
+    else:
+        return f"{price:,.4f}"
+
+async def analyze_coin_full_status(code: str) -> str:
+    prices = await cache.update_prices()
+    price = prices.get(code, 0.0)
+    if price == 0.0:
+        return f"❌ قیمت ارز **{code}** در دسترس نیست. لطفاً دوباره تلاش کنید."
+
+    rate = await fetch_irt_rate()
+    irt_price = price * rate
+
+    df = await cache.get_ohlcv(code, "1h")
+    if df is None or df.empty:
+        return f"❌ داده‌های تاریخچه برای ارز **{code}** در دسترس نیست."
+
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+
+    rsi = RSIIndicator(close, window=14).rsi().iloc[-1]
+    stoch_rsi = StochRSIIndicator(close, window=14).stochrsi().iloc[-1] * 100
+    macd_obj = MACD(close)
+    macd_hist = macd_obj.macd_diff().iloc[-1]
+    ema20 = EMAIndicator(close, window=20).ema_indicator().iloc[-1]
+    ema50 = EMAIndicator(close, window=50).ema_indicator().iloc[-1]
+    ema200 = EMAIndicator(close, window=200).ema_indicator().iloc[-1]
+    adx = ADXIndicator(high, low, close, window=14).adx().iloc[-1]
+    atr = AverageTrueRange(high, low, close, window=14).average_true_range().iloc[-1]
+    bollinger = BollingerBands(close, window=20)
+    bb_upper = bollinger.bollinger_hband().iloc[-1]
+    bb_lower = bollinger.bollinger_lband().iloc[-1]
+    support = low.tail(24).min()
+    resistance = high.tail(24).max()
+
+    trend = "صعودی قوی 🚀" if price > ema50 > ema200 else ("نزولی قوی 🔻" if price < ema50 < ema200 else "خنثی / رنج ⚖️")
+    macd_status = "صعودی 🟢" if macd_hist > 0 else "نزولی 🔴"
+
+    return (
+        f"📊 **گزارش جامع وضعیت و تحلیل تکنیکال {code}**\n"
+        f"{DIVIDER}\n"
+        f"🏛 **صرافی:** `{cache.active_exchange_name}` | **جفت ارز:** `{code}/USDT`\n"
+        f"🔄 **وضعیت معاملات Swap:** 🟢 فعال (Spot & Futures)\n"
+        f"{DIVIDER}\n"
+        f"💵 **قیمت دلاری:** `${format_price(price)}` USDT\n"
+        f"🇮🇷 **معادل تومانی:** `{irt_price:,.0f}` تومان\n"
+        f"📅 **تاریخ و زمان:** `{shamsi_now()}`\n"
+        f"{DIVIDER}\n"
+        f"📌 **مؤلفه‌های تکنیکال (تایم‌فریم 1 ساعته):**\n"
+        f"• **روند کلی بازار:** {trend}\n"
+        f"• **RSI (14):** `{rsi:.1f}`\n"
+        f"• **استوکاستیک RSI:** `{stoch_rsi:.1f}`\n"
+        f"• **ADX:** `{adx:.1f}`\n"
+        f"• **MACD:** {macd_status}\n"
+        f"• **ATR:** `${format_price(atr)}`\n"
+        f"{DIVIDER}\n"
+        f"📈 **میانگین‌های متحرک (EMA):**\n"
+        f"• **EMA 20:** `${format_price(ema20)}`\n"
+        f"• **EMA 50:** `${format_price(ema50)}`\n"
+        f"• **EMA 200:** `${format_price(ema200)}`\n"
+        f"{DIVIDER}\n"
+        f"🎯 **سطوح حمایت و مقاومت کلیدی:**\n"
+        f"🛡 **حمایت (24 ساعت):** `${format_price(support)}`\n"
+        f"🚀 **مقاومت (24 ساعت):** `${format_price(resistance)}`\n"
+        f"🌐 **باند بالایی بولینگر:** `${format_price(bb_upper)}`\n"
+        f"🌐 **باند پایینی بولینگر:** `${format_price(bb_lower)}`"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=markup)
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    active_symbols = await db_manager.get_active_symbols()
-    cooldown_count = 0
-    for sym in active_symbols:
-        if await db_manager.is_in_cooldown(sym):
-            cooldown_count += 1
+# ===========================
+# کیبوردها
+# ===========================
+MAIN_MENU_TEXT = (
+    "🤖 **ربات هوشمند تحلیل ارزهای دیجیتال**\n"
+    "📊 قیمت لحظه‌ای | تحلیل تکنیکال | سیگنال معاملاتی\n"
+    "⚡️ سریع و دقیق\n\n"
+    "👇 **منوی اصلی:**"
+)
 
-    stats = await db_manager.get_stats()
-    
-    status_text = (
-        f"⚙️ **وضعیت سیستم:** ✅ فعال\n"
-        f"📊 **تعداد نمادهای در حال پایش:** {len(active_symbols)}\n"
-        f"⏳ **نمادهای در حال Cooldown:** {cooldown_count}\n"
-        f"📢 **کل سیگنال‌های صادر شده:** {stats['total']}\n"
-        f"⏱ **تایم‌فریم اصلی:** {Config.PRIMARY_TIMEFRAME} | **تایم‌فریم بالادستی:** {Config.HIGHER_TIMEFRAME}"
-    )
-    await update.message.reply_text(status_text, parse_mode="Markdown")
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    stats = await db_manager.get_stats()
-    total = stats['total']
-    won = stats['won']
-    lost = stats['lost']
-    win_rate = (won / total * 100) if total > 0 else 0.0
-
-    text = (
-        f"📈 **گزارش عملکرد سیگنال‌های ربات:**\n\n"
-        f"🔹 **کل سیگنال‌ها:** {total}\n"
-        f"✅ **سیگنال‌های موفق (TP Hit):** {won}\n"
-        f"❌ **سیگنال‌های ناموفق (SL Hit):** {lost}\n"
-        f"🎯 **وین‌ریت (Win Rate):** `{win_rate:.1f}%`"
-    )
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-async def list_symbols_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    symbols = await db_manager.get_active_symbols()
-    symbols_str = "\n".join([f"• `{s}`" for s in symbols])
-    text = f"📋 **لیست ارزهای تحت پایش:**\n\n{symbols_str}"
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-async def admin_panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in Config.ADMIN_IDS:
-        await update.message.reply_text("❌ شما دسترسی به پنل مدیریت را ندارید.")
-        return
-
+def kb_main_menu(is_admin_user=False):
     keyboard = [
-        [InlineKeyboardButton("➕ افزودن نماد", callback_data="admin_add"), InlineKeyboardButton("➖ حذف نماد", callback_data="admin_remove")],
-        [InlineKeyboardButton("🔄 ریست Cooldowns", callback_data="admin_reset_cd")]
+        [InlineKeyboardButton("💵 قیمت لحظه‌ای", callback_data="coins_prices_all"),
+         InlineKeyboardButton("📊 وضعیت و تحلیل", callback_data="coins_status_grid")],
     ]
-    await update.message.reply_text("🔑 **پنل مدیریت ربات:**", reply_markup=InlineKeyboardMarkup(keyboard))
+    if is_admin_user:
+        keyboard.append([InlineKeyboardButton("👑 پنل مدیریت ادمین", callback_data="admin_panel")])
+    keyboard.append([
+        InlineKeyboardButton("✅ شروع فعالیت", callback_data="bot_start_action"),
+        InlineKeyboardButton("⛔ توقف فعالیت", callback_data="bot_stop_action")
+    ])
+    return InlineKeyboardMarkup(keyboard)
 
-async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if isinstance(context.error, BadRequest) and "Message is not modified" in str(context.error):
+def kb_start_only():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ شروع مجدد ربات", callback_data="bot_start_action")]
+    ])
+
+def kb_prices_all_single():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 بروزرسانی قیمت‌ها", callback_data="coins_prices_all")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")]
+    ])
+
+def kb_status_grid():
+    buttons = []
+    row = []
+    for code in COIN_CODES:
+        row.append(InlineKeyboardButton(f"{code} 🟢", callback_data=f"coin_detail_{code}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")])
+    return InlineKeyboardMarkup(buttons)
+
+def kb_admin_panel():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📈 آمار سیگنال‌ها", callback_data="admin_signal_stats")],
+        [InlineKeyboardButton("👥 آمار کاربران و سیستم", callback_data="admin_system_stats")],
+        [InlineKeyboardButton("🗑 صفر کردن آمار", callback_data="reset_stats_confirm")],
+        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")]
+    ])
+
+def kb_back_admin():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", callback_data="admin_panel")]])
+
+def kb_reset_confirm():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚠️ بله، صفر شود", callback_data="reset_stats_do")],
+        [InlineKeyboardButton("❌ انصراف", callback_data="admin_panel")]
+    ])
+
+# ===========================
+# هندلرها
+# ===========================
+async def version_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش نسخه فعلی ربات"""
+    await update.message.reply_text(
+        f"🤖 **نسخه ربات:** `{VERSION}`\n"
+        f"📅 **زمان ساخت:** `{BUILD_TIME}`\n"
+        f"🆔 **شناسه:** `{context.bot.id}`",
+        parse_mode="Markdown"
+    )
+
+async def info_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش اطلاعات کامل ربات"""
+    user_id = update.effective_user.id
+    is_adm = user_id in ADMIN_USER_IDS
+    await update.message.reply_text(
+        f"📌 **اطلاعات ربات هوشمند تحلیل ارزهای دیجیتال**\n"
+        f"{DIVIDER}\n"
+        f"🤖 **نسخه:** `{VERSION}`\n"
+        f"📅 **ساخت:** `{BUILD_TIME}`\n"
+        f"🆔 **شناسه:** `{context.bot.id}`\n"
+        f"👤 **وضعیت شما:** {'👑 ادمین' if is_adm else '👤 کاربر عادی'}\n"
+        f"📊 **تعداد ارزهای پشتیبانی:** `{len(COIN_CODES)}`\n"
+        f"🏛 **صرافی فعال:** `{cache.active_exchange_name}`\n"
+        f"{DIVIDER}\n"
+        f"⚡️ *برای شروع از دستور /start استفاده کنید.*",
+        parse_mode="Markdown"
+    )
+
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    registered_users.add(user_id)
+    paused_users.discard(user_id)
+    save_state()
+
+    is_adm = user_id in ADMIN_USER_IDS
+    await update.message.reply_text(
+        MAIN_MENU_TEXT,
+        reply_markup=kb_main_menu(is_adm),
+        parse_mode="Markdown"
+    )
+
+async def stop_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دستور /stop برای توقف ربات"""
+    user_id = update.effective_user.id
+    paused_users.add(user_id)
+    save_state()
+    
+    await update.message.reply_text(
+        "⛔ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه زیر کلیک کنید.",
+        reply_markup=kb_start_only(),
+        parse_mode="Markdown"
+    )
+
+async def admin_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دستور /admin برای دسترسی به پنل مدیریت"""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_USER_IDS:
+        await update.message.reply_text(
+            "❌ **شما دسترسی به این بخش را ندارید.**",
+            parse_mode="Markdown"
+        )
         return
-    logger.error("Global Error Handler caught exception:", exc_info=context.error)
+    
+    await update.message.reply_text(
+        f"👑 **پنل مدیریت اختصاصی ادمین**\n{DIVIDER}\nلطفاً از طریق منوی اصلی وارد شوید.",
+        reply_markup=kb_admin_panel(),
+        parse_mode="Markdown"
+    )
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global registered_users, paused_users, signal_history, TOTAL_SIGNALS_GENERATED, LAST_REPORT_TIME
+
     query = update.callback_query
     await query.answer()
     data = query.data
+    user_id = query.from_user.id
+    is_adm = user_id in ADMIN_USER_IDS
 
-    try:
-        if data == "admin_reset_cd":
-            await db_manager.clear_all_cooldowns()
-            await query.edit_message_text("✅ تمام کوئلدون‌ها بازنشانی شدند.")
-        elif data == "admin_add":
-            await query.edit_message_text("دستور افزودن نماد:\n`/add BTC/USDT`", parse_mode="Markdown")
-        elif data == "admin_remove":
-            await query.edit_message_text("دستور حذف نماد:\n`/remove BTC/USDT`", parse_mode="Markdown")
-    except BadRequest as e:
-        if "Message is not modified" in str(e):
-            pass
-        else:
-            raise e
-
-async def add_symbol_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in Config.ADMIN_IDS:
+    if data == "bot_start_action":
+        paused_users.discard(user_id)
+        registered_users.add(user_id)
+        save_state()
+        await query.edit_message_text(
+            MAIN_MENU_TEXT,
+            reply_markup=kb_main_menu(is_adm),
+            parse_mode="Markdown"
+        )
         return
-    if not context.args:
-        await update.message.reply_text("فرمت صحیح: `/add ETH/USDT`", parse_mode="Markdown")
+
+    if data == "bot_stop_action":
+        paused_users.add(user_id)
+        save_state()
+        await query.edit_message_text(
+            "⛔ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه زیر کلیک کنید.",
+            reply_markup=kb_start_only(),
+            parse_mode="Markdown"
+        )
         return
-    sym = context.args[0]
-    if await db_manager.add_symbol(sym):
-        await update.message.reply_text(f"✅ نماد `{sym}` اضافه شد.", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("❌ خطا در ثبت نماد.")
 
-async def remove_symbol_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in Config.ADMIN_IDS:
+    if user_id in paused_users and data != "main_menu":
+        await query.edit_message_text(
+            "⛔️ **ربات برای شما غیرفعال است.**\nجهت فعال‌سازی روی دکمه زیر کلیک کنید.",
+            reply_markup=kb_start_only(),
+            parse_mode="Markdown"
+        )
         return
-    if not context.args:
-        await update.message.reply_text("فرمت صحیح: `/remove ETH/USDT`", parse_mode="Markdown")
-        return
-    sym = context.args[0]
-    if await db_manager.remove_symbol(sym):
-        await update.message.reply_text(f"✅ نماد `{sym}` حذف شد.", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("❌ نماد یافت نشد.")
 
-async def text_messages_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text == "📊 وضعیت سیستم":
-        await status_command(update, context)
-    elif text == "📋 لیست نمادها":
-        await list_symbols_command(update, context)
-    elif text == "📈 آمار عملکرد":
-        await stats_command(update, context)
-    elif text == "🔑 پنل مدیریت":
-        await admin_panel_command(update, context)
-    elif text == "⚙️ راهنما":
-        await update.message.reply_text("راهنما: ربات با تحلیل همزمان تایم‌فریم 1h و 4h اقدام به صدور سیگنال می‌کند.")
+    if data == "main_menu":
+        await query.edit_message_text(
+            MAIN_MENU_TEXT,
+            reply_markup=kb_main_menu(is_adm),
+            parse_mode="Markdown"
+        )
 
-# ==========================================
-# 7. POSITION MONITORING LOOP (TP / SL TRACKER)
-# ==========================================
+    elif data == "coins_prices_all":
+        await query.edit_message_text("⏳ در حال دریافت لیست قیمت ۳۰ ارز...", parse_mode="Markdown")
+        prices = await cache.update_prices()
+        rate = await fetch_irt_rate()
 
-async def position_tracker_loop(app: Application, exchange: ccxt.Exchange):
-    """پایش پوزیشن‌های باز و ارسال گزارش لمس TP/SL به کانال"""
-    while True:
-        try:
-            open_signals = await db_manager.get_open_signals()
-            for sig in open_signals:
-                symbol = sig['symbol']
-                try:
-                    ticker = await exchange.fetch_ticker(symbol)
-                    current_price = ticker['last']
+        exchange_emoji = "🇲" if "MEXC" in cache.active_exchange_name else "🇬"
 
-                    is_long = "BUY" in sig['signal_type']
-                    tp1, tp2, sl = sig['tp1'], sig['tp2'], sig['sl']
+        text = (
+            f"💵 **لیست ۳۰ قیمت ارز برتر**\n"
+            f"📅 **تاریخ:** `{shamsi_now()}`\n"
+            f"🇮🇷 **نرخ تتر:** `{rate:,.0f}` تومان\n"
+            f"{DIVIDER}\n"
+        )
 
-                    if is_long:
-                        if current_price >= tp2:
-                            await db_manager.update_signal_status(sig['id'], "TP2_HIT")
-                            await app.bot.send_message(
-                                chat_id=Config.CHANNEL_ID,
-                                text=f"🎯🎯 **تارگت دوم لمس شد!**\n\n💎 نماد: #{symbol.replace('/', '')}\n📌 قیمت تارگت: `{tp2}`"
-                            )
-                        elif current_price >= tp1:
-                            await db_manager.update_signal_status(sig['id'], "TP1_HIT")
-                            await app.bot.send_message(
-                                chat_id=Config.CHANNEL_ID,
-                                text=f"🎯 **تارگت اول لمس شد!**\n\n💎 نماد: #{symbol.replace('/', '')}\n📌 قیمت تارگت: `{tp1}`"
-                            )
-                        elif current_price <= sl:
-                            await db_manager.update_signal_status(sig['id'], "SL_HIT")
-                            await app.bot.send_message(
-                                chat_id=Config.CHANNEL_ID,
-                                text=f"🛑 **حد ضرر لمس شد.**\n\n💎 نماد: #{symbol.replace('/', '')}\n📌 قیمت حد ضرر: `{sl}`"
-                            )
-                    else: # Short Position
-                        if current_price <= tp2:
-                            await db_manager.update_signal_status(sig['id'], "TP2_HIT")
-                            await app.bot.send_message(
-                                chat_id=Config.CHANNEL_ID,
-                                text=f"🎯🎯 **تارگت دوم لمس شد!**\n\n💎 نماد: #{symbol.replace('/', '')}\n📌 قیمت تارگت: `{tp2}`"
-                            )
-                        elif current_price <= tp1:
-                            await db_manager.update_signal_status(sig['id'], "TP1_HIT")
-                            await app.bot.send_message(
-                                chat_id=Config.CHANNEL_ID,
-                                text=f"🎯 **تارگت اول لمس شد!**\n\n💎 نماد: #{symbol.replace('/', '')}\n📌 قیمت تارگت: `{tp1}`"
-                            )
-                        elif current_price >= sl:
-                            await db_manager.update_signal_status(sig['id'], "SL_HIT")
-                            await app.bot.send_message(
-                                chat_id=Config.CHANNEL_ID,
-                                text=f"🛑 **حد ضرر لمس شد.**\n\n💎 نماد: #{symbol.replace('/', '')}\n📌 قیمت حد ضرر: `{sl}`"
-                            )
-                except Exception as track_err:
-                    logger.error(f"Error tracking signal ID {sig['id']} for {symbol}: {track_err}")
+        for code in COIN_CODES:
+            p_usd = prices.get(code, 0.0)
+            p_irt = p_usd * rate
+            text += f"‎{exchange_emoji} **{code}**: `${format_price(p_usd)}` USDT\n"
+            text += f"‎🇮🇷 `{p_irt:,.0f}` تومان\n\n"
 
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Error in position tracker loop: {e}")
+        await query.edit_message_text(text, reply_markup=kb_prices_all_single(), parse_mode="Markdown")
 
-        await asyncio.sleep(30)
+    elif data == "coins_status_grid":
+        text = (
+            "📊 **بخش وضعیت و تحلیل تکنیکال ارزها**\n"
+            "جهت مشاهده وضعیت کامل، اندیکاتورها و سطوح حمایت/مقاومت، ارز مورد نظر را انتخاب کنید:"
+        )
+        await query.edit_message_text(text, reply_markup=kb_status_grid(), parse_mode="Markdown")
 
-# ==========================================
-# 8. ASYNC BACKGROUND MONITORING LOOP
-# ==========================================
+    elif data.startswith("coin_detail_"):
+        code = data.split("_")[2]
+        await query.edit_message_text(f"⏳ در حال استخراج و تحلیل داده‌های جامع برای {code}...", parse_mode="Markdown")
+        detail_text = await analyze_coin_full_status(code)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 بروزرسانی تحلیل", callback_data=f"coin_detail_{code}")],
+            [InlineKeyboardButton("🔙 لیست ارزها", callback_data="coins_status_grid")]
+        ])
+        await query.edit_message_text(detail_text, reply_markup=kb, parse_mode="Markdown")
+
+    elif data == "admin_panel":
+        if not is_adm:
+            return
+        await query.edit_message_text(
+            f"👑 **پنل مدیریت اختصاصی ادمین**\n{DIVIDER}\nلطفاً بخش مورد نظر را جهت بررسی انتخاب کنید:",
+            reply_markup=kb_admin_panel(),
+            parse_mode="Markdown"
+        )
+
+    elif data == "admin_signal_stats":
+        if not is_adm:
+            return
+        closed = [s for s in signal_history if s.get("status") in ("tp1_hit", "tp2_hit", "tp3_hit", "sl_hit")]
+        total = len(closed)
+        wins = sum(1 for s in closed if s.get("status", "").startswith("tp"))
+        losses = total - wins
+        win_rate = (wins / total * 100) if total > 0 else 0.0
+
+        tp1 = sum(1 for s in closed if s.get("status") == "tp1_hit")
+        tp2 = sum(1 for s in closed if s.get("status") == "tp2_hit")
+        tp3 = sum(1 for s in closed if s.get("status") == "tp3_hit")
+        sl = sum(1 for s in closed if s.get("status") == "sl_hit")
+
+        stats_text = (
+            f"📈 **آمار و عملکرد تفکیکی سیگنال‌های کانال**\n"
+            f"{DIVIDER}\n"
+            f"🔢 **کل سیگنال‌های تولیدشده:** `{TOTAL_SIGNALS_GENERATED}`\n"
+            f"🎯 **سیگنال‌های بسته‌شده:** `{total}`\n"
+            f"✅ **سیگنال‌های موفق:** `{wins}`\n"
+            f"❌ **سیگنال‌های ناموفق (SL):** `{losses}`\n"
+            f"🏆 **نرخ پیروزی (Win Rate):** `{win_rate:.1f}%`\n"
+            f"{DIVIDER}\n"
+            f"📍 **جزئیات دقیق اهداف:**\n"
+            f"• برخورد با TP1: `{tp1}`\n"
+            f"• برخورد با TP2: `{tp2}`\n"
+            f"• برخورد با TP3: `{tp3}`\n"
+            f"• برخورد با حد ضرر (SL): `{sl}`\n"
+            f"{DIVIDER}\n"
+            f"🕒 **آخرین بازنویسی آمار:** `{LAST_REPORT_TIME or 'ثبت نشده'}`"
+        )
+        await query.edit_message_text(stats_text, reply_markup=kb_back_admin(), parse_mode="Markdown")
+
+    elif data == "admin_system_stats":
+        if not is_adm:
+            return
+        mexc_status = "آنلاین 🟢" if cache.prices else "در حال بررسی/آفلاین 🔴"
+        rate = await fetch_irt_rate()
+        wallex_status = "آنلاین 🟢" if rate > 0 else "آفلاین 🔴"
+        channel_status = f"`{CHANNEL_ID}` 🟢" if CHANNEL_ID else "تنظیم نشده 🔴"
+
+        sys_text = (
+            f"👥 **آمار کاربران و وضعیت سیستم**\n"
+            f"{DIVIDER}\n"
+            f"👤 **کاربران فعال:** `{len(registered_users - paused_users)}` نفر\n"
+            f"⏸ **کاربران متوقف‌شده:** `{len(paused_users)}` نفر\n"
+            f"📊 **مجموع کاربران ثبت‌شده:** `{len(registered_users)}` نفر\n"
+            f"{DIVIDER}\n"
+            f"🏛 **صرافی فعال در حال استفاده:** `{cache.active_exchange_name}`\n"
+            f"🌐 **وضعیت اتصال صرافی:** {mexc_status}\n"
+            f"🧠 **موتور هوش مصنوعی و تحلیل:** فعال 🟢\n"
+            f"🇮🇷 **API دریافت نرخ تتر (Wallex):** {wallex_status}\n"
+            f"📢 **کانال تلگرام متصل:** {channel_status}\n"
+            f"⏱ **ساعت هماهنگ سیستم:** `{shamsi_now()}`\n"
+            f"🤖 **نسخه ربات:** `{VERSION}`"
+        )
+        await query.edit_message_text(sys_text, reply_markup=kb_back_admin(), parse_mode="Markdown")
+
+    elif data == "reset_stats_confirm":
+        if not is_adm:
+            return
+        await query.edit_message_text(
+            "⚠️ **آیا از صفر کردن تمامی آمار سیگنال‌ها اطمینان دارید؟**",
+            reply_markup=kb_reset_confirm(),
+            parse_mode="Markdown"
+        )
+
+    elif data == "reset_stats_do":
+        if not is_adm:
+            return
+        signal_history.clear()
+        TOTAL_SIGNALS_GENERATED = 0
+        LAST_REPORT_TIME = shamsi_now()
+        save_state()
+        await query.edit_message_text(
+            "✅ **تمامی آمار سیگنال‌ها با موفقیت صفر شد.**",
+            reply_markup=kb_back_admin(),
+            parse_mode="Markdown"
+        )
 
 async def channel_signal_monitor_loop(app: Application):
-    exchange = getattr(ccxt, Config.EXCHANGE_NAME)({'enableRateLimit': True})
-    logger.info(f"Connected to exchange: {Config.EXCHANGE_NAME.upper()}")
-
-    # اجرای همزمان تراکر تارگت‌ها
-    asyncio.create_task(position_tracker_loop(app, exchange))
-
+    await asyncio.sleep(5)
+    global TOTAL_SIGNALS_GENERATED
     while True:
         try:
-            active_symbols = await db_manager.get_active_symbols()
-            logger.info("🔍 Checking market symbols for signals...")
-            
-            for symbol in active_symbols:
-                if await db_manager.is_in_cooldown(symbol):
+            if not CHANNEL_ID:
+                logger.warning("⚠️ CHANNEL_ID not set, signal monitoring disabled.")
+                await asyncio.sleep(600)
+                continue
+
+            logger.info("🔍 Checking for new signals...")
+            prices = await cache.update_prices()
+            if not prices:
+                logger.warning("⚠️ No prices fetched, skipping signal check.")
+                await asyncio.sleep(600)
+                continue
+
+            for code in COIN_CODES:
+                price = prices.get(code, 0.0)
+                if price == 0.0:
                     continue
 
-                try:
-                    # دریافت کندل‌های تایم‌فریم 1h و 4h
-                    ohlcv_1h = await exchange.fetch_ohlcv(symbol, timeframe=Config.PRIMARY_TIMEFRAME, limit=210)
-                    ohlcv_4h = await exchange.fetch_ohlcv(symbol, timeframe=Config.HIGHER_TIMEFRAME, limit=210)
+                df = await cache.get_ohlcv(code, "1h")
+                if df is None or len(df) < 50:
+                    continue
 
-                    if not ohlcv_1h or len(ohlcv_1h) < 200 or not ohlcv_4h or len(ohlcv_4h) < 200:
+                close = df["close"]
+                rsi = RSIIndicator(close, window=14).rsi().iloc[-1]
+                ema200 = EMAIndicator(close, window=200).ema_indicator().iloc[-1]
+
+                if pd.isna(ema200):
+                    logger.warning(f"EMA200 is nan for {code}, using EMA50.")
+                    ema50 = EMAIndicator(close, window=50).ema_indicator().iloc[-1]
+                    if pd.isna(ema50):
+                        logger.warning(f"EMA50 also nan for {code}, skipping.")
                         continue
+                    ema200 = ema50
 
-                    price_1h, ema200_1h, rsi_1h, atr_1h, is_vol_high = TechnicalAnalysisEngine.calculate_all(ohlcv_1h)
-                    price_4h, ema200_4h, _, _, _ = TechnicalAnalysisEngine.calculate_all(ohlcv_4h)
+                logger.info(f"📊 {code}: Price={price:.4f}, EMA200={ema200:.4f}, RSI={rsi:.2f} -> Condition: {price > ema200 and rsi < 32}")
 
-                    condition, signal_msg, reply_markup, sig_data = StrategyEngine.evaluate(
-                        symbol, price_1h, ema200_1h, rsi_1h, atr_1h, is_vol_high, price_4h, ema200_4h
+                if price > ema200 and rsi < 32:
+                    logger.info(f"🚨 SIGNAL TRIGGERED for {code}!")
+                    tp1 = price * 1.02
+                    tp2 = price * 1.04
+                    sl = price * 0.98
+                    rate = await fetch_irt_rate()
+                    irt_price = price * rate
+
+                    signal_msg = (
+                        f"📣 **سیگنال جدید معامله** #{code}\n"
+                        f"{DIVIDER}\n"
+                        f"🟢 **جهت معامله:** BUY / LONG\n"
+                        f"🏛 **صرافی:** `{cache.active_exchange_name}`\n"
+                        f"💵 **قیمت ورود:** `${format_price(price)}` USDT\n"
+                        f"🇮🇷 **معادل تومانی:** `{irt_price:,.0f}` تومان\n"
+                        f"📅 **تاریخ:** `{shamsi_now()}`\n"
+                        f"{DIVIDER}\n"
+                        f"🎯 **هدف اول (TP1):** `${format_price(tp1)}`\n"
+                        f"🎯 **هدف دوم (TP2):** `${format_price(tp2)}`\n"
+                        f"🛑 **حد ضرر (SL):** `${format_price(sl)}`\n"
+                        f"{DIVIDER}\n"
+                        f"⚡️ *تحلیل خودکار توسط ربات دستیار کریپتو*"
                     )
+                    await app.bot.send_message(chat_id=CHANNEL_ID, text=signal_msg, parse_mode="Markdown")
+                    TOTAL_SIGNALS_GENERATED += 1
+                    signal_history.append({
+                        "symbol": code,
+                        "direction": "LONG",
+                        "entry": price,
+                        "status": "open",
+                        "time": shamsi_now()
+                    })
+                    save_state()
+                    await asyncio.sleep(15)
 
-                    p_fmt = f"{price_1h:.8f}" if price_1h < 0.01 else f"{price_1h:.4f}"
-                    logger.info(f"📊 {symbol}: Price={p_fmt}, RSI_1H={rsi_1h:.2f} -> Signal: {condition}")
+        except Exception as e:
+            logger.error(f"❌ Channel monitor loop error: {e}", exc_info=True)
+        await asyncio.sleep(600)
 
-                    if condition and signal_msg and sig_data:
-                        await app.bot.send_message(
-                            chat_id=Config.CHANNEL_ID,
-                            text=signal_msg,
-                            parse_mode="Markdown",
-                            reply_markup=reply_markup
-                        )
-
-                        await db_manager.save_signal(
-                            symbol, "LONG" if sig_data['is_long'] else "SHORT",
-                            sig_data['entry'], sig_data['tp1'], sig_data['tp2'], sig_data['sl']
-                        )
-
-                        await db_manager.set_cooldown(symbol, Config.COOLDOWN_HOURS)
-                        logger.info(f"📣 Signal published & saved for {symbol}")
-
-                except Exception as sym_err:
-                    logger.error(f"Error processing symbol {symbol}: {sym_err}")
-
-        except asyncio.CancelledError:
-            logger.info("Signal monitor loop cancelled.")
-            await exchange.close()
-            break
-        except Exception as global_loop_err:
-            logger.error(f"Error in signal loop: {global_loop_err}")
-
-        await asyncio.sleep(Config.POLL_INTERVAL)
-
-# ==========================================
-# 9. MAIN APPLICATION ENTRY POINT
-# ==========================================
+async def post_init_setup(app: Application):
+    # حذف منوی قدیمی
+    await app.bot.delete_my_commands(scope=BotCommandScopeDefault())
+    await app.bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
+    
+    # تنظیم منوی جدید کنار کادر تایپ
+    commands = [
+        BotCommand("start", "شروع و نمایش منو"),
+        BotCommand("version", "نمایش نسخه ربات"),
+        BotCommand("info", "اطلاعات کامل ربات"),
+        BotCommand("admin", "پنل مدیریت ادمین"),
+        BotCommand("stop", "توقف فعالیت ربات"),
+    ]
+    await app.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+    await app.bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
+    
+    asyncio.create_task(channel_signal_monitor_loop(app))
 
 def main():
-    logger.info("Initializing Database...")
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(db_manager.init_db())
+    if not BOT_TOKEN:
+        logger.error("خطا: BOT_TOKEN تعریف نشده است!")
+        return
 
-    logger.info("Starting Telegram Bot Application...")
-    app = Application.builder().token(Config.BOT_TOKEN).build()
+    load_state()
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init_setup).build()
 
-    app.add_error_handler(global_error_handler)
+    application.add_handler(CommandHandler("start", start_handler))
+    application.add_handler(CommandHandler("version", version_handler))
+    application.add_handler(CommandHandler("info", info_handler))
+    application.add_handler(CommandHandler("admin", admin_command_handler))
+    application.add_handler(CommandHandler("stop", stop_command_handler))
+    application.add_handler(CallbackQueryHandler(callback_handler))
 
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("list", list_symbols_command))
-    app.add_handler(CommandHandler("add", add_symbol_handler))
-    app.add_handler(CommandHandler("remove", remove_symbol_handler))
-    
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_messages_handler))
-
-    loop.create_task(channel_signal_monitor_loop(app))
-
-    logger.info("🚀 Signal Bot with DB & Tracker is operational...")
-    app.run_polling()
+    logger.info(f"🚀 Version {VERSION} started at {BUILD_TIME}")
+    logger.info("✅ Bot is running...")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
