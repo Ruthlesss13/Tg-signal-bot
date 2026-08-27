@@ -38,12 +38,11 @@ ADMIN_USER_IDS = {
 }
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 
-# حذف TON به دلیل عدم وجود سمبل صحیح (می‌توانید بعداً اضافه کنید)
 COIN_CODES = [
     "BTC", "ETH", "SOL", "BNB", "XRP",
     "ADA", "DOGE", "AVAX", "LINK", "DOT",
     "NEAR", "SUI", "APT", "ARB", "OP",
-    "POL", "LTC", "BCH", "ATOM",
+    "POL", "MATIC", "LTC", "BCH", "ATOM",
     "SHIB", "PEPE", "FET", "RENDER", "INJ",
     "TIA", "WIF", "FLOKI", "SEI", "RUNE"
 ]
@@ -311,27 +310,29 @@ async def analyze_coin_full_status(code: str) -> str:
     )
 
 # ===========================
-# کیبوردها (دو ستونی با طول یکسان)
+# کیبوردها
 # ===========================
 def kb_main_menu(is_admin_user=False):
-    # دکمه‌های هم‌عرض
-    btn1 = "💵 قیمت لحظه‌ای"
-    btn2 = "📊 وضعیت و تحلیل"
-    btn_start = "▶️ شروع فعالیت"
-    btn_stop = "⏸ توقف فعالیت"
-    btn_admin = "👑 پنل مدیریت ادمین"
-
     keyboard = [
-        [InlineKeyboardButton(btn1, callback_data="coins_prices_all"),
-         InlineKeyboardButton(btn2, callback_data="coins_status_grid")],
+        [InlineKeyboardButton("💵 قیمت لحظه‌ای", callback_data="coins_prices_all"),
+         InlineKeyboardButton("📊 وضعیت و تحلیل", callback_data="coins_status_grid")],
     ]
     if is_admin_user:
-        keyboard.append([InlineKeyboardButton(btn_admin, callback_data="admin_panel")])
+        keyboard.append([
+            InlineKeyboardButton("👑 پنل مدیریت", callback_data="admin_panel"),
+            InlineKeyboardButton(" ", callback_data="dummy")
+        ])
     keyboard.append([
-        InlineKeyboardButton(btn_start, callback_data="bot_start_action"),
-        InlineKeyboardButton(btn_stop, callback_data="bot_stop_action")
+        InlineKeyboardButton("▶️ شروع فعالیت", callback_data="bot_start_action"),
+        InlineKeyboardButton("⏸ توقف فعالیت", callback_data="bot_stop_action")
     ])
     return InlineKeyboardMarkup(keyboard)
+
+def kb_start_only():
+    """منوی فقط با دکمه شروع (برای حالت توقف)"""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("▶️ شروع مجدد ربات", callback_data="bot_start_action")]
+    ])
 
 def kb_prices_all_single():
     return InlineKeyboardMarkup([
@@ -398,6 +399,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     is_adm = user_id in ADMIN_USER_IDS
 
+    # دکمه خالی را نادیده بگیر
+    if data == "dummy":
+        return
+
     if data == "bot_start_action":
         paused_users.discard(user_id)
         registered_users.add(user_id)
@@ -412,17 +417,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "bot_stop_action":
         paused_users.add(user_id)
         save_state()
+        # فقط دکمه شروع نمایش داده شود
         await query.edit_message_text(
-            "⏹ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه «▶️ شروع فعالیت» کلیک کنید.",
-            reply_markup=kb_main_menu(is_adm),
+            "⏹ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه زیر کلیک کنید.",
+            reply_markup=kb_start_only(),
             parse_mode="Markdown"
         )
         return
 
     if user_id in paused_users and data != "main_menu":
         await query.edit_message_text(
-            "⛔️ **ربات برای شما غیرفعال است.**\nجهت فعال‌سازی روی دکمه «▶️ شروع فعالیت» کلیک کنید.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ شروع فعالیت", callback_data="bot_start_action")]]),
+            "⛔️ **ربات برای شما غیرفعال است.**\nجهت فعال‌سازی روی دکمه زیر کلیک کنید.",
+            reply_markup=kb_start_only(),
             parse_mode="Markdown"
         )
         return
@@ -658,7 +664,7 @@ def main():
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("🚀 FINAL VERSION - STABLE TWO-COLUMN MENU, LEFT-ALIGNED, FAST, EMA FIX")
+    logger.info("🚀 FINAL VERSION - STOP BUTTON SHOWS ONLY START MENU")
     application.run_polling()
 
 if __name__ == "__main__":
