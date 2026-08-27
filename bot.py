@@ -38,7 +38,6 @@ ADMIN_USER_IDS = {
 }
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 
-# لیست سمبل‌ها - برای Gate.io ممکن است برخی اسم‌ها متفاوت باشد (مثلاً TONCOIN)
 COIN_CODES = [
     "BTC", "ETH", "SOL", "BNB", "XRP",
     "ADA", "DOGE", "AVAX", "LINK", "DOT",
@@ -57,25 +56,23 @@ STATE_FILE = os.path.join(DATA_DIR, "state.json")
 
 DIVIDER = "────────────────────"
 
-# هدرهای User-Agent برای دور زدن محدودیت‌ها
 exchange_headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
 
-# تنظیمات بهینه برای ccxt
 exchange_mexc = ccxt.mexc({
     "enableRateLimit": True,
-    "timeout": 30000,  # افزایش timeout
+    "timeout": 15000,
     "headers": exchange_headers,
     "options": {
         "defaultType": "spot",
-        "adjustForTimeDifference": True,  # همگام‌سازی زمان
+        "adjustForTimeDifference": True,
     }
 })
 
 exchange_gate = ccxt.gate({
     "enableRateLimit": True,
-    "timeout": 30000,
+    "timeout": 15000,
     "headers": exchange_headers,
     "options": {"defaultType": "spot"}
 })
@@ -98,7 +95,6 @@ async def fetch_irt_rate() -> float:
     try:
         def _get():
             return requests.get("https://api.wallex.ir/v1/markets", timeout=5)
-        
         r = await asyncio.to_thread(_get)
         if r.status_code == 200:
             rate = float(r.json()["result"]["symbols"]["USDTTMN"]["stats"]["lastPrice"])
@@ -106,7 +102,6 @@ async def fetch_irt_rate() -> float:
             return rate
     except Exception as e:
         logger.warning(f"Error fetching IRT rate: {e}")
-    
     return _irt_rate_cache["value"] or 65000.0
 
 def save_state():
@@ -148,37 +143,75 @@ class MarketCache:
         if now - self.last_price_update < PRICE_TTL_SECONDS and self.prices:
             return self.prices
 
+        symbols = [f"{code}/USDT" for code in COIN_CODES]
         new_prices = {}
-        # دریافت تکی برای هر ارز
-        for code in COIN_CODES:
-            # تلاش با MEXC
+
+        # ۱. تلاش گروهی با MEXC
+        try:
+            tickers = await asyncio.to_thread(exchange_mexc.fetch_tickers, symbols)
+            for code in COIN_CODES:
+                sym = f"{code}/USDT"
+                if sym in tickers and tickers[sym].get("last") is not None:
+                    new_prices[code] = float(tickers[sym]["last"])
+            if new_prices:
+                self.active_exchange_name = "MEXC"
+                self.prices = new_prices
+                self.last_price_update = now
+                return self.prices
+        except Exception as e:
+            logger.warning(f"MEXC fetch_tickers failed: {e}")
+
+        # ۲. تلاش گروهی با Gate.io
+        try:
+            # Gate.io برای TON از TONCOIN استفاده می‌کند، بنابراین لیست را تنظیم می‌کنیم
+            gate_symbols = []
+            for code in COIN_CODES:
+                if code == "TON":
+                    gate_symbols.append("TONCOIN/USDT")
+                else:
+                    gate_symbols.append(f"{code}/USDT")
+            tickers = await asyncio.to_thread(exchange_gate.fetch_tickers, gate_symbols)
+            for i, code in enumerate(COIN_CODES):
+                sym = gate_symbols[i]
+                if sym in tickers and tickers[sym].get("last") is not None:
+                    new_prices[code] = float(tickers[sym]["last"])
+            if new_prices:
+                self.active_exchange_name = "Gate.io"
+                self.prices = new_prices
+                self.last_price_update = now
+                return self.prices
+        except Exception as e:
+            logger.warning(f"Gate.io fetch_tickers failed: {e}")
+
+        # ۳. در صورت شکست هر دو، به صورت تکی و همزمان (برای سرعت)
+        async def fetch_one(code):
+            # MEXC
             try:
                 ticker = await asyncio.to_thread(exchange_mexc.fetch_ticker, f"{code}/USDT")
                 if ticker and ticker.get("last") is not None:
-                    new_prices[code] = float(ticker["last"])
-                    continue
-            except Exception as e:
-                logger.warning(f"MEXC fetch_ticker {code} failed: {e}")
-
-            # اگر MEXC جواب نداد، از Gate.io
+                    return code, float(ticker["last"])
+            except:
+                pass
+            # Gate
             try:
-                # برای Gate.io، برخی سمبل‌ها نام متفاوت دارند (مثلاً TONCOIN)
-                symbol_gate = f"{code}/USDT"
-                if code == "TON":
-                    symbol_gate = "TONCOIN/USDT"
-                ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, symbol_gate)
+                sym = "TONCOIN/USDT" if code == "TON" else f"{code}/USDT"
+                ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, sym)
                 if ticker and ticker.get("last") is not None:
-                    new_prices[code] = float(ticker["last"])
-                    continue
-            except Exception as e:
-                logger.warning(f"Gate.io fetch_ticker {code} failed: {e}")
+                    return code, float(ticker["last"])
+            except:
+                pass
+            return code, None
+
+        tasks = [fetch_one(code) for code in COIN_CODES]
+        results = await asyncio.gather(*tasks)
+        for code, price in results:
+            if price is not None:
+                new_prices[code] = price
 
         if new_prices:
             self.prices = new_prices
             self.last_price_update = now
-            # تعیین صرافی فعال (بر اساس تعداد موفقیت‌ها)
-            mexc_count = sum(1 for code in new_prices if code in self.prices)  # این منطق ساده است
-            self.active_exchange_name = "MEXC" if mexc_count > len(new_prices)/2 else "Gate.io"
+            self.active_exchange_name = "MEXC/Gate (fallback)"
         return self.prices
 
     async def get_ohlcv(self, code: str, timeframe: str = "1h") -> Optional[pd.DataFrame]:
@@ -196,10 +229,8 @@ class MarketCache:
 
         # تلاش با Gate.io
         try:
-            symbol_gate = f"{code}/USDT"
-            if code == "TON":
-                symbol_gate = "TONCOIN/USDT"
-            raw = await asyncio.to_thread(exchange_gate.fetch_ohlcv, symbol_gate, timeframe, limit=100)
+            sym = "TONCOIN/USDT" if code == "TON" else f"{code}/USDT"
+            raw = await asyncio.to_thread(exchange_gate.fetch_ohlcv, sym, timeframe, limit=100)
             if raw:
                 df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
                 df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -283,9 +314,7 @@ async def analyze_coin_full_status(code: str) -> str:
         f"🌐 **باند پایینی بولینگر:** `${bb_lower:,.4f}`"
     )
 
-# بقیه توابع (کیبوردها، هندلرها، حلقه مانیتور) بدون تغییر می‌مانند
-# برای اختصار، آن‌ها را دوباره نمی‌نویسم، ولی باید در کد نهایی باشند.
-
+# توابع کیبورد
 def kb_main_menu(is_admin_user=False):
     keyboard = [
         [InlineKeyboardButton("💵 قیمت لحظه‌ای ارزها", callback_data="coins_prices_all")],
@@ -307,10 +336,13 @@ def kb_prices_all_single():
     ])
 
 def kb_status_grid():
+    # دریافت صرافی فعال برای نمایش نماد
+    exchange_symbol = "M" if cache.active_exchange_name.startswith("MEXC") else "G"
     buttons = []
     row = []
     for code in COIN_CODES:
-        row.append(InlineKeyboardButton(f"{code} 🟢", callback_data=f"coin_detail_{code}"))
+        # به جای ایموجی، از نماد صرافی استفاده می‌کنیم
+        row.append(InlineKeyboardButton(f"{code} {exchange_symbol}", callback_data=f"coin_detail_{code}"))
         if len(row) == 2:
             buttons.append(row)
             row = []
@@ -336,6 +368,7 @@ def kb_reset_confirm():
         [InlineKeyboardButton("❌ انصراف", callback_data="admin_panel")]
     ])
 
+# هندلرها
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     registered_users.add(user_id)
@@ -530,7 +563,6 @@ async def channel_signal_monitor_loop(app: Application):
             if CHANNEL_ID:
                 prices = await cache.update_prices()
                 for code in COIN_CODES:
-                    # از ادامه کار برای ارزهای بدون قیمت صرف‌نظر کن
                     if prices.get(code, 0.0) == 0.0:
                         continue
                     df = await cache.get_ohlcv(code, "1h")
@@ -538,9 +570,6 @@ async def channel_signal_monitor_loop(app: Application):
                         continue
 
                     price = prices.get(code, 0.0)
-                    if price == 0.0:
-                        continue
-
                     rsi = RSIIndicator(df["close"]).rsi().iloc[-1]
                     ema200 = EMAIndicator(df["close"], window=200).ema_indicator().iloc[-1]
 
@@ -586,7 +615,6 @@ async def post_init_setup(app: Application):
     await app.bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
     await app.bot.set_my_commands([], scope=BotCommandScopeDefault())
     await app.bot.set_my_commands([], scope=BotCommandScopeAllPrivateChats())
-    
     asyncio.create_task(channel_signal_monitor_loop(app))
 
 def main():
