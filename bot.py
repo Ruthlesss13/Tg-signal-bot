@@ -18,6 +18,12 @@ from ta.volatility import AverageTrueRange, BollingerBands
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotCommandScopeDefault, BotCommandScopeAllPrivateChats
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
+# ===========================
+# نسخه‌گذاری
+# ===========================
+VERSION = "2.2.0"
+BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 try:
     from zoneinfo import ZoneInfo
     TEHRAN_TZ = ZoneInfo("Asia/Tehran")
@@ -329,7 +335,6 @@ def kb_main_menu(is_admin_user=False):
     return InlineKeyboardMarkup(keyboard)
 
 def kb_start_only():
-    """منوی فقط با دکمه شروع (برای حالت توقف)"""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("▶️ شروع مجدد ربات", callback_data="bot_start_action")]
     ])
@@ -373,6 +378,15 @@ def kb_reset_confirm():
 # ===========================
 # هندلرها
 # ===========================
+async def version_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش نسخه فعلی ربات"""
+    await update.message.reply_text(
+        f"🤖 **نسخه ربات:** `{VERSION}`\n"
+        f"📅 **زمان ساخت:** `{BUILD_TIME}`\n"
+        f"🆔 **شناسه:** `{context.bot.id}`",
+        parse_mode="Markdown"
+    )
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     registered_users.add(user_id)
@@ -399,7 +413,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     is_adm = user_id in ADMIN_USER_IDS
 
-    # دکمه خالی را نادیده بگیر
     if data == "dummy":
         return
 
@@ -417,7 +430,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "bot_stop_action":
         paused_users.add(user_id)
         save_state()
-        # فقط دکمه شروع نمایش داده شود
         await query.edit_message_text(
             "⏹ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه زیر کلیک کنید.",
             reply_markup=kb_start_only(),
@@ -662,9 +674,11 @@ def main():
     application = Application.builder().token(BOT_TOKEN).post_init(post_init_setup).build()
 
     application.add_handler(CommandHandler("start", start_handler))
+    application.add_handler(CommandHandler("version", version_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("🚀 FINAL VERSION - STOP BUTTON SHOWS ONLY START MENU")
+    logger.info(f"🚀 Version {VERSION} started at {BUILD_TIME}")
+    logger.info("✅ Bot is running...")
     application.run_polling()
 
 if __name__ == "__main__":
