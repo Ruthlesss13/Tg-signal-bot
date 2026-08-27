@@ -38,11 +38,12 @@ ADMIN_USER_IDS = {
 }
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 
+# حذف TON از لیست به دلیل عدم وجود سمبل صحیح (می‌توانید بعداً اضافه کنید)
 COIN_CODES = [
     "BTC", "ETH", "SOL", "BNB", "XRP",
     "ADA", "DOGE", "AVAX", "LINK", "DOT",
     "NEAR", "SUI", "APT", "ARB", "OP",
-    "POL", "TON", "LTC", "BCH", "ATOM",
+    "POL", "LTC", "BCH", "ATOM",
     "SHIB", "PEPE", "FET", "RENDER", "INJ",
     "TIA", "WIF", "FLOKI", "SEI", "RUNE"
 ]
@@ -137,6 +138,7 @@ class MarketCache:
         self.prices: Dict[str, float] = {}
         self.last_price_update = 0
         self.active_exchange_name = "MEXC"
+        self.semaphore = asyncio.Semaphore(5)  # محدودیت همزمانی
 
     async def update_prices(self) -> Dict[str, float]:
         now = time.time()
@@ -163,24 +165,12 @@ class MarketCache:
 
         # ۲. Gate.io
         try:
-            gate_symbols = []
-            for code in COIN_CODES:
-                if code == "TON":
-                    gate_symbols.append("TONCOIN/USDT")
-                else:
-                    gate_symbols.append(f"{code}/USDT")
+            gate_symbols = [f"{code}/USDT" for code in COIN_CODES]
             tickers = await asyncio.to_thread(exchange_gate.fetch_tickers, gate_symbols)
             for i, code in enumerate(COIN_CODES):
                 sym = gate_symbols[i]
                 if sym in tickers and tickers[sym].get("last") is not None:
                     new_prices[code] = float(tickers[sym]["last"])
-            if "TON" not in new_prices:
-                try:
-                    ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, "TON/USDT")
-                    if ticker and ticker.get("last") is not None:
-                        new_prices["TON"] = float(ticker["last"])
-                except:
-                    pass
             if new_prices:
                 self.active_exchange_name = "Gate.io"
                 self.prices = new_prices
@@ -191,26 +181,22 @@ class MarketCache:
 
         # ۳. Fallback تکی فقط برای ارزهای بدون قیمت
         async def fetch_one(code):
-            try:
-                ticker = await asyncio.to_thread(exchange_mexc.fetch_ticker, f"{code}/USDT")
-                if ticker and ticker.get("last") is not None:
-                    return code, float(ticker["last"])
-            except:
-                pass
-            try:
-                sym = "TONCOIN/USDT" if code == "TON" else f"{code}/USDT"
-                ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, sym)
-                if ticker and ticker.get("last") is not None:
-                    return code, float(ticker["last"])
-            except:
-                if code == "TON":
-                    try:
-                        ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, "TON/USDT")
-                        if ticker and ticker.get("last") is not None:
-                            return code, float(ticker["last"])
-                    except:
-                        pass
-            return code, None
+            async with self.semaphore:
+                # MEXC
+                try:
+                    ticker = await asyncio.to_thread(exchange_mexc.fetch_ticker, f"{code}/USDT")
+                    if ticker and ticker.get("last") is not None:
+                        return code, float(ticker["last"])
+                except:
+                    pass
+                # Gate
+                try:
+                    ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, f"{code}/USDT")
+                    if ticker and ticker.get("last") is not None:
+                        return code, float(ticker["last"])
+                except:
+                    pass
+                return code, None
 
         missing_codes = [code for code in COIN_CODES if code not in new_prices]
         if missing_codes:
@@ -227,8 +213,9 @@ class MarketCache:
         return self.prices
 
     async def get_ohlcv(self, code: str, timeframe: str = "1h") -> Optional[pd.DataFrame]:
+        # افزایش limit به ۲۵۰ برای محاسبه EMA200
         try:
-            raw = await asyncio.to_thread(exchange_mexc.fetch_ohlcv, f"{code}/USDT", timeframe, limit=100)
+            raw = await asyncio.to_thread(exchange_mexc.fetch_ohlcv, f"{code}/USDT", timeframe, limit=250)
             if raw:
                 df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
                 df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -239,8 +226,7 @@ class MarketCache:
             logger.warning(f"MEXC OHLCV failed for {code}: {e}")
 
         try:
-            sym = "TONCOIN/USDT" if code == "TON" else f"{code}/USDT"
-            raw = await asyncio.to_thread(exchange_gate.fetch_ohlcv, sym, timeframe, limit=100)
+            raw = await asyncio.to_thread(exchange_gate.fetch_ohlcv, f"{code}/USDT", timeframe, limit=250)
             if raw:
                 df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
                 df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -328,7 +314,7 @@ async def analyze_coin_full_status(code: str) -> str:
     )
 
 # ===========================
-# کیبوردهای یک‌ستونی با متن‌های کوتاه‌تر
+# کیبوردهای یک‌ستونی
 # ===========================
 def kb_main_menu(is_admin_user=False):
     keyboard = [
@@ -592,8 +578,18 @@ async def channel_signal_monitor_loop(app: Application):
                 if df is None or len(df) < 50:
                     continue
 
-                rsi = RSIIndicator(df["close"]).rsi().iloc[-1]
-                ema200 = EMAIndicator(df["close"], window=200).ema_indicator().iloc[-1]
+                close = df["close"]
+                rsi = RSIIndicator(close, window=14).rsi().iloc[-1]
+                ema200 = EMAIndicator(close, window=200).ema_indicator().iloc[-1]
+
+                # اگر EMA200 nan بود، از EMA50 استفاده کن
+                if pd.isna(ema200):
+                    logger.warning(f"EMA200 is nan for {code}, using EMA50.")
+                    ema50 = EMAIndicator(close, window=50).ema_indicator().iloc[-1]
+                    if pd.isna(ema50):
+                        logger.warning(f"EMA50 also nan for {code}, skipping.")
+                        continue
+                    ema200 = ema50
 
                 logger.info(f"📊 {code}: Price={price:.4f}, EMA200={ema200:.4f}, RSI={rsi:.2f} -> Condition: {price > ema200 and rsi < 32}")
 
@@ -654,7 +650,7 @@ def main():
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("🚀 FINAL VERSION - STABLE BUTTONS, LEFT-ALIGNED, FAST")
+    logger.info("🚀 FINAL VERSION - STABLE BUTTONS, LEFT-ALIGNED, FAST, EMA FIX")
     application.run_polling()
 
 if __name__ == "__main__":
