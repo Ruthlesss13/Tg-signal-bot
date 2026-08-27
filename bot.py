@@ -265,6 +265,8 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=kb_main_menu(is_adm), parse_mode="Markdown")
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global signal_history, TOTAL_SIGNALS_GENERATED, LAST_REPORT_TIME
+
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -321,7 +323,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "reset_stats_do":
         if not is_adm:
             return
-        global signal_history, TOTAL_SIGNALS_GENERATED, LAST_REPORT_TIME
         signal_history.clear()
         TOTAL_SIGNALS_GENERATED = 0
         LAST_REPORT_TIME = shamsi_now()
