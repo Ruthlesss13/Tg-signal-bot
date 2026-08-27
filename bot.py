@@ -19,9 +19,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotComm
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ===========================
-# نسخه‌گذاری
+# نسخه‌گذاری (آپدیت جدید)
 # ===========================
-VERSION = "2.5.1"
+VERSION = "2.5.2"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 try:
@@ -44,7 +44,7 @@ ADMIN_USER_IDS = {
 }
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 
-# جایگزینی MATIC با UNI (Uniswap)
+# لیست ۳۰ ارز برتر (پشتیبانی کامل از UNI به جای MATIC)
 COIN_CODES = [
     "BTC", "ETH", "SOL", "BNB", "XRP",
     "ADA", "DOGE", "AVAX", "LINK", "DOT",
@@ -704,11 +704,10 @@ async def channel_signal_monitor_loop(app: Application):
         await asyncio.sleep(600)
 
 async def post_init_setup(app: Application):
-    # حذف منوی قدیمی
+    # تنظیم مجدد منوی دستورات تلگرام
     await app.bot.delete_my_commands(scope=BotCommandScopeDefault())
     await app.bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
     
-    # تنظیم منوی جدید کنار کادر تایپ
     commands = [
         BotCommand("start", "شروع و نمایش منو"),
         BotCommand("version", "نمایش نسخه ربات"),
