@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from ta.momentum import RSIIndicator, StochRSIIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator
 from ta.volatility import AverageTrueRange, BollingerBands
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, BotCommandScopeDefault, BotCommandScopeAllPrivateChats
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 try:
@@ -49,7 +49,7 @@ COIN_CODES = [
 ]
 
 IRT_RATE_TTL_SECONDS = 60
-PRICE_TTL_SECONDS = 30  # مدیریت نرخ درخواست‌ها برای جلوگیری از بن شدن IP
+PRICE_TTL_SECONDS = 30
 
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -57,7 +57,7 @@ STATE_FILE = os.path.join(DATA_DIR, "state.json")
 
 DIVIDER = "────────────────────"
 
-# ---------- تنظیم صرافی‌ها (اولویت ۱: MEXC | اولویت ۲: Gate.io) ----------
+# ---------- تنظیم صرافی‌ها ----------
 exchange_mexc = ccxt.mexc({
     "enableRateLimit": True,
     "timeout": 10000,
@@ -124,7 +124,7 @@ def load_state():
         except Exception as e:
             logger.error(f"Error loading state: {e}")
 
-# ---------- مدیریت داده‌های بازار با اولویت MEXC ----------
+# ---------- مدیریت کش بازار (تلاش برای MEXC و سپس Gate.io) ----------
 class MarketCache:
     def __init__(self):
         self.prices: Dict[str, float] = {}
@@ -138,31 +138,37 @@ class MarketCache:
 
         symbols = [f"{code}/USDT" for code in COIN_CODES]
 
-        # ۱. تلاش برای دریافت ۳۰ ارز از صرافی MEXC
+        # ۱. تلاش برای MEXC
         try:
             tickers = await asyncio.to_thread(exchange_mexc.fetch_tickers, symbols)
+            fetched_any = False
             for code in COIN_CODES:
                 sym = f"{code}/USDT"
                 if sym in tickers and tickers[sym].get("last") is not None:
                     self.prices[code] = float(tickers[sym]["last"])
-            self.active_exchange_name = "MEXC"
-            self.last_price_update = now
-            return self.prices
+                    fetched_any = True
+            if fetched_any:
+                self.active_exchange_name = "MEXC"
+                self.last_price_update = now
+                return self.prices
         except Exception as e:
-            logger.warning(f"MEXC fetch failed ({e}), falling back to Gate.io...")
+            logger.error(f"MEXC fetch_tickers failed: {e}")
 
-        # ۲. صرافی پشتیبان (Gate.io)
+        # ۲. سوئیچ به Gate.io در صورت خطا
         try:
             tickers = await asyncio.to_thread(exchange_gate.fetch_tickers, symbols)
+            fetched_any = False
             for code in COIN_CODES:
                 sym = f"{code}/USDT"
                 if sym in tickers and tickers[sym].get("last") is not None:
                     self.prices[code] = float(tickers[sym]["last"])
-            self.active_exchange_name = "Gate.io"
-            self.last_price_update = now
-            return self.prices
+                    fetched_any = True
+            if fetched_any:
+                self.active_exchange_name = "Gate.io"
+                self.last_price_update = now
+                return self.prices
         except Exception as e:
-            logger.error(f"Gate.io fetch failed as well: {e}")
+            logger.error(f"Gate.io fetch_tickers failed: {e}")
 
         return self.prices
 
@@ -194,7 +200,7 @@ class MarketCache:
 
 cache = MarketCache()
 
-# ---------- گزارش جامع وضعیت و تحلیل ----------
+# ---------- گزارش وضعیت ارز ----------
 async def analyze_coin_full_status(code: str) -> str:
     prices = await cache.update_prices()
     price = prices.get(code, 0.0)
@@ -236,7 +242,7 @@ async def analyze_coin_full_status(code: str) -> str:
         f"📊 **گزارش جامع وضعیت و تحلیل تکنیکال {code}**\n"
         f"{DIVIDER}\n"
         f"🏛 **صرافی:** `{cache.active_exchange_name}` | **جفت ارز:** `{code}/USDT`\n"
-        f"🔄 **وضعیت معاملات Swap:** فعال (Spot & Futures) ✅\n"
+        f"🔄 **وضعیت معاملات Swap:** 🟢 فعال (Spot & Futures)\n"
         f"{DIVIDER}\n"
         f"💵 **قیمت دلاری:** `${price:,.4f}` USDT\n"
         f"🇮🇷 **معادل تومانی:** `{irt_price:,.0f}` تومان\n"
@@ -262,7 +268,7 @@ async def analyze_coin_full_status(code: str) -> str:
         f"🌐 **باند پایینی بولینگر:** `${bb_lower:,.4f}`"
     )
 
-# ---------- ساخت کیبوردهای اینلاین ثابت ----------
+# ---------- کیبوردهای استاندارد با ابعاد ثابت ----------
 def kb_main_menu(is_admin_user=False):
     keyboard = [
         [InlineKeyboardButton("💵 قیمت لحظه‌ای ارزها", callback_data="coins_prices_all")],
@@ -272,8 +278,8 @@ def kb_main_menu(is_admin_user=False):
         keyboard.append([InlineKeyboardButton("👑 پنل مدیریت ادمین", callback_data="admin_panel")])
 
     keyboard.append([
-        InlineKeyboardButton("▶️ استارت", callback_data="bot_start_action"),
-        InlineKeyboardButton("⏹ استاپ", callback_data="bot_stop_action")
+        InlineKeyboardButton("استارت", callback_data="bot_start_action"),
+        InlineKeyboardButton("استاپ", callback_data="bot_stop_action")
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -287,7 +293,7 @@ def kb_status_grid():
     buttons = []
     row = []
     for code in COIN_CODES:
-        row.append(InlineKeyboardButton(f"{code} [SWAP]", callback_data=f"coin_detail_{code}"))
+        row.append(InlineKeyboardButton(f"{code} 🟢", callback_data=f"coin_detail_{code}"))
         if len(row) == 2:
             buttons.append(row)
             row = []
@@ -313,7 +319,7 @@ def kb_reset_confirm():
         [InlineKeyboardButton("❌ انصراف", callback_data="admin_panel")]
     ])
 
-# ---------- هندلرهای اصلی ----------
+# ---------- هندلرها ----------
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     registered_users.add(user_id)
@@ -340,14 +346,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     is_adm = user_id in ADMIN_USER_IDS
 
-    if data == "main_menu":
-        await query.edit_message_text(
-            "👇 **منوی اصلی ربات:**",
-            reply_markup=kb_main_menu(is_adm),
-            parse_mode="Markdown"
-        )
-
-    elif data == "bot_start_action":
+    # اکشن استارت
+    if data == "bot_start_action":
         paused_users.discard(user_id)
         registered_users.add(user_id)
         save_state()
@@ -356,19 +356,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_main_menu(is_adm),
             parse_mode="Markdown"
         )
+        return
 
-    elif data == "bot_stop_action":
+    # اکشن استاپ
+    if data == "bot_stop_action":
         paused_users.add(user_id)
         save_state()
         await query.edit_message_text(
-            "⏹ **ربات متوقف شد.**\nدر صورت نیاز می‌توانید با زدن دکمه «▶️ استارت» مجدداً آن را فعال کنید.",
+            "⏹ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه «استارت» کلیک کنید.",
+            reply_markup=kb_main_menu(is_adm),
+            parse_mode="Markdown"
+        )
+        return
+
+    # مسدودسازی دسترسی در صورت متوقف بودن کاربر
+    if user_id in paused_users and data != "main_menu":
+        await query.edit_message_text(
+            "⛔️ **ربات برای شما غیرفعال (متوقف) است.**\nجهت دسترسی به بخش‌های ربات ابتدا روی دکمه **استارت** کلیک کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("استارت", callback_data="bot_start_action")]]),
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "main_menu":
+        await query.edit_message_text(
+            "👇 **منوی اصلی ربات:**",
             reply_markup=kb_main_menu(is_adm),
             parse_mode="Markdown"
         )
 
-    # ---------- نمایش لیست کامل ۳۰ ارز در یک صفحه متنی ----------
+    # ---------- نمایش لیست کامل قیمت‌ها ----------
     elif data == "coins_prices_all":
-        await query.edit_message_text("⏳ در حال دریافت لیست قیمت ۳۰ ارز فیوچرز...", parse_mode="Markdown")
+        await query.edit_message_text("⏳ در حال دریافت لیست قیمت ۳۰ ارز...", parse_mode="Markdown")
         prices = await cache.update_prices()
         rate = fetch_irt_rate()
 
@@ -382,12 +401,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for code in COIN_CODES:
             p_usd = prices.get(code, 0.0)
             p_irt = p_usd * rate
-            text += f"`{code}/USDT` ──> 💵 `${p_usd:,.4f}` | 🇮🇷 `{p_irt:,.0f}` تومان\n"
+            text += f"🔹 **{code}**: `${p_usd:,.4f}` USDT  |  `{p_irt:,.0f}` تومان\n"
 
-        text += f"{DIVIDER}\n⚡️ *تمامی ۳۰ ارز در یک فراخوانی به‌روزرسانی شدند.*"
         await query.edit_message_text(text, reply_markup=kb_prices_all_single(), parse_mode="Markdown")
 
-    # ---------- لیست تحلیل ۳۰ ارز ----------
+    # ---------- لیست وضعیت و تحلیل ارزها ----------
     elif data == "coins_status_grid":
         text = (
             "📊 **بخش وضعیت و تحلیل تکنیکال ارزها**\n"
@@ -550,8 +568,12 @@ async def channel_signal_monitor_loop(app: Application):
             logger.error(f"Channel monitor loop error: {e}")
         await asyncio.sleep(600)
 
+# ---------- پاک‌سازی کامل منوی دستورات تلگرام ----------
 async def post_init_setup(app: Application):
-    await app.bot.delete_my_commands()
+    await app.bot.delete_my_commands(scope=BotCommandScopeDefault())
+    await app.bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
+    await app.bot.set_my_commands([], scope=BotCommandScopeDefault())
+    await app.bot.set_my_commands([], scope=BotCommandScopeAllPrivateChats())
 
 def main():
     if not BOT_TOKEN:
@@ -567,7 +589,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.create_task(channel_signal_monitor_loop(application))
 
-    logger.info("Bot is running successfully with 30 coins...")
+    logger.info("Bot is running successfully...")
     application.run_polling()
 
 if __name__ == "__main__":
