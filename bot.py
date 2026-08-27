@@ -21,7 +21,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 try:
@@ -44,11 +44,12 @@ ADMIN_USER_IDS = {
 }
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 
+# جایگزینی MATIC با UNI (Uniswap) - ارز معتبر و محبوب
 COIN_CODES = [
     "BTC", "ETH", "SOL", "BNB", "XRP",
     "ADA", "DOGE", "AVAX", "LINK", "DOT",
     "NEAR", "SUI", "APT", "ARB", "OP",
-    "POL", "MATIC", "LTC", "BCH", "ATOM",
+    "POL", "UNI", "LTC", "BCH", "ATOM",
     "SHIB", "PEPE", "FET", "RENDER", "INJ",
     "TIA", "WIF", "FLOKI", "SEI", "RUNE"
 ]
@@ -365,7 +366,7 @@ def kb_status_grid():
 def kb_admin_panel():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📈 آمار سیگنال‌ها", callback_data="admin_signal_stats")],
-        [InlineKeyboardButton("👥 آمار کاربران", callback_data="admin_system_stats")],
+        [InlineKeyboardButton("👥 آمار کاربران و سیستم", callback_data="admin_system_stats")],
         [InlineKeyboardButton("🗑 صفر کردن آمار", callback_data="reset_stats_confirm")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")]
     ])
@@ -578,7 +579,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🧠 **موتور هوش مصنوعی و تحلیل:** فعال 🟢\n"
             f"🇮🇷 **API دریافت نرخ تتر (Wallex):** {wallex_status}\n"
             f"📢 **کانال تلگرام متصل:** {channel_status}\n"
-            f"⏱ **ساعت هماهنگ سیستم:** `{shamsi_now()}`"
+            f"⏱ **ساعت هماهنگ سیستم:** `{shamsi_now()}`\n"
+            f"🤖 **نسخه ربات:** `{VERSION}`"
         )
         await query.edit_message_text(sys_text, reply_markup=kb_back_admin(), parse_mode="Markdown")
 
