@@ -62,7 +62,7 @@ exchange_headers = {
 
 exchange_mexc = ccxt.mexc({
     "enableRateLimit": True,
-    "timeout": 10000,  # کاهش timeout برای سرعت بیشتر
+    "timeout": 10000,
     "headers": exchange_headers,
     "options": {
         "defaultType": "spot",
@@ -146,7 +146,7 @@ class MarketCache:
         symbols = [f"{code}/USDT" for code in COIN_CODES]
         new_prices = {}
 
-        # ۱. تلاش گروهی با MEXC (سریع‌ترین)
+        # ۱. MEXC
         try:
             tickers = await asyncio.to_thread(exchange_mexc.fetch_tickers, symbols)
             for code in COIN_CODES:
@@ -161,7 +161,7 @@ class MarketCache:
         except Exception as e:
             logger.warning(f"MEXC fetch_tickers failed: {e}")
 
-        # ۲. تلاش گروهی با Gate.io
+        # ۲. Gate.io
         try:
             gate_symbols = []
             for code in COIN_CODES:
@@ -174,8 +174,6 @@ class MarketCache:
                 sym = gate_symbols[i]
                 if sym in tickers and tickers[sym].get("last") is not None:
                     new_prices[code] = float(tickers[sym]["last"])
-            
-            # اگر TON با TONCOIN جواب نداد، TON/USDT را امتحان کن
             if "TON" not in new_prices:
                 try:
                     ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, "TON/USDT")
@@ -183,7 +181,6 @@ class MarketCache:
                         new_prices["TON"] = float(ticker["last"])
                 except:
                     pass
-            
             if new_prices:
                 self.active_exchange_name = "Gate.io"
                 self.prices = new_prices
@@ -192,23 +189,20 @@ class MarketCache:
         except Exception as e:
             logger.warning(f"Gate.io fetch_tickers failed: {e}")
 
-        # ۳. Fallback: دریافت تکی فقط برای ارزهای بدون قیمت
+        # ۳. Fallback تکی فقط برای ارزهای بدون قیمت
         async def fetch_one(code):
-            # MEXC
             try:
                 ticker = await asyncio.to_thread(exchange_mexc.fetch_ticker, f"{code}/USDT")
                 if ticker and ticker.get("last") is not None:
                     return code, float(ticker["last"])
             except:
                 pass
-            # Gate
             try:
                 sym = "TONCOIN/USDT" if code == "TON" else f"{code}/USDT"
                 ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, sym)
                 if ticker and ticker.get("last") is not None:
                     return code, float(ticker["last"])
             except:
-                # اگر TONCOIN جواب نداد، TON/USDT را امتحان کن
                 if code == "TON":
                     try:
                         ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, "TON/USDT")
@@ -233,7 +227,6 @@ class MarketCache:
         return self.prices
 
     async def get_ohlcv(self, code: str, timeframe: str = "1h") -> Optional[pd.DataFrame]:
-        # تلاش با MEXC
         try:
             raw = await asyncio.to_thread(exchange_mexc.fetch_ohlcv, f"{code}/USDT", timeframe, limit=100)
             if raw:
@@ -245,7 +238,6 @@ class MarketCache:
         except Exception as e:
             logger.warning(f"MEXC OHLCV failed for {code}: {e}")
 
-        # تلاش با Gate.io
         try:
             sym = "TONCOIN/USDT" if code == "TON" else f"{code}/USDT"
             raw = await asyncio.to_thread(exchange_gate.fetch_ohlcv, sym, timeframe, limit=100)
@@ -263,7 +255,6 @@ class MarketCache:
 cache = MarketCache()
 
 def format_price(price: float) -> str:
-    """فرمت‌سازی قیمت با دقت مناسب برای اعداد بسیار کوچک (تا ۱۰ رقم اعشار)"""
     if price < 0.01:
         return f"{price:.10f}"
     elif price < 1:
@@ -290,26 +281,21 @@ async def analyze_coin_full_status(code: str) -> str:
 
     rsi = RSIIndicator(close, window=14).rsi().iloc[-1]
     stoch_rsi = StochRSIIndicator(close, window=14).stochrsi().iloc[-1] * 100
-
     macd_obj = MACD(close)
     macd_hist = macd_obj.macd_diff().iloc[-1]
-
     ema20 = EMAIndicator(close, window=20).ema_indicator().iloc[-1]
     ema50 = EMAIndicator(close, window=50).ema_indicator().iloc[-1]
     ema200 = EMAIndicator(close, window=200).ema_indicator().iloc[-1]
-
     adx = ADXIndicator(high, low, close, window=14).adx().iloc[-1]
     atr = AverageTrueRange(high, low, close, window=14).average_true_range().iloc[-1]
-
     bollinger = BollingerBands(close, window=20)
     bb_upper = bollinger.bollinger_hband().iloc[-1]
     bb_lower = bollinger.bollinger_lband().iloc[-1]
-
     support = low.tail(24).min()
     resistance = high.tail(24).max()
 
     trend = "صعودی قوی 🚀" if price > ema50 > ema200 else ("نزولی قوی 🔻" if price < ema50 < ema200 else "خنثی / رنج ⚖️")
-    macd_status = "صعودی (Crossover Positive) 🟢" if macd_hist > 0 else "نزولی (Crossover Negative) 🔴"
+    macd_status = "صعودی 🟢" if macd_hist > 0 else "نزولی 🔴"
 
     return (
         f"📊 **گزارش جامع وضعیت و تحلیل تکنیکال {code}**\n"
@@ -323,11 +309,11 @@ async def analyze_coin_full_status(code: str) -> str:
         f"{DIVIDER}\n"
         f"📌 **مؤلفه‌های تکنیکال (تایم‌فریم 1 ساعته):**\n"
         f"• **روند کلی بازار:** {trend}\n"
-        f"• **شاخص قدرت نسبی (RSI 14):** `{rsi:.1f}`\n"
+        f"• **RSI (14):** `{rsi:.1f}`\n"
         f"• **استوکاستیک RSI:** `{stoch_rsi:.1f}`\n"
-        f"• **قدرت روند (ADX):** `{adx:.1f}`\n"
-        f"• **مومنتوم MACD:** {macd_status}\n"
-        f"• **میزان نوسان (ATR):** `${format_price(atr)}`\n"
+        f"• **ADX:** `{adx:.1f}`\n"
+        f"• **MACD:** {macd_status}\n"
+        f"• **ATR:** `${format_price(atr)}`\n"
         f"{DIVIDER}\n"
         f"📈 **میانگین‌های متحرک (EMA):**\n"
         f"• **EMA 20:** `${format_price(ema20)}`\n"
@@ -342,23 +328,23 @@ async def analyze_coin_full_status(code: str) -> str:
     )
 
 # ===========================
-# کیبوردها (یک ستونی برای ثبات سایز)
+# کیبوردهای یک‌ستونی با متن‌های کوتاه‌تر
 # ===========================
 def kb_main_menu(is_admin_user=False):
     keyboard = [
-        [InlineKeyboardButton("💵 قیمت لحظه‌ای ارزها", callback_data="coins_prices_all")],
-        [InlineKeyboardButton("📊 وضعیت و تحلیل ارزها", callback_data="coins_status_grid")],
+        [InlineKeyboardButton("💰 قیمت‌ها", callback_data="coins_prices_all")],
+        [InlineKeyboardButton("📊 تحلیل ارزها", callback_data="coins_status_grid")],
     ]
     if is_admin_user:
-        keyboard.append([InlineKeyboardButton("👑 پنل مدیریت ادمین", callback_data="admin_panel")])
-    keyboard.append([InlineKeyboardButton("▶️ شروع فعالیت", callback_data="bot_start_action")])
-    keyboard.append([InlineKeyboardButton("⏸ توقف فعالیت", callback_data="bot_stop_action")])
+        keyboard.append([InlineKeyboardButton("⚙️ پنل مدیریت", callback_data="admin_panel")])
+    keyboard.append([InlineKeyboardButton("▶️ شروع", callback_data="bot_start_action")])
+    keyboard.append([InlineKeyboardButton("⏸ توقف", callback_data="bot_stop_action")])
     return InlineKeyboardMarkup(keyboard)
 
 def kb_prices_all_single():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 بروزرسانی قیمت‌ها", callback_data="coins_prices_all")],
-        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")]
+        [InlineKeyboardButton("🔄 بروزرسانی", callback_data="coins_prices_all")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]
     ])
 
 def kb_status_grid():
@@ -371,23 +357,23 @@ def kb_status_grid():
             row = []
     if row:
         buttons.append(row)
-    buttons.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")])
+    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")])
     return InlineKeyboardMarkup(buttons)
 
 def kb_admin_panel():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📈 آمار دقیق سیگنال‌ها", callback_data="admin_signal_stats")],
-        [InlineKeyboardButton("👥 آمار کاربران و وضعیت سیستم", callback_data="admin_system_stats")],
-        [InlineKeyboardButton("🗑 صفر کردن آمار سیگنال‌ها", callback_data="reset_stats_confirm")],
-        [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")]
+        [InlineKeyboardButton("📈 آمار سیگنال‌ها", callback_data="admin_signal_stats")],
+        [InlineKeyboardButton("👥 آمار کاربران", callback_data="admin_system_stats")],
+        [InlineKeyboardButton("🗑 صفر کردن آمار", callback_data="reset_stats_confirm")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]
     ])
 
 def kb_back_admin():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل ادمین", callback_data="admin_panel")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", callback_data="admin_panel")]])
 
 def kb_reset_confirm():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚠️ بله، تمام آمار سیگنال‌ها صفر شود", callback_data="reset_stats_do")],
+        [InlineKeyboardButton("⚠️ بله، صفر شود", callback_data="reset_stats_do")],
         [InlineKeyboardButton("❌ انصراف", callback_data="admin_panel")]
     ])
 
@@ -425,7 +411,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         registered_users.add(user_id)
         save_state()
         await query.edit_message_text(
-            "✅ **ربات برای شما فعال شد.**\nهم‌اکنون می‌توانید از تمام امکانات استفاده کنید.",
+            "✅ **ربات برای شما فعال شد.**",
             reply_markup=kb_main_menu(is_adm),
             parse_mode="Markdown"
         )
@@ -435,7 +421,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         paused_users.add(user_id)
         save_state()
         await query.edit_message_text(
-            "⏹ **ربات متوقف شد.**\nبرای استفاده مجدد، روی دکمه «▶️ شروع فعالیت» کلیک کنید.",
+            "⏹ **ربات متوقف شد.**",
             reply_markup=kb_main_menu(is_adm),
             parse_mode="Markdown"
         )
@@ -443,21 +429,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id in paused_users and data != "main_menu":
         await query.edit_message_text(
-            "⛔️ **ربات برای شما غیرفعال (متوقف) است.**\nجهت دسترسی به بخش‌های ربات ابتدا روی دکمه زیر کلیک کنید.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ شروع فعالیت", callback_data="bot_start_action")]]),
+            "⛔️ **ربات برای شما غیرفعال است.**\nبرای فعال‌سازی روی دکمه «▶️ شروع» کلیک کنید.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ شروع", callback_data="bot_start_action")]]),
             parse_mode="Markdown"
         )
         return
 
     if data == "main_menu":
         await query.edit_message_text(
-            "👇 **منوی اصلی ربات:**",
+            "👇 **منوی اصلی:**",
             reply_markup=kb_main_menu(is_adm),
             parse_mode="Markdown"
         )
 
     elif data == "coins_prices_all":
-        await query.edit_message_text("⏳ در حال دریافت لیست قیمت ۳۰ ارز...", parse_mode="Markdown")
+        await query.edit_message_text("⏳ در حال دریافت قیمت‌ها...", parse_mode="Markdown")
         prices = await cache.update_prices()
         rate = await fetch_irt_rate()
 
@@ -473,7 +459,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for code in COIN_CODES:
             p_usd = prices.get(code, 0.0)
             p_irt = p_usd * rate
-            # استفاده از ‎ برای چپ‌چین اجباری
             text += f"‎{exchange_emoji} **{code}**: `${format_price(p_usd)}` USDT\n"
             text += f"‎🇮🇷 `{p_irt:,.0f}` تومان\n\n"
 
@@ -481,17 +466,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "coins_status_grid":
         text = (
-            "📊 **بخش وضعیت و تحلیل تکنیکال ارزها**\n"
-            "جهت مشاهده وضعیت کامل، اندیکاتورها و سطوح حمایت/مقاومت، ارز مورد نظر را انتخاب کنید:"
+            "📊 **بخش تحلیل تکنیکال ارزها**\n"
+            "ارز مورد نظر را انتخاب کنید:"
         )
         await query.edit_message_text(text, reply_markup=kb_status_grid(), parse_mode="Markdown")
 
     elif data.startswith("coin_detail_"):
         code = data.split("_")[2]
-        await query.edit_message_text(f"⏳ در حال استخراج و تحلیل داده‌های جامع برای {code}...", parse_mode="Markdown")
+        await query.edit_message_text(f"⏳ در حال تحلیل {code}...", parse_mode="Markdown")
         detail_text = await analyze_coin_full_status(code)
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 بروزرسانی تحلیل", callback_data=f"coin_detail_{code}")],
+            [InlineKeyboardButton("🔄 بروزرسانی", callback_data=f"coin_detail_{code}")],
             [InlineKeyboardButton("🔙 لیست ارزها", callback_data="coins_status_grid")]
         ])
         await query.edit_message_text(detail_text, reply_markup=kb, parse_mode="Markdown")
@@ -500,7 +485,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_adm:
             return
         await query.edit_message_text(
-            f"👑 **پنل مدیریت اختصاصی ادمین**\n{DIVIDER}\nلطفاً بخش مورد نظر را جهت بررسی انتخاب کنید:",
+            f"👑 **پنل مدیریت**\n{DIVIDER}\nلطفاً انتخاب کنید:",
             reply_markup=kb_admin_panel(),
             parse_mode="Markdown"
         )
@@ -520,28 +505,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sl = sum(1 for s in closed if s.get("status") == "sl_hit")
 
         stats_text = (
-            f"📈 **آمار و عملکرد تفکیکی سیگنال‌های کانال**\n"
+            f"📈 **آمار سیگنال‌ها**\n"
             f"{DIVIDER}\n"
-            f"🔢 **کل سیگنال‌های تولیدشده:** `{TOTAL_SIGNALS_GENERATED}`\n"
-            f"🎯 **سیگنال‌های بسته‌شده:** `{total}`\n"
-            f"✅ **سیگنال‌های موفق:** `{wins}`\n"
-            f"❌ **سیگنال‌های ناموفق (SL):** `{losses}`\n"
-            f"🏆 **نرخ پیروزی (Win Rate):** `{win_rate:.1f}%`\n"
+            f"🔢 **کل تولیدشده:** `{TOTAL_SIGNALS_GENERATED}`\n"
+            f"🎯 **بسته‌شده:** `{total}`\n"
+            f"✅ **موفق:** `{wins}`\n"
+            f"❌ **ناموفق:** `{losses}`\n"
+            f"🏆 **نرخ پیروزی:** `{win_rate:.1f}%`\n"
             f"{DIVIDER}\n"
-            f"📍 **جزئیات دقیق اهداف:**\n"
-            f"• برخورد با TP1: `{tp1}`\n"
-            f"• برخورد با TP2: `{tp2}`\n"
-            f"• برخورد با TP3: `{tp3}`\n"
-            f"• برخورد با حد ضرر (SL): `{sl}`\n"
+            f"📍 **جزئیات اهداف:**\n"
+            f"• TP1: `{tp1}`\n"
+            f"• TP2: `{tp2}`\n"
+            f"• TP3: `{tp3}`\n"
+            f"• SL: `{sl}`\n"
             f"{DIVIDER}\n"
-            f"🕒 **آخرین بازنویسی آمار:** `{LAST_REPORT_TIME or 'ثبت نشده'}`"
+            f"🕒 **آخرین بروزرسانی:** `{LAST_REPORT_TIME or 'ثبت نشده'}`"
         )
         await query.edit_message_text(stats_text, reply_markup=kb_back_admin(), parse_mode="Markdown")
 
     elif data == "admin_system_stats":
         if not is_adm:
             return
-        mexc_status = "آنلاین 🟢" if cache.prices else "در حال بررسی/آفلاین 🔴"
         rate = await fetch_irt_rate()
         wallex_status = "آنلاین 🟢" if rate > 0 else "آفلاین 🔴"
         channel_status = f"`{CHANNEL_ID}` 🟢" if CHANNEL_ID else "تنظیم نشده 🔴"
@@ -550,15 +534,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👥 **آمار کاربران و وضعیت سیستم**\n"
             f"{DIVIDER}\n"
             f"👤 **کاربران فعال:** `{len(registered_users - paused_users)}` نفر\n"
-            f"⏸ **کاربران متوقف‌شده:** `{len(paused_users)}` نفر\n"
-            f"📊 **مجموع کاربران ثبت‌شده:** `{len(registered_users)}` نفر\n"
+            f"⏸ **متوقف‌شده:** `{len(paused_users)}` نفر\n"
+            f"📊 **کل ثبت‌نام‌ها:** `{len(registered_users)}` نفر\n"
             f"{DIVIDER}\n"
-            f"🏛 **صرافی فعال در حال استفاده:** `{cache.active_exchange_name}`\n"
-            f"🌐 **وضعیت اتصال صرافی:** {mexc_status}\n"
-            f"🧠 **موتور هوش مصنوعی و تحلیل:** فعال 🟢\n"
-            f"🇮🇷 **API دریافت نرخ تتر (Wallex):** {wallex_status}\n"
-            f"📢 **کانال تلگرام متصل:** {channel_status}\n"
-            f"⏱ **ساعت هماهنگ سیستم:** `{shamsi_now()}`"
+            f"🏛 **صرافی فعال:** `{cache.active_exchange_name}`\n"
+            f"🇮🇷 **وضعیت Wallex:** {wallex_status}\n"
+            f"📢 **کانال:** {channel_status}\n"
+            f"⏱ **ساعت:** `{shamsi_now()}`"
         )
         await query.edit_message_text(sys_text, reply_markup=kb_back_admin(), parse_mode="Markdown")
 
@@ -566,7 +548,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_adm:
             return
         await query.edit_message_text(
-            "⚠️ **آیا از صفر کردن تمامی آمار سیگنال‌ها اطمینان دارید؟**",
+            "⚠️ **آیا از صفر کردن آمار اطمینان دارید؟**",
             reply_markup=kb_reset_confirm(),
             parse_mode="Markdown"
         )
@@ -579,7 +561,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         LAST_REPORT_TIME = shamsi_now()
         save_state()
         await query.edit_message_text(
-            "✅ **تمامی آمار سیگنال‌ها با موفقیت صفر شد.**",
+            "✅ **آمار با موفقیت صفر شد.**",
             reply_markup=kb_back_admin(),
             parse_mode="Markdown"
         )
@@ -590,39 +572,33 @@ async def channel_signal_monitor_loop(app: Application):
     while True:
         try:
             if not CHANNEL_ID:
-                logger.warning("⚠️ CHANNEL_ID not set, signal monitoring disabled.")
+                logger.warning("⚠️ CHANNEL_ID not set.")
                 await asyncio.sleep(600)
                 continue
 
-            logger.info("🔍 Checking for new signals...")
+            logger.info("🔍 Checking for signals...")
             prices = await cache.update_prices()
             if not prices:
-                logger.warning("⚠️ No prices fetched, skipping signal check.")
+                logger.warning("⚠️ No prices.")
                 await asyncio.sleep(600)
                 continue
 
-            signal_triggered = False
             for code in COIN_CODES:
                 price = prices.get(code, 0.0)
                 if price == 0.0:
-                    logger.debug(f"💰 {code} price is zero, skipping.")
                     continue
 
                 df = await cache.get_ohlcv(code, "1h")
                 if df is None or len(df) < 50:
-                    logger.debug(f"📉 {code} OHLCV data insufficient (len={len(df) if df is not None else 0})")
                     continue
 
                 rsi = RSIIndicator(df["close"]).rsi().iloc[-1]
                 ema200 = EMAIndicator(df["close"], window=200).ema_indicator().iloc[-1]
 
-                # لاگ کردن مقادیر کلیدی برای هر ارز
                 logger.info(f"📊 {code}: Price={price:.4f}, EMA200={ema200:.4f}, RSI={rsi:.2f} -> Condition: {price > ema200 and rsi < 32}")
 
                 if price > ema200 and rsi < 32:
-                    logger.info(f"🚨 SIGNAL TRIGGERED for {code}!")
-                    signal_triggered = True
-                    
+                    logger.info(f"🚨 SIGNAL for {code}!")
                     tp1 = price * 1.02
                     tp2 = price * 1.04
                     sl = price * 0.98
@@ -630,19 +606,19 @@ async def channel_signal_monitor_loop(app: Application):
                     irt_price = price * rate
 
                     signal_msg = (
-                        f"📣 **سیگنال جدید معامله** #{code}\n"
+                        f"📣 **سیگنال جدید** #{code}\n"
                         f"{DIVIDER}\n"
-                        f"🟢 **جهت معامله:** BUY / LONG\n"
+                        f"🟢 **جهت:** BUY / LONG\n"
                         f"🏛 **صرافی:** `{cache.active_exchange_name}`\n"
-                        f"💵 **قیمت ورود:** `${format_price(price)}` USDT\n"
-                        f"🇮🇷 **معادل تومانی:** `{irt_price:,.0f}` تومان\n"
-                        f"📅 **تاریخ:** `{shamsi_now()}`\n"
+                        f"💵 **ورود:** `${format_price(price)}` USDT\n"
+                        f"🇮🇷 **تومان:** `{irt_price:,.0f}`\n"
+                        f"📅 **زمان:** `{shamsi_now()}`\n"
                         f"{DIVIDER}\n"
-                        f"🎯 **هدف اول (TP1):** `${format_price(tp1)}`\n"
-                        f"🎯 **هدف دوم (TP2):** `${format_price(tp2)}`\n"
-                        f"🛑 **حد ضرر (SL):** `${format_price(sl)}`\n"
+                        f"🎯 **TP1:** `${format_price(tp1)}`\n"
+                        f"🎯 **TP2:** `${format_price(tp2)}`\n"
+                        f"🛑 **SL:** `${format_price(sl)}`\n"
                         f"{DIVIDER}\n"
-                        f"⚡️ *تحلیل خودکار توسط ربات دستیار کریپتو*"
+                        f"⚡️ *تحلیل خودکار*"
                     )
                     await app.bot.send_message(chat_id=CHANNEL_ID, text=signal_msg, parse_mode="Markdown")
                     TOTAL_SIGNALS_GENERATED += 1
@@ -654,22 +630,17 @@ async def channel_signal_monitor_loop(app: Application):
                         "time": shamsi_now()
                     })
                     save_state()
-                    await asyncio.sleep(15)  # جلوگیری از ارسال چند سیگنال همزمان
-
-            if not signal_triggered:
-                logger.info("✅ No signal conditions met in this cycle.")
+                    await asyncio.sleep(15)
 
         except Exception as e:
-            logger.error(f"❌ Channel monitor loop error: {e}", exc_info=True)
-        await asyncio.sleep(600)  # بررسی هر ۱۰ دقیقه
+            logger.error(f"❌ Loop error: {e}", exc_info=True)
+        await asyncio.sleep(600)
 
 async def post_init_setup(app: Application):
-    # حذف کامل منوی دستورات تلگرام
     await app.bot.delete_my_commands(scope=BotCommandScopeDefault())
     await app.bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
     await app.bot.set_my_commands([], scope=BotCommandScopeDefault())
     await app.bot.set_my_commands([], scope=BotCommandScopeAllPrivateChats())
-    
     asyncio.create_task(channel_signal_monitor_loop(app))
 
 def main():
@@ -683,7 +654,7 @@ def main():
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("🚀 FINAL VERSION - LEFT-ALIGNED, FAST, STABLE BUTTONS, TON FIXED")
+    logger.info("🚀 FINAL VERSION - STABLE BUTTONS, LEFT-ALIGNED, FAST")
     application.run_polling()
 
 if __name__ == "__main__":
