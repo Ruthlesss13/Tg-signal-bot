@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل ارزهای دیجیتال - نسخه ۳.۱.۱
-
+ربات هوشمند تحلیل ارزهای دیجیتال - نسخه ۳.۱.۲
+رفع خطاهای تحلیل ارز، کشیده‌تر کردن دکمه‌های پنل مدیریت، لیست ۴ ستونی
 """
 
 import asyncio
@@ -50,7 +50,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.1.1"
+VERSION = "3.1.2"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -168,6 +168,11 @@ def safe_float(value) -> float:
     if value is None or pd.isna(value):
         return 0.0
     return float(value)
+
+def safe_str(value) -> str:
+    if value is None:
+        return "نامشخص"
+    return str(value)
 
 # ===========================
 # صرافی‌ها
@@ -656,7 +661,7 @@ def build_risk_plan(direction: str, entry: float, atr: float, account_balance_us
     return RiskPlan(direction, entry, stop_loss, targets, leverage, position_size_usdt, risk_reward, True, "ok")
 
 # ===========================
-# تحلیل کامل ارز (با کش)
+# تحلیل کامل ارز (با کش و مدیریت خطا)
 # ===========================
 async def analyze_coin_full_status(code: str) -> str:
     """گزارش کامل تحلیل تکنیکال و فیوچرز برای یک ارز با کش"""
@@ -664,206 +669,210 @@ async def analyze_coin_full_status(code: str) -> str:
     if cache_key in _analysis_cache:
         return _analysis_cache[cache_key]
 
-    prices = await cache.update_prices()
-    price = prices.get(code, 0.0)
-    if price == 0.0:
-        return f"❌ قیمت ارز **{code}** در دسترس نیست. لطفاً دوباره تلاش کنید."
+    try:
+        prices = await cache.update_prices()
+        price = prices.get(code, 0.0)
+        if price == 0.0:
+            return f"❌ قیمت ارز **{code}** در دسترس نیست. لطفاً دوباره تلاش کنید."
 
-    rate = await fetch_irt_rate()
-    irt_price = price * rate
+        rate = await fetch_irt_rate()
+        irt_price = price * rate
 
-    # دریافت داده‌های مختلف تایم‌فریم به صورت موازی
-    tasks = [
-        cache.get_ohlcv(code, "1h"),
-        cache.get_ohlcv(code, "4h"),
-        cache.get_ohlcv(code, "1d")
-    ]
-    results = await asyncio.gather(*tasks)
-    df_1h, df_4h, df_1d = results
+        # دریافت داده‌های مختلف تایم‌فریم به صورت موازی
+        tasks = [
+            cache.get_ohlcv(code, "1h"),
+            cache.get_ohlcv(code, "4h"),
+            cache.get_ohlcv(code, "1d")
+        ]
+        results = await asyncio.gather(*tasks)
+        df_1h, df_4h, df_1d = results
 
-    if df_1h is None or len(df_1h) < 20:
-        return f"❌ داده‌های تاریخچه برای ارز **{code}** در دسترس نیست."
+        if df_1h is None or len(df_1h) < 20:
+            return f"❌ داده‌های تاریخچه برای ارز **{code}** در دسترس نیست."
 
-    ind = compute_indicators(df_1h)
-    ind_4h = compute_indicators(df_4h) if df_4h is not None else None
-    ind_1d = compute_indicators(df_1d) if df_1d is not None else None
+        ind = compute_indicators(df_1h)
+        ind_4h = compute_indicators(df_4h) if df_4h is not None else None
+        ind_1d = compute_indicators(df_1d) if df_1d is not None else None
 
-    if ind is None:
-        return f"❌ تحلیل **{code}** ناموفق بود."
+        if ind is None:
+            return f"❌ تحلیل **{code}** ناموفق بود."
 
-    # داده‌های فیوچرز (موازی)
-    funding_task = asyncio.to_thread(fetch_funding_rate, code)
-    oi_task = asyncio.to_thread(fetch_open_interest, code)
-    funding, oi = await asyncio.gather(funding_task, oi_task)
+        # داده‌های فیوچرز (موازی)
+        funding_task = asyncio.to_thread(fetch_funding_rate, code)
+        oi_task = asyncio.to_thread(fetch_open_interest, code)
+        funding, oi = await asyncio.gather(funding_task, oi_task)
 
-    # محاسبه تغییرات
-    close_series = df_1h["close"]
-    price_1h_ago = close_series.iloc[-2] if len(close_series) > 1 else price
-    change_1h = ((price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago else 0
+        # محاسبه تغییرات
+        close_series = df_1h["close"]
+        price_1h_ago = close_series.iloc[-2] if len(close_series) > 1 else price
+        change_1h = ((price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago else 0
 
-    change_24h = 0
-    high_24h = price
-    low_24h = price
-    volume_24h = 0
-    if df_1d is not None and len(df_1d) > 1:
-        close_24h = df_1d["close"].iloc[-2] if len(df_1d) > 1 else price
-        change_24h = ((price - close_24h) / close_24h * 100) if close_24h else 0
-        high_24h = df_1d["high"].iloc[-1]
-        low_24h = df_1d["low"].iloc[-1]
-        volume_24h = df_1d["volume"].iloc[-1]
+        change_24h = 0
+        high_24h = price
+        low_24h = price
+        volume_24h = 0
+        if df_1d is not None and len(df_1d) > 1:
+            close_24h = df_1d["close"].iloc[-2] if len(df_1d) > 1 else price
+            change_24h = ((price - close_24h) / close_24h * 100) if close_24h else 0
+            high_24h = df_1d["high"].iloc[-1]
+            low_24h = df_1d["low"].iloc[-1]
+            volume_24h = df_1d["volume"].iloc[-1]
 
-    if df_1d is not None and len(df_1d) >= 7:
-        support_weekly = df_1d["low"].tail(7).min()
-        resistance_weekly = df_1d["high"].tail(7).max()
-    else:
-        support_weekly = ind.structure_level if ind.structure_breakout_down else None
-        resistance_weekly = ind.structure_level if ind.structure_breakout_up else None
-
-    # EMA مقادیر عددی
-    ema20 = EMAIndicator(df_1h["close"], window=20).ema_indicator().iloc[-1]
-    ema50 = EMAIndicator(df_1h["close"], window=50).ema_indicator().iloc[-1]
-    ema200 = EMAIndicator(df_1h["close"], window=200).ema_indicator().iloc[-1]
-
-    # MACD مقادیر عددی
-    macd_ind = MACD(df_1h["close"], window_fast=MACD_FAST, window_slow=MACD_SLOW, window_sign=MACD_SIGNAL)
-    macd_line = macd_ind.macd().iloc[-1]
-    macd_signal = macd_ind.macd_signal().iloc[-1]
-    macd_hist = macd_ind.macd_diff().iloc[-1]
-
-    # بولینگر
-    bb_ind = BollingerBands(df_1h["close"], window=20)
-    bb_upper = bb_ind.bollinger_hband().iloc[-1]
-    bb_middle = bb_ind.bollinger_mavg().iloc[-1]
-    bb_lower = bb_ind.bollinger_lband().iloc[-1]
-
-    # استوکاستیک RSI
-    stoch_rsi = StochRSIIndicator(df_1h["close"], window=14).stochrsi().iloc[-1] * 100 if len(df_1h) > 20 else 50
-
-    # قدرت سیگنال
-    score = 0
-    if ind.trend_up or ind.trend_down:
-        score += 1
-    if ind.rsi_in_zone:
-        score += 1
-    if ind.macd_cross_up or ind.macd_cross_down:
-        score += 1
-    if ind.volume_ratio > 2.0:
-        score += 1
-    if ind.adx > 30:
-        score += 1
-    if score >= 4:
-        signal_strength = "قوی 🟢"
-    elif score >= 2:
-        signal_strength = "متوسط 🟡"
-    else:
-        signal_strength = "ضعیف 🔴"
-
-    regime = "روند" if ind.adx >= ADX_RANGE_THRESHOLD else "رنج"
-    trend_fa = "صعودی 🚀" if ind.trend_up else "نزولی 🔻" if ind.trend_down else "خنثی ⚖️"
-
-    # تفسیر RSI
-    if ind.rsi > 70:
-        rsi_interpret = "اشباع خرید (overbought)"
-    elif ind.rsi < 30:
-        rsi_interpret = "اشباع فروش (oversold)"
-    elif 40 <= ind.rsi <= 60:
-        rsi_interpret = "منطقه تعادل"
-    else:
-        rsi_interpret = "منطقه معمولی"
-
-    # تفسیر ADX
-    if ind.adx > 40:
-        adx_interpret = "روند بسیار قوی"
-    elif ind.adx > 25:
-        adx_interpret = "روند قوی"
-    elif ind.adx > 20:
-        adx_interpret = "روند ضعیف"
-    else:
-        adx_interpret = "بازار رنج (بدون روند)"
-
-    # تفسیر فاندینگ
-    if funding is not None:
-        if funding > 0.001:
-            funding_interpret = "منفی (لانگ‌ها هزینه می‌دهند)"
-        elif funding < -0.001:
-            funding_interpret = "مثبت (شورت‌ها هزینه می‌دهند)"
+        if df_1d is not None and len(df_1d) >= 7:
+            support_weekly = df_1d["low"].tail(7).min()
+            resistance_weekly = df_1d["high"].tail(7).max()
         else:
-            funding_interpret = "خنثی"
-    else:
-        funding_interpret = "نامشخص"
+            support_weekly = ind.structure_level if ind.structure_breakout_down else None
+            resistance_weekly = ind.structure_level if ind.structure_breakout_up else None
 
-    # تفسیر OI
-    if oi is not None:
-        if oi > 0:
-            oi_interpret = "وجود دارد"
+        # EMA مقادیر عددی
+        ema20 = EMAIndicator(df_1h["close"], window=20).ema_indicator().iloc[-1]
+        ema50 = EMAIndicator(df_1h["close"], window=50).ema_indicator().iloc[-1]
+        ema200 = EMAIndicator(df_1h["close"], window=200).ema_indicator().iloc[-1]
+
+        # MACD مقادیر عددی
+        macd_ind = MACD(df_1h["close"], window_fast=MACD_FAST, window_slow=MACD_SLOW, window_sign=MACD_SIGNAL)
+        macd_line = macd_ind.macd().iloc[-1]
+        macd_signal = macd_ind.macd_signal().iloc[-1]
+        macd_hist = macd_ind.macd_diff().iloc[-1]
+
+        # بولینگر
+        bb_ind = BollingerBands(df_1h["close"], window=20)
+        bb_upper = bb_ind.bollinger_hband().iloc[-1]
+        bb_middle = bb_ind.bollinger_mavg().iloc[-1]
+        bb_lower = bb_ind.bollinger_lband().iloc[-1]
+
+        # استوکاستیک RSI
+        stoch_rsi = StochRSIIndicator(df_1h["close"], window=14).stochrsi().iloc[-1] * 100 if len(df_1h) > 20 else 50
+
+        # قدرت سیگنال
+        score = 0
+        if ind.trend_up or ind.trend_down:
+            score += 1
+        if ind.rsi_in_zone:
+            score += 1
+        if ind.macd_cross_up or ind.macd_cross_down:
+            score += 1
+        if ind.volume_ratio > 2.0:
+            score += 1
+        if ind.adx > 30:
+            score += 1
+        if score >= 4:
+            signal_strength = "قوی 🟢"
+        elif score >= 2:
+            signal_strength = "متوسط 🟡"
         else:
-            oi_interpret = "صفر"
-    else:
-        oi_interpret = "نامشخص"
+            signal_strength = "ضعیف 🔴"
 
-    # تایم‌فریم بالاتر
-    trend_4h = "صعودی 🚀" if ind_4h and ind_4h.trend_up else "نزولی 🔻" if ind_4h and ind_4h.trend_down else "خنثی ⚖️" if ind_4h else "نامشخص"
-    rsi_4h = ind_4h.rsi if ind_4h else None
-    adx_4h = ind_4h.adx if ind_4h else None
+        regime = "روند" if ind.adx >= ADX_RANGE_THRESHOLD else "رنج"
+        trend_fa = "صعودی 🚀" if ind.trend_up else "نزولی 🔻" if ind.trend_down else "خنثی ⚖️"
 
-    text = (
-        f"📊 **تحلیل جامع {code}**\n"
-        f"{'────────────────────'}\n"
-        f"💰 **قیمت‌ها و تغییرات:**\n"
-        f"   • دلاری: `{fmt_usd(price)}` USDT\n"
-        f"   • تومانی: `{fmt_toman(price, rate)}`\n"
-        f"   • تغییر ۱ساعته: `{format_percent(change_1h)}`\n"
-        f"   • تغییر ۲۴ساعته: `{format_percent(change_24h)}`\n"
-        f"   • بیشترین ۲۴h: `{fmt_usd(high_24h)}`\n"
-        f"   • کمترین ۲۴h: `{fmt_usd(low_24h)}`\n"
-        f"{'────────────────────'}\n"
-        f"📈 **روند و رژیم بازار:**\n"
-        f"   • روند کلی: {trend_fa}\n"
-        f"   • رژیم بازار: {regime} (ADX: {ind.adx:.1f})\n"
-        f"   • قدرت سیگنال: {signal_strength}\n"
-        f"{'────────────────────'}\n"
-        f"📊 **اندیکاتورهای تکنیکال (۱ساعته):**\n"
-        f"   • RSI (14): `{ind.rsi:.1f}` ({rsi_interpret})\n"
-        f"   • استوکاستیک RSI: `{stoch_rsi:.1f}`\n"
-        f"   • MACD: خط `{macd_line:.4f}` | سیگنال `{macd_signal:.4f}` | هیستوگرام `{macd_hist:.4f}`\n"
-        f"   • EMA 20: `{fmt_usd(safe_float(ema20))}`\n"
-        f"   • EMA 50: `{fmt_usd(safe_float(ema50))}`\n"
-        f"   • EMA 200: `{fmt_usd(safe_float(ema200))}`\n"
-        f"   • ADX: `{ind.adx:.1f}` ({adx_interpret})\n"
-        f"   • ATR: `{fmt_usd(ind.atr)}`\n"
-        f"{'────────────────────'}\n"
-        f"📊 **بولینگر باند (۲۰):**\n"
-        f"   • بالا: `{fmt_usd(safe_float(bb_upper))}`\n"
-        f"   • وسط: `{fmt_usd(safe_float(bb_middle))}`\n"
-        f"   • پایین: `{fmt_usd(safe_float(bb_lower))}`\n"
-        f"   • عرض باند: `{fmt_usd(safe_float(bb_upper - bb_lower))}`\n"
-        f"{'────────────────────'}\n"
-        f"🎯 **سطوح کلیدی:**\n"
-        f"   • حمایت ۲۴h: `{fmt_usd(safe_float(low_24h))}`\n"
-        f"   • مقاومت ۲۴h: `{fmt_usd(safe_float(high_24h))}`\n"
-        f"   • حمایت هفتگی: `{fmt_usd(safe_float(support_weekly))}`\n"
-        f"   • مقاومت هفتگی: `{fmt_usd(safe_float(resistance_weekly))}`\n"
-        f"{'────────────────────'}\n"
-        f"📊 **داده‌های فیوچرز:**\n"
-        f"   • فاندینگ‌ریت: `{funding:.4%}` ({funding_interpret})\n"
-        f"   • Open Interest: `{safe_float(oi):,.0f}` ({oi_interpret})\n"
-        f"{'────────────────────'}\n"
-        f"📊 **حجم معاملات:**\n"
-        f"   • نسبت به میانگین: `{ind.volume_ratio:.2f}x`\n"
-        f"   • حجم ۲۴h: `{volume_24h:,.0f}` USDT\n"
-        f"{'────────────────────'}\n"
-        f"🔄 **تایم‌فریم بالاتر (۴ساعته):**\n"
-        f"   • روند: {trend_4h}\n"
-        f"   • RSI: `{rsi_4h:.1f}`\n"
-        f"   • ADX: `{adx_4h:.1f}`\n"
-        f"{'────────────────────'}\n"
-        f"📅 **بروزرسانی:** `{shamsi_now()}`\n"
-        f"🏛 **صرافی:** `{cache.active_exchange_name}`\n"
-    )
-    
-    # ذخیره در کش
-    _analysis_cache[cache_key] = text
-    return text
+        # تفسیر RSI
+        if ind.rsi > 70:
+            rsi_interpret = "اشباع خرید (overbought)"
+        elif ind.rsi < 30:
+            rsi_interpret = "اشباع فروش (oversold)"
+        elif 40 <= ind.rsi <= 60:
+            rsi_interpret = "منطقه تعادل"
+        else:
+            rsi_interpret = "منطقه معمولی"
+
+        # تفسیر ADX
+        if ind.adx > 40:
+            adx_interpret = "روند بسیار قوی"
+        elif ind.adx > 25:
+            adx_interpret = "روند قوی"
+        elif ind.adx > 20:
+            adx_interpret = "روند ضعیف"
+        else:
+            adx_interpret = "بازار رنج (بدون روند)"
+
+        # تفسیر فاندینگ
+        if funding is not None:
+            if funding > 0.001:
+                funding_interpret = "منفی (لانگ‌ها هزینه می‌دهند)"
+            elif funding < -0.001:
+                funding_interpret = "مثبت (شورت‌ها هزینه می‌دهند)"
+            else:
+                funding_interpret = "خنثی"
+        else:
+            funding_interpret = "نامشخص"
+
+        # تفسیر OI
+        if oi is not None:
+            if oi > 0:
+                oi_interpret = "وجود دارد"
+            else:
+                oi_interpret = "صفر"
+        else:
+            oi_interpret = "نامشخص"
+
+        # تایم‌فریم بالاتر
+        trend_4h = "صعودی 🚀" if ind_4h and ind_4h.trend_up else "نزولی 🔻" if ind_4h and ind_4h.trend_down else "خنثی ⚖️" if ind_4h else "نامشخص"
+        rsi_4h = ind_4h.rsi if ind_4h else None
+        adx_4h = ind_4h.adx if ind_4h else None
+
+        text = (
+            f"📊 **تحلیل جامع {code}**\n"
+            f"{'────────────────────'}\n"
+            f"💰 **قیمت‌ها و تغییرات:**\n"
+            f"   • دلاری: `{fmt_usd(price)}` USDT\n"
+            f"   • تومانی: `{fmt_toman(price, rate)}`\n"
+            f"   • تغییر ۱ساعته: `{format_percent(change_1h)}`\n"
+            f"   • تغییر ۲۴ساعته: `{format_percent(change_24h)}`\n"
+            f"   • بیشترین ۲۴h: `{fmt_usd(safe_float(high_24h))}`\n"
+            f"   • کمترین ۲۴h: `{fmt_usd(safe_float(low_24h))}`\n"
+            f"{'────────────────────'}\n"
+            f"📈 **روند و رژیم بازار:**\n"
+            f"   • روند کلی: {trend_fa}\n"
+            f"   • رژیم بازار: {regime} (ADX: {ind.adx:.1f})\n"
+            f"   • قدرت سیگنال: {signal_strength}\n"
+            f"{'────────────────────'}\n"
+            f"📊 **اندیکاتورهای تکنیکال (۱ساعته):**\n"
+            f"   • RSI (14): `{ind.rsi:.1f}` ({rsi_interpret})\n"
+            f"   • استوکاستیک RSI: `{stoch_rsi:.1f}`\n"
+            f"   • MACD: خط `{macd_line:.4f}` | سیگنال `{macd_signal:.4f}` | هیستوگرام `{macd_hist:.4f}`\n"
+            f"   • EMA 20: `{fmt_usd(safe_float(ema20))}`\n"
+            f"   • EMA 50: `{fmt_usd(safe_float(ema50))}`\n"
+            f"   • EMA 200: `{fmt_usd(safe_float(ema200))}`\n"
+            f"   • ADX: `{ind.adx:.1f}` ({adx_interpret})\n"
+            f"   • ATR: `{fmt_usd(ind.atr)}`\n"
+            f"{'────────────────────'}\n"
+            f"📊 **بولینگر باند (۲۰):**\n"
+            f"   • بالا: `{fmt_usd(safe_float(bb_upper))}`\n"
+            f"   • وسط: `{fmt_usd(safe_float(bb_middle))}`\n"
+            f"   • پایین: `{fmt_usd(safe_float(bb_lower))}`\n"
+            f"   • عرض باند: `{fmt_usd(safe_float(bb_upper - bb_lower))}`\n"
+            f"{'────────────────────'}\n"
+            f"🎯 **سطوح کلیدی:**\n"
+            f"   • حمایت ۲۴h: `{fmt_usd(safe_float(low_24h))}`\n"
+            f"   • مقاومت ۲۴h: `{fmt_usd(safe_float(high_24h))}`\n"
+            f"   • حمایت هفتگی: `{fmt_usd(safe_float(support_weekly))}`\n"
+            f"   • مقاومت هفتگی: `{fmt_usd(safe_float(resistance_weekly))}`\n"
+            f"{'────────────────────'}\n"
+            f"📊 **داده‌های فیوچرز:**\n"
+            f"   • فاندینگ‌ریت: `{funding:.4%}` ({funding_interpret})\n"
+            f"   • Open Interest: `{safe_float(oi):,.0f}` ({oi_interpret})\n"
+            f"{'────────────────────'}\n"
+            f"📊 **حجم معاملات:**\n"
+            f"   • نسبت به میانگین: `{ind.volume_ratio:.2f}x`\n"
+            f"   • حجم ۲۴h: `{volume_24h:,.0f}` USDT\n"
+            f"{'────────────────────'}\n"
+            f"🔄 **تایم‌فریم بالاتر (۴ساعته):**\n"
+            f"   • روند: {trend_4h}\n"
+            f"   • RSI: `{rsi_4h:.1f}`\n"
+            f"   • ADX: `{adx_4h:.1f}`\n"
+            f"{'────────────────────'}\n"
+            f"📅 **بروزرسانی:** `{shamsi_now()}`\n"
+            f"🏛 **صرافی:** `{cache.active_exchange_name}`\n"
+        )
+        
+        # ذخیره در کش
+        _analysis_cache[cache_key] = text
+        return text
+    except Exception as e:
+        logger.error(f"Error analyzing {code}: {e}")
+        return f"❌ خطا در تحلیل **{code}**: {safe_str(e)}"
 
 # ===========================
 # پنل مدیریت کامل
@@ -948,7 +957,7 @@ def get_admin_stats_text() -> str:
     return text
 
 # ===========================
-# کیبوردها (با دکمه‌های کشیده‌تر)
+# کیبوردها
 # ===========================
 MAIN_MENU_TEXT = (
     "🤖 **ربات هوشمند تحلیل ارزهای دیجیتال**\n"
@@ -980,20 +989,25 @@ def kb_prices_all_single():
     ])
 
 def kb_status_grid():
-    buttons, row = [], []
-    for code in COIN_CODES:
-        row.append(InlineKeyboardButton(f"{code} 🟢", callback_data=f"coin_detail_{code}"))
-        if len(row) == 2:
-            buttons.append(row); row = []
-    if row: buttons.append(row)
+    """لیست ارزها در ۴ ستون"""
+    buttons = []
+    row = []
+    for i, code in enumerate(COIN_CODES):
+        row.append(InlineKeyboardButton(f"{code}", callback_data=f"coin_detail_{code}"))
+        if len(row) == 4:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
     buttons.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")])
     return InlineKeyboardMarkup(buttons)
 
 def kb_admin_panel():
+    """پنل مدیریت با دکمه‌های کشیده (یک ستونی)"""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📈 آمار سیگنال‌ها", callback_data="admin_signal_stats")],
-        [InlineKeyboardButton("👥 آمار کاربران و سیستم", callback_data="admin_system_stats")],
-        [InlineKeyboardButton("🗑 صفر کردن آمار", callback_data="reset_stats_confirm")],
+        [InlineKeyboardButton("📈 آمار دقیق سیگنال‌ها", callback_data="admin_signal_stats")],
+        [InlineKeyboardButton("👥 آمار کاربران و وضعیت سیستم", callback_data="admin_system_stats")],
+        [InlineKeyboardButton("🗑 صفر کردن تمام آمار سیگنال‌ها", callback_data="reset_stats_confirm")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")]
     ])
 
@@ -1002,7 +1016,7 @@ def kb_back_admin():
 
 def kb_reset_confirm():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚠️ بله، صفر شود", callback_data="reset_stats_do")],
+        [InlineKeyboardButton("⚠️ بله، تمام آمار صفر شود", callback_data="reset_stats_do")],
         [InlineKeyboardButton("❌ انصراف", callback_data="admin_panel")]
     ])
 
@@ -1127,11 +1141,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         winrate = f"{s['winrate']:.1f}%" if s['winrate'] is not None else "بدون داده"
         await query.edit_message_text(
             f"📈 **آمار سیگنال‌ها**\n{'────────────────────'}\n"
-            f"🔢 کل: {s['total_signals']}\n"
-            f"✅ موفق: {s['wins']}\n"
-            f"❌ ناموفق: {s['losses']}\n"
-            f"🏆 وین‌ریت: {winrate}\n"
-            f"🤖 رد شده توسط AI: {s['rejected_by_ai']}",
+            f"🔢 کل سیگنال‌های تولیدشده: `{s['total_signals']}`\n"
+            f"✅ سیگنال‌های موفق (TP3): `{s['wins']}`\n"
+            f"❌ سیگنال‌های ناموفق (SL): `{s['losses']}`\n"
+            f"🏆 نرخ پیروزی (وین‌ریت): `{winrate}`\n"
+            f"🤖 رد شده توسط هوش مصنوعی: `{s['rejected_by_ai']}`",
             reply_markup=kb_back_admin(), parse_mode="Markdown"
         )
         return
@@ -1144,14 +1158,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "reset_stats_confirm":
         if not is_adm: return
-        await query.edit_message_text("⚠️ **آیا از صفر کردن آمار اطمینان دارید؟**", reply_markup=kb_reset_confirm(), parse_mode="Markdown")
+        await query.edit_message_text("⚠️ **آیا از صفر کردن تمام آمار سیگنال‌ها اطمینان دارید؟**", reply_markup=kb_reset_confirm(), parse_mode="Markdown")
         return
 
     if data == "reset_stats_do":
         if not is_adm: return
         with _conn() as c:
             c.execute("DELETE FROM signals")
-        await query.edit_message_text("✅ **آمار با موفقیت صفر شد.**", reply_markup=kb_back_admin(), parse_mode="Markdown")
+        await query.edit_message_text("✅ **تمامی آمار سیگنال‌ها با موفقیت صفر شد.**", reply_markup=kb_back_admin(), parse_mode="Markdown")
         return
 
 # ===========================
