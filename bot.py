@@ -146,7 +146,7 @@ class MarketCache:
         symbols = [f"{code}/USDT" for code in COIN_CODES]
         new_prices = {}
 
-        # ۱. تلاش گروهی با MEXC
+        # ۱. تلاش گروهی با MEXC (سریع‌ترین)
         try:
             tickers = await asyncio.to_thread(exchange_mexc.fetch_tickers, symbols)
             for code in COIN_CODES:
@@ -182,7 +182,7 @@ class MarketCache:
         except Exception as e:
             logger.warning(f"Gate.io fetch_tickers failed: {e}")
 
-        # ۳. در صورت شکست هر دو، به صورت تکی و همزمان (fallback)
+        # ۳. Fallback: دریافت تکی همزمان (برای سرعت بیشتر)
         async def fetch_one(code):
             # MEXC
             try:
@@ -243,6 +243,15 @@ class MarketCache:
 
 cache = MarketCache()
 
+def format_price(price: float) -> str:
+    """فرمت‌سازی قیمت با دقت مناسب برای اعداد کوچک"""
+    if price < 0.01:
+        return f"{price:.8f}"
+    elif price < 1:
+        return f"{price:.6f}"
+    else:
+        return f"{price:,.4f}"
+
 async def analyze_coin_full_status(code: str) -> str:
     prices = await cache.update_prices()
     price = prices.get(code, 0.0)
@@ -289,7 +298,7 @@ async def analyze_coin_full_status(code: str) -> str:
         f"🏛 **صرافی:** `{cache.active_exchange_name}` | **جفت ارز:** `{code}/USDT`\n"
         f"🔄 **وضعیت معاملات Swap:** 🟢 فعال (Spot & Futures)\n"
         f"{DIVIDER}\n"
-        f"💵 **قیمت دلاری:** `${price:,.4f}` USDT\n"
+        f"💵 **قیمت دلاری:** `${format_price(price)}` USDT\n"
         f"🇮🇷 **معادل تومانی:** `{irt_price:,.0f}` تومان\n"
         f"📅 **تاریخ و زمان:** `{shamsi_now()}`\n"
         f"{DIVIDER}\n"
@@ -299,22 +308,22 @@ async def analyze_coin_full_status(code: str) -> str:
         f"• **استوکاستیک RSI:** `{stoch_rsi:.1f}`\n"
         f"• **قدرت روند (ADX):** `{adx:.1f}`\n"
         f"• **مومنتوم MACD:** {macd_status}\n"
-        f"• **میزان نوسان (ATR):** `${atr:,.4f}`\n"
+        f"• **میزان نوسان (ATR):** `${format_price(atr)}`\n"
         f"{DIVIDER}\n"
         f"📈 **میانگین‌های متحرک (EMA):**\n"
-        f"• **EMA 20:** `${ema20:,.4f}`\n"
-        f"• **EMA 50:** `${ema50:,.4f}`\n"
-        f"• **EMA 200:** `${ema200:,.4f}`\n"
+        f"• **EMA 20:** `${format_price(ema20)}`\n"
+        f"• **EMA 50:** `${format_price(ema50)}`\n"
+        f"• **EMA 200:** `${format_price(ema200)}`\n"
         f"{DIVIDER}\n"
         f"🎯 **سطوح حمایت و مقاومت کلیدی:**\n"
-        f"🛡 **حمایت (24 ساعت):** `${support:,.4f}`\n"
-        f"🚀 **مقاومت (24 ساعت):** `${resistance:,.4f}`\n"
-        f"🌐 **باند بالایی بولینگر:** `${bb_upper:,.4f}`\n"
-        f"🌐 **باند پایینی بولینگر:** `${bb_lower:,.4f}`"
+        f"🛡 **حمایت (24 ساعت):** `${format_price(support)}`\n"
+        f"🚀 **مقاومت (24 ساعت):** `${format_price(resistance)}`\n"
+        f"🌐 **باند بالایی بولینگر:** `${format_price(bb_upper)}`\n"
+        f"🌐 **باند پایینی بولینگر:** `${format_price(bb_lower)}`"
     )
 
 # ===========================
-# کیبوردها (با نماد صرافی)
+# کیبوردها
 # ===========================
 def kb_main_menu(is_admin_user=False):
     keyboard = [
@@ -337,13 +346,11 @@ def kb_prices_all_single():
     ])
 
 def kb_status_grid():
-    # دریافت نماد صرافی فعال (حرف اول)
-    exchange_symbol = "M" if cache.active_exchange_name.startswith("MEXC") else "G"
+    # دکمه‌های ارزها با ایموجی سبز (همانند قبل)
     buttons = []
     row = []
     for code in COIN_CODES:
-        # به جای ایموجی، از نماد صرافی استفاده می‌شود
-        row.append(InlineKeyboardButton(f"{code} {exchange_symbol}", callback_data=f"coin_detail_{code}"))
+        row.append(InlineKeyboardButton(f"{code} 🟢", callback_data=f"coin_detail_{code}"))
         if len(row) == 2:
             buttons.append(row)
             row = []
@@ -439,6 +446,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prices = await cache.update_prices()
         rate = await fetch_irt_rate()
 
+        # انتخاب ایموجی صرافی
+        exchange_emoji = "🇲" if "MEXC" in cache.active_exchange_name else "🇬"
+
         text = (
             f"💵 **لیست قیمت لحظه‌ای ۳۰ ارز برتر ({cache.active_exchange_name})**\n"
             f"📅 **تاریخ:** `{shamsi_now()}`\n"
@@ -449,7 +459,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for code in COIN_CODES:
             p_usd = prices.get(code, 0.0)
             p_irt = p_usd * rate
-            text += f"🔹 **{code}**: `${p_usd:,.4f}` USDT  |  `{p_irt:,.0f}` تومان\n"
+            # نمایش در دو خط با ایموجی صرافی
+            text += f"{exchange_emoji} **{code}**: `${format_price(p_usd)}` USDT\n"
+            text += f"   🇮🇷 `{p_irt:,.0f}` تومان\n\n"
 
         await query.edit_message_text(text, reply_markup=kb_prices_all_single(), parse_mode="Markdown")
 
@@ -588,13 +600,13 @@ async def channel_signal_monitor_loop(app: Application):
                             f"{DIVIDER}\n"
                             f"🟢 **جهت معامله:** BUY / LONG\n"
                             f"🏛 **صرافی:** `{cache.active_exchange_name}`\n"
-                            f"💵 **قیمت ورود:** `${price:,.4f}` USDT\n"
+                            f"💵 **قیمت ورود:** `${format_price(price)}` USDT\n"
                             f"🇮🇷 **معادل تومانی:** `{irt_price:,.0f}` تومان\n"
                             f"📅 **تاریخ:** `{shamsi_now()}`\n"
                             f"{DIVIDER}\n"
-                            f"🎯 **هدف اول (TP1):** `${tp1:,.4f}`\n"
-                            f"🎯 **هدف دوم (TP2):** `${tp2:,.4f}`\n"
-                            f"🛑 **حد ضرر (SL):** `${sl:,.4f}`\n"
+                            f"🎯 **هدف اول (TP1):** `${format_price(tp1)}`\n"
+                            f"🎯 **هدف دوم (TP2):** `${format_price(tp2)}`\n"
+                            f"🛑 **حد ضرر (SL):** `${format_price(sl)}`\n"
                             f"{DIVIDER}\n"
                             f"⚡️ *تحلیل خودکار توسط ربات دستیار کریپتو*"
                         )
@@ -614,10 +626,9 @@ async def channel_signal_monitor_loop(app: Application):
         await asyncio.sleep(600)
 
 async def post_init_setup(app: Application):
-    # حذف کامل منوی دستورات تلگرام (برای همه کاربران)
+    # حذف کامل منوی دستورات تلگرام
     await app.bot.delete_my_commands(scope=BotCommandScopeDefault())
     await app.bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
-    # تنظیم مجدد به لیست خالی برای اطمینان
     await app.bot.set_my_commands([], scope=BotCommandScopeDefault())
     await app.bot.set_my_commands([], scope=BotCommandScopeAllPrivateChats())
     
@@ -634,7 +645,7 @@ def main():
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("Bot is running successfully...")
+    logger.info("🚀 NEW VERSION ACTIVATED - WITH EXCHANGE EMOJI IN PRICES, TON FIX, 2-LINE PRICES")
     application.run_polling()
 
 if __name__ == "__main__":
