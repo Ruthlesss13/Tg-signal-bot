@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل ارزهای دیجیتال - نسخه ۳.۱.۳
-رفع خطاهای تحلیل، برگشت ایموجی‌ها، کشیده‌تر کردن دکمه‌ها، حذف پیام‌های اضافی
+ربات هوشمند تحلیل ارزهای دیجیتال - نسخه ۳.۱.۴
+رفع کامل خطای NoneType در تحلیل ارزها، بهبود نمایش شاخص ترس و طمع
 """
 
 import asyncio
@@ -50,7 +50,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.1.3"
+VERSION = "3.1.4"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -173,6 +173,11 @@ def safe_str(value) -> str:
     if value is None:
         return "نامشخص"
     return str(value)
+
+def safe_format_float(value, format_str: str = ".4f") -> str:
+    """تبدیل مطمئن عدد به رشته با فرمت مشخص"""
+    val = safe_float(value)
+    return f"{val:{format_str}}"
 
 # ===========================
 # صرافی‌ها
@@ -562,14 +567,14 @@ def get_fear_greed_index() -> Optional[int]:
             value = int(r.json()["data"][0]["value"])
             _fg_cache.update(value=value, ts=now, last_update=shamsi_now())
             return value
-    except:
-        pass
+    except Exception as e:
+        logger.warning(f"Fear&Greed fetch failed: {e}")
     return _fg_cache["value"]
 
 def get_fg_status() -> str:
     if _fg_cache["value"] is not None:
         return f"✅ آخرین مقدار: {_fg_cache['value']} ({_fg_cache['last_update']})"
-    return "🔴 در دسترس نیست"
+    return "🔴 در دسترس نیست (مشکل در دریافت از API)"
 
 def fetch_funding_rate(code: str) -> Optional[float]:
     try:
@@ -815,6 +820,7 @@ async def analyze_coin_full_status(code: str) -> str:
         # وضعیت Swap (فعال است چون در فیوچرز هستیم)
         swap_status = "🟢 فعال"
 
+        # استفاده از safe_format_float برای جلوگیری از خطای NoneType
         text = (
             f"📊 **تحلیل جامع {code}**\n"
             f"{'────────────────────'}\n"
@@ -828,18 +834,18 @@ async def analyze_coin_full_status(code: str) -> str:
             f"{'────────────────────'}\n"
             f"📈 **روند و رژیم بازار:**\n"
             f"   • روند کلی: {trend_fa}\n"
-            f"   • رژیم بازار: {regime} (ADX: {ind.adx:.1f})\n"
+            f"   • رژیم بازار: {regime} (ADX: {safe_format_float(ind.adx, '.1f')})\n"
             f"   • قدرت سیگنال: {signal_strength}\n"
             f"   • وضعیت Swap: {swap_status}\n"
             f"{'────────────────────'}\n"
             f"📊 **اندیکاتورهای تکنیکال (۱ساعته):**\n"
-            f"   • RSI (14): `{ind.rsi:.1f}` ({rsi_interpret})\n"
-            f"   • استوکاستیک RSI: `{stoch_rsi:.1f}`\n"
-            f"   • MACD: خط `{macd_line:.4f}` | سیگنال `{macd_signal:.4f}` | هیستوگرام `{macd_hist:.4f}`\n"
+            f"   • RSI (14): `{safe_format_float(ind.rsi, '.1f')}` ({rsi_interpret})\n"
+            f"   • استوکاستیک RSI: `{safe_format_float(stoch_rsi, '.1f')}`\n"
+            f"   • MACD: خط `{safe_format_float(macd_line, '.4f')}` | سیگنال `{safe_format_float(macd_signal, '.4f')}` | هیستوگرام `{safe_format_float(macd_hist, '.4f')}`\n"
             f"   • EMA 20: `{fmt_usd(safe_float(ema20))}`\n"
             f"   • EMA 50: `{fmt_usd(safe_float(ema50))}`\n"
             f"   • EMA 200: `{fmt_usd(safe_float(ema200))}`\n"
-            f"   • ADX: `{ind.adx:.1f}` ({adx_interpret})\n"
+            f"   • ADX: `{safe_format_float(ind.adx, '.1f')}` ({adx_interpret})\n"
             f"   • ATR: `{fmt_usd(ind.atr)}`\n"
             f"{'────────────────────'}\n"
             f"📊 **بولینگر باند (۲۰):**\n"
@@ -864,8 +870,8 @@ async def analyze_coin_full_status(code: str) -> str:
             f"{'────────────────────'}\n"
             f"🔄 **تایم‌فریم بالاتر (۴ساعته):**\n"
             f"   • روند: {trend_4h}\n"
-            f"   • RSI: `{rsi_4h:.1f}`\n"
-            f"   • ADX: `{adx_4h:.1f}`\n"
+            f"   • RSI: `{safe_format_float(rsi_4h, '.1f')}`\n"
+            f"   • ADX: `{safe_format_float(adx_4h, '.1f')}`\n"
             f"{'────────────────────'}\n"
             f"📅 **بروزرسانی:** `{shamsi_now()}`\n"
             f"🏛 **صرافی:** `{cache.active_exchange_name}`\n"
