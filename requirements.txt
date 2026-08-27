@@ -7,4 +7,5 @@ python-dotenv>=1.0.0
 jdatetime>=5.0.0
 tzdata>=2023.3
 numpy>=1.24.0
+mplfinance
 setuptools  # برای اطمینان از نصب setuptools
