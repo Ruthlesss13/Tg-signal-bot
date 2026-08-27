@@ -47,12 +47,6 @@ COIN_CODES = [
     "TIA", "WIF", "FLOKI", "SEI", "RUNE"
 ]
 
-# نگاشت سمبل‌های خاص در Gate.io (برای ارزهایی که نام متفاوت دارند)
-GATE_SYMBOL_MAP = {
-    "TON": ["TONCOIN/USDT", "TON/USDT"],  # دو حالت احتمالی
-    # سایر ارزها در صورت نیاز اضافه شوند
-}
-
 IRT_RATE_TTL_SECONDS = 60
 PRICE_TTL_SECONDS = 30
 
@@ -68,7 +62,7 @@ exchange_headers = {
 
 exchange_mexc = ccxt.mexc({
     "enableRateLimit": True,
-    "timeout": 15000,
+    "timeout": 10000,  # کاهش timeout برای سرعت بیشتر
     "headers": exchange_headers,
     "options": {
         "defaultType": "spot",
@@ -78,7 +72,7 @@ exchange_mexc = ccxt.mexc({
 
 exchange_gate = ccxt.gate({
     "enableRateLimit": True,
-    "timeout": 15000,
+    "timeout": 10000,
     "headers": exchange_headers,
     "options": {"defaultType": "spot"}
 })
@@ -167,13 +161,12 @@ class MarketCache:
         except Exception as e:
             logger.warning(f"MEXC fetch_tickers failed: {e}")
 
-        # ۲. تلاش گروهی با Gate.io (با مدیریت سمبل‌های خاص)
+        # ۲. تلاش گروهی با Gate.io
         try:
             gate_symbols = []
             for code in COIN_CODES:
-                if code in GATE_SYMBOL_MAP:
-                    # از اولین سمبل ممکن استفاده کن
-                    gate_symbols.append(GATE_SYMBOL_MAP[code][0])
+                if code == "TON":
+                    gate_symbols.append("TONCOIN/USDT")
                 else:
                     gate_symbols.append(f"{code}/USDT")
             tickers = await asyncio.to_thread(exchange_gate.fetch_tickers, gate_symbols)
@@ -181,17 +174,16 @@ class MarketCache:
                 sym = gate_symbols[i]
                 if sym in tickers and tickers[sym].get("last") is not None:
                     new_prices[code] = float(tickers[sym]["last"])
-            # اگر بعضی ارزها هنوز قیمت ندارند (مثل TON با سمبل اول)، سمبل دوم را امتحان کن
-            for code in COIN_CODES:
-                if code in GATE_SYMBOL_MAP and code not in new_prices:
-                    for alt_sym in GATE_SYMBOL_MAP[code][1:]:
-                        try:
-                            ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, alt_sym)
-                            if ticker and ticker.get("last") is not None:
-                                new_prices[code] = float(ticker["last"])
-                                break
-                        except:
-                            pass
+            
+            # اگر TON با TONCOIN جواب نداد، TON/USDT را امتحان کن
+            if "TON" not in new_prices:
+                try:
+                    ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, "TON/USDT")
+                    if ticker and ticker.get("last") is not None:
+                        new_prices["TON"] = float(ticker["last"])
+                except:
+                    pass
+            
             if new_prices:
                 self.active_exchange_name = "Gate.io"
                 self.prices = new_prices
@@ -200,7 +192,7 @@ class MarketCache:
         except Exception as e:
             logger.warning(f"Gate.io fetch_tickers failed: {e}")
 
-        # ۳. Fallback: دریافت تکی همزمان (برای سرعت بیشتر)
+        # ۳. Fallback: دریافت تکی فقط برای ارزهای بدون قیمت
         async def fetch_one(code):
             # MEXC
             try:
@@ -210,28 +202,29 @@ class MarketCache:
             except:
                 pass
             # Gate
-            if code in GATE_SYMBOL_MAP:
-                for sym in GATE_SYMBOL_MAP[code]:
+            try:
+                sym = "TONCOIN/USDT" if code == "TON" else f"{code}/USDT"
+                ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, sym)
+                if ticker and ticker.get("last") is not None:
+                    return code, float(ticker["last"])
+            except:
+                # اگر TONCOIN جواب نداد، TON/USDT را امتحان کن
+                if code == "TON":
                     try:
-                        ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, sym)
+                        ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, "TON/USDT")
                         if ticker and ticker.get("last") is not None:
                             return code, float(ticker["last"])
                     except:
-                        continue
-            else:
-                try:
-                    ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, f"{code}/USDT")
-                    if ticker and ticker.get("last") is not None:
-                        return code, float(ticker["last"])
-                except:
-                    pass
+                        pass
             return code, None
 
-        tasks = [fetch_one(code) for code in COIN_CODES]
-        results = await asyncio.gather(*tasks)
-        for code, price in results:
-            if price is not None:
-                new_prices[code] = price
+        missing_codes = [code for code in COIN_CODES if code not in new_prices]
+        if missing_codes:
+            tasks = [fetch_one(code) for code in missing_codes]
+            results = await asyncio.gather(*tasks)
+            for code, price in results:
+                if price is not None:
+                    new_prices[code] = price
 
         if new_prices:
             self.prices = new_prices
@@ -254,10 +247,7 @@ class MarketCache:
 
         # تلاش با Gate.io
         try:
-            sym = f"{code}/USDT"
-            if code in GATE_SYMBOL_MAP:
-                # از اولین سمبل ممکن استفاده کن
-                sym = GATE_SYMBOL_MAP[code][0]
+            sym = "TONCOIN/USDT" if code == "TON" else f"{code}/USDT"
             raw = await asyncio.to_thread(exchange_gate.fetch_ohlcv, sym, timeframe, limit=100)
             if raw:
                 df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -352,28 +342,17 @@ async def analyze_coin_full_status(code: str) -> str:
     )
 
 # ===========================
-# کیبوردها با طول ثابت برای ثبات سایز
+# کیبوردها (یک ستونی برای ثبات سایز)
 # ===========================
 def kb_main_menu(is_admin_user=False):
-    # برای ثابت ماندن سایز دکمه‌ها، از متن‌هایی با طول یکسان استفاده می‌کنیم
-    btn1 = "💵 قیمت لحظه‌ای ارزها"  # ۱۹ کاراکتر
-    btn2 = "📊 وضعیت و تحلیل ارزها"  # ۱۹ کاراکتر
-    # اگر ادمین باشد، دکمه پنل مدیریت با طول مشابه
-    btn_admin = "👑 پنل مدیریت ادمین"  # ۱۹ کاراکتر
-    btn_start = "▶️ شروع فعالیت"       # ۱۳ کاراکتر
-    btn_stop = "⏸ توقف فعالیت"        # ۱۳ کاراکتر
-
     keyboard = [
-        [InlineKeyboardButton(btn1, callback_data="coins_prices_all")],
-        [InlineKeyboardButton(btn2, callback_data="coins_status_grid")],
+        [InlineKeyboardButton("💵 قیمت لحظه‌ای ارزها", callback_data="coins_prices_all")],
+        [InlineKeyboardButton("📊 وضعیت و تحلیل ارزها", callback_data="coins_status_grid")],
     ]
     if is_admin_user:
-        keyboard.append([InlineKeyboardButton(btn_admin, callback_data="admin_panel")])
-
-    keyboard.append([
-        InlineKeyboardButton(btn_start, callback_data="bot_start_action"),
-        InlineKeyboardButton(btn_stop, callback_data="bot_stop_action")
-    ])
+        keyboard.append([InlineKeyboardButton("👑 پنل مدیریت ادمین", callback_data="admin_panel")])
+    keyboard.append([InlineKeyboardButton("▶️ شروع فعالیت", callback_data="bot_start_action")])
+    keyboard.append([InlineKeyboardButton("⏸ توقف فعالیت", callback_data="bot_stop_action")])
     return InlineKeyboardMarkup(keyboard)
 
 def kb_prices_all_single():
@@ -386,9 +365,7 @@ def kb_status_grid():
     buttons = []
     row = []
     for code in COIN_CODES:
-        # دکمه‌ها با طول یکسان (اسم ارز + فاصله + 🟢) 
-        btn_text = f"{code} 🟢"
-        row.append(InlineKeyboardButton(btn_text, callback_data=f"coin_detail_{code}"))
+        row.append(InlineKeyboardButton(f"{code} 🟢", callback_data=f"coin_detail_{code}"))
         if len(row) == 2:
             buttons.append(row)
             row = []
@@ -484,10 +461,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prices = await cache.update_prices()
         rate = await fetch_irt_rate()
 
-        # انتخاب ایموجی صرافی
         exchange_emoji = "🇲" if "MEXC" in cache.active_exchange_name else "🇬"
 
-        # عنوان جدید بدون پرانتز و نام صرافی
         text = (
             f"💵 **لیست ۳۰ قیمت ارز برتر**\n"
             f"📅 **تاریخ:** `{shamsi_now()}`\n"
@@ -498,9 +473,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for code in COIN_CODES:
             p_usd = prices.get(code, 0.0)
             p_irt = p_usd * rate
-            # چپ‌چین: خط اول با ایموجی صرافی، خط دوم با ایموجی تومان
-            text += f"{exchange_emoji} **{code}**: `${format_price(p_usd)}` USDT\n"
-            text += f"🇮🇷 `{p_irt:,.0f}` تومان\n\n"
+            # استفاده از ‎ برای چپ‌چین اجباری
+            text += f"‎{exchange_emoji} **{code}**: `${format_price(p_usd)}` USDT\n"
+            text += f"‎🇮🇷 `{p_irt:,.0f}` تومان\n\n"
 
         await query.edit_message_text(text, reply_markup=kb_prices_all_single(), parse_mode="Markdown")
 
@@ -614,55 +589,79 @@ async def channel_signal_monitor_loop(app: Application):
     global TOTAL_SIGNALS_GENERATED
     while True:
         try:
-            if CHANNEL_ID:
-                prices = await cache.update_prices()
-                for code in COIN_CODES:
-                    if prices.get(code, 0.0) == 0.0:
-                        continue
-                    df = await cache.get_ohlcv(code, "1h")
-                    if df is None or len(df) < 50:
-                        continue
+            if not CHANNEL_ID:
+                logger.warning("⚠️ CHANNEL_ID not set, signal monitoring disabled.")
+                await asyncio.sleep(600)
+                continue
 
-                    price = prices.get(code, 0.0)
-                    rsi = RSIIndicator(df["close"]).rsi().iloc[-1]
-                    ema200 = EMAIndicator(df["close"], window=200).ema_indicator().iloc[-1]
+            logger.info("🔍 Checking for new signals...")
+            prices = await cache.update_prices()
+            if not prices:
+                logger.warning("⚠️ No prices fetched, skipping signal check.")
+                await asyncio.sleep(600)
+                continue
 
-                    if price > ema200 and rsi < 32:
-                        tp1 = price * 1.02
-                        tp2 = price * 1.04
-                        sl = price * 0.98
-                        rate = await fetch_irt_rate()
-                        irt_price = price * rate
+            signal_triggered = False
+            for code in COIN_CODES:
+                price = prices.get(code, 0.0)
+                if price == 0.0:
+                    logger.debug(f"💰 {code} price is zero, skipping.")
+                    continue
 
-                        signal_msg = (
-                            f"📣 **سیگنال جدید معامله** #{code}\n"
-                            f"{DIVIDER}\n"
-                            f"🟢 **جهت معامله:** BUY / LONG\n"
-                            f"🏛 **صرافی:** `{cache.active_exchange_name}`\n"
-                            f"💵 **قیمت ورود:** `${format_price(price)}` USDT\n"
-                            f"🇮🇷 **معادل تومانی:** `{irt_price:,.0f}` تومان\n"
-                            f"📅 **تاریخ:** `{shamsi_now()}`\n"
-                            f"{DIVIDER}\n"
-                            f"🎯 **هدف اول (TP1):** `${format_price(tp1)}`\n"
-                            f"🎯 **هدف دوم (TP2):** `${format_price(tp2)}`\n"
-                            f"🛑 **حد ضرر (SL):** `${format_price(sl)}`\n"
-                            f"{DIVIDER}\n"
-                            f"⚡️ *تحلیل خودکار توسط ربات دستیار کریپتو*"
-                        )
-                        await app.bot.send_message(chat_id=CHANNEL_ID, text=signal_msg, parse_mode="Markdown")
-                        TOTAL_SIGNALS_GENERATED += 1
-                        signal_history.append({
-                            "symbol": code,
-                            "direction": "LONG",
-                            "entry": price,
-                            "status": "open",
-                            "time": shamsi_now()
-                        })
-                        save_state()
-                        await asyncio.sleep(15)
+                df = await cache.get_ohlcv(code, "1h")
+                if df is None or len(df) < 50:
+                    logger.debug(f"📉 {code} OHLCV data insufficient (len={len(df) if df is not None else 0})")
+                    continue
+
+                rsi = RSIIndicator(df["close"]).rsi().iloc[-1]
+                ema200 = EMAIndicator(df["close"], window=200).ema_indicator().iloc[-1]
+
+                # لاگ کردن مقادیر کلیدی برای هر ارز
+                logger.info(f"📊 {code}: Price={price:.4f}, EMA200={ema200:.4f}, RSI={rsi:.2f} -> Condition: {price > ema200 and rsi < 32}")
+
+                if price > ema200 and rsi < 32:
+                    logger.info(f"🚨 SIGNAL TRIGGERED for {code}!")
+                    signal_triggered = True
+                    
+                    tp1 = price * 1.02
+                    tp2 = price * 1.04
+                    sl = price * 0.98
+                    rate = await fetch_irt_rate()
+                    irt_price = price * rate
+
+                    signal_msg = (
+                        f"📣 **سیگنال جدید معامله** #{code}\n"
+                        f"{DIVIDER}\n"
+                        f"🟢 **جهت معامله:** BUY / LONG\n"
+                        f"🏛 **صرافی:** `{cache.active_exchange_name}`\n"
+                        f"💵 **قیمت ورود:** `${format_price(price)}` USDT\n"
+                        f"🇮🇷 **معادل تومانی:** `{irt_price:,.0f}` تومان\n"
+                        f"📅 **تاریخ:** `{shamsi_now()}`\n"
+                        f"{DIVIDER}\n"
+                        f"🎯 **هدف اول (TP1):** `${format_price(tp1)}`\n"
+                        f"🎯 **هدف دوم (TP2):** `${format_price(tp2)}`\n"
+                        f"🛑 **حد ضرر (SL):** `${format_price(sl)}`\n"
+                        f"{DIVIDER}\n"
+                        f"⚡️ *تحلیل خودکار توسط ربات دستیار کریپتو*"
+                    )
+                    await app.bot.send_message(chat_id=CHANNEL_ID, text=signal_msg, parse_mode="Markdown")
+                    TOTAL_SIGNALS_GENERATED += 1
+                    signal_history.append({
+                        "symbol": code,
+                        "direction": "LONG",
+                        "entry": price,
+                        "status": "open",
+                        "time": shamsi_now()
+                    })
+                    save_state()
+                    await asyncio.sleep(15)  # جلوگیری از ارسال چند سیگنال همزمان
+
+            if not signal_triggered:
+                logger.info("✅ No signal conditions met in this cycle.")
+
         except Exception as e:
-            logger.error(f"Channel monitor loop error: {e}")
-        await asyncio.sleep(600)
+            logger.error(f"❌ Channel monitor loop error: {e}", exc_info=True)
+        await asyncio.sleep(600)  # بررسی هر ۱۰ دقیقه
 
 async def post_init_setup(app: Application):
     # حذف کامل منوی دستورات تلگرام
@@ -684,7 +683,7 @@ def main():
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("🚀 FINAL VERSION - TON FIXED, LEFT-ALIGNED, 10 DECIMALS, STABLE BUTTONS")
+    logger.info("🚀 FINAL VERSION - LEFT-ALIGNED, FAST, STABLE BUTTONS, TON FIXED")
     application.run_polling()
 
 if __name__ == "__main__":
