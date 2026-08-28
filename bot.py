@@ -1,12 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۴.۱
-- سه مسیر جدا: روند صعودی / روند نزولی / رنج
-- سیگنال در شرایط مختلف بازار
-- هشدار تغییر روند با ریپلای
-- باطل شدن + صدور فوری سیگنال مخالف
-- قالب راست‌چین + TP با ایموجی
-- فیلتر حجم متعادل + تأیید AI
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۵.۱
+- جایگزینی AI با Grok (xAI)
+- بهبود پرامپت
 """
 
 import asyncio
@@ -57,7 +53,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.4.1"
+VERSION = "3.5.1"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -83,7 +79,7 @@ ADMIN_USER_IDS = {
     int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()
 }
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GROK_API_KEY = os.getenv("GROK_API_KEY", "")  # کلید API Grok
 DB_PATH = os.getenv("DB_PATH", "cryptobot.sqlite3")
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -110,9 +106,9 @@ VOLUME_MA_PERIOD = 20
 STRUCTURE_LOOKBACK = 20
 ADX_PERIOD = 14
 ADX_RANGE_THRESHOLD = 20
-ADX_TREND_MIN = 22          # حداقل ADX برای سیگنال روند مطمئن
-VOLUME_MIN_RATIO = 0.80     # متعادل — بازار کم‌حجم هم سیگنال می‌دهد
-VOLUME_STRONG = 1.3         # حجم قوی برای امتیاز بیشتر
+ADX_TREND_MIN = 22
+VOLUME_MIN_RATIO = 0.80
+VOLUME_STRONG = 1.3
 FUNDING_RATE_MAX_FOR_LONG = 0.0005
 NEWS_BLACKOUT_MINUTES = 30
 LOW_VOLUME_UTC_START_HOUR = 23
@@ -136,11 +132,11 @@ PRICE_TTL_SECONDS = 30
 IRT_RATE_TTL_SECONDS = 60
 SIGNAL_SCAN_INTERVAL_SECONDS = 10 * 60
 SIGNAL_REOPEN_COOLDOWN_SECONDS = 45 * 60
-REVERSE_SIGNAL_COOLDOWN_SECONDS = 5 * 60  # بعد از باطل شدن به‌خاطر تغییر روند
+REVERSE_SIGNAL_COOLDOWN_SECONDS = 5 * 60
 CHANNEL_MONITOR_INTERVAL_SECONDS = 5 * 60
-AI_TIMEOUT_SECONDS = 25
-GEMINI_MODEL = "gemma-4-26b-a4b-it"
-CROSS_LOOKBACK = 4  # تقاطع در چند کندل اخیر معتبر است
+AI_TIMEOUT_SECONDS = 30
+GROK_MODEL = "grok-1"  # یا grok-2-beta
+CROSS_LOOKBACK = 4
 
 # ===========================
 # تنظیمات ارسال سیگنال (پیش‌فرض فعال)
@@ -238,13 +234,17 @@ def http_get_json(url: str, timeout: int = 8) -> dict:
         logger.warning(f"HTTP GET failed for {url}: {e}")
         return {}
 
-def http_post_json(url: str, payload: dict, timeout: int = 90) -> dict:
+def http_post_json_grok(url: str, payload: dict, timeout: int = 30) -> dict:
+    """ارسال درخواست به Grok API (xAI)"""
     try:
         data = json.dumps(payload).encode()
         req = urllib.request.Request(
             url,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {GROK_API_KEY}"
+            },
             method="POST"
         )
         with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx) as response:
@@ -514,17 +514,14 @@ class MarketCache:
         self.exchange_status = {"MEXC": {"online": False, "last_check": 0}, "Gate.io": {"online": False, "last_check": 0}}
 
     async def update_prices(self) -> Dict[str, float]:
-        """به‌روزرسانی قیمت‌ها از بازار فیوچرز (برای لیست قیمت‌ها)"""
         now = time.time()
         if now - self.last_price_update < PRICE_TTL_SECONDS and self.prices:
             return self.prices
 
-        # نمادهای فیوچرز و اسپات (fallback)
         symbols_swap = [f"{code}/USDT:USDT" for code in COIN_CODES]
         symbols_spot = [f"{code}/USDT" for code in COIN_CODES]
         new_prices = {}
 
-        # ۱. MEXC
         try:
             tickers = await asyncio.to_thread(exchange_mexc.fetch_tickers, symbols_swap)
             for code in COIN_CODES:
@@ -547,7 +544,6 @@ class MarketCache:
             logger.warning(f"MEXC fetch_tickers failed: {e}")
             self.exchange_status["MEXC"] = {"online": False, "last_check": now}
 
-        # ۲. Gate.io
         try:
             tickers = await asyncio.to_thread(exchange_gate.fetch_tickers, symbols_swap)
             for code in COIN_CODES:
@@ -570,7 +566,6 @@ class MarketCache:
             logger.warning(f"Gate.io fetch_tickers failed: {e}")
             self.exchange_status["Gate.io"] = {"online": False, "last_check": now}
 
-        # ۳. Fallback تکی
         async def fetch_one(code):
             for sym in [f"{code}/USDT:USDT", f"{code}/USDT"]:
                 try:
@@ -601,7 +596,6 @@ class MarketCache:
         return self.prices
 
     async def get_ohlcv(self, code: str, timeframe: str = "1h") -> Optional[pd.DataFrame]:
-        """دریافت OHLCV از بازار فیوچرز (swap)"""
         symbols_to_try = [f"{code}/USDT:USDT", f"{code}/USDT"]
 
         for exchange, name in [(exchange_mexc, "MEXC"), (exchange_gate, "Gate.io")]:
@@ -681,7 +675,6 @@ def compute_indicators(df: pd.DataFrame) -> Optional[IndicatorSnapshot]:
     trend_up = last_close > ema_fast.iloc[-1] > ema_slow.iloc[-1]
     trend_down = last_close < ema_fast.iloc[-1] < ema_slow.iloc[-1]
 
-    # تقاطع در چند کندل اخیر (به جای فقط کندل آخر) — سیگنال بیشتر و معتبرتر
     def _recent_cross_up(fast_s, slow_s, lookback: int = CROSS_LOOKBACK) -> bool:
         for i in range(1, min(lookback + 1, len(fast_s) - 1)):
             if fast_s.iloc[-i - 1] <= slow_s.iloc[-i - 1] and fast_s.iloc[-i] > slow_s.iloc[-i]:
@@ -817,7 +810,6 @@ async def analyze_coin_full_status(code: str) -> str:
         return _analysis_cache[cache_key]
 
     try:
-        # دریافت قیمت از فیوچرز
         futures_data = get_futures_data(code)
         price = futures_data.get("last_price", 0.0)
         if price == 0.0:
@@ -826,7 +818,6 @@ async def analyze_coin_full_status(code: str) -> str:
         rate = await fetch_irt_rate()
         irt_price = price * rate
 
-        # دریافت OHLCV از اسپات
         tasks = [
             cache.get_ohlcv(code, "1h"),
             cache.get_ohlcv(code, "4h"),
@@ -896,7 +887,6 @@ async def analyze_coin_full_status(code: str) -> str:
 
         fg_text = get_fg_text()
 
-        # محاسبه امتیاز و ضریب اطمینان
         score = 0
         max_score = 6
         if ind.trend_up or ind.trend_down:
@@ -1046,7 +1036,6 @@ async def analyze_coin_full_status(code: str) -> str:
 # قالب پیام سیگنال جدید
 # ===========================
 def get_signal_strength_and_confidence(ind: IndicatorSnapshot, funding: Optional[float], oi: Optional[float]) -> tuple[str, str, int]:
-    """محاسبه قدرت سیگنال، ضریب اطمینان و امتیاز"""
     score = 0
     max_score = 6
     if ind.trend_up or ind.trend_down:
@@ -1080,7 +1069,6 @@ def get_signal_strength_and_confidence(ind: IndicatorSnapshot, funding: Optional
     return strength, conf_text, score
 
 def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type: str, ai_status: str, ai_text: str, ind: IndicatorSnapshot, funding: Optional[float], oi: Optional[float], rate: float) -> str:
-    """قالب‌بندی پیام سیگنال — راست‌چین، TP با ایموجی در دو خط"""
     if setup_type in ("trend_up", "trend", "trend_up_reverse"):
         setup_label = "روند صعودی 📈" if "reverse" not in setup_type else "چرخش به صعودی 🔄📈"
     elif setup_type in ("trend_down", "trend_down_reverse"):
@@ -1112,7 +1100,7 @@ def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type:
 
     funding_text = safe_format_percent(funding)
     oi_text = f"{safe_float(oi):,.0f}" if oi is not None else "نامشخص"
-    rtl = "\u200F"  # Right-to-Left mark
+    rtl = "\u200F"
 
     text = (
         f"{rtl}🚨 **سیگنال جدید فیوچرز** — #{code}\n"
@@ -1139,7 +1127,7 @@ def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type:
         f"{rtl}   Open Interest: `{oi_text}`\n"
         f"{rtl}   شاخص ترس و طمع: `{get_fg_text()}`\n\n"
         f"{rtl}📅 **زمان:** `{shamsi_now()}`\n"
-        f"{rtl}🤖 **تأیید هوش مصنوعی:** {ai_line}"
+        f"{rtl}🤖 **تأیید هوش مصنوعی (Grok):** {ai_line}"
     )
     return text
 
@@ -1204,7 +1192,7 @@ def get_admin_stats_text() -> str:
         f"   • وضعیت صرافی‌ها:\n{get_exchange_status_text()}\n"
         f"   • نرخ تتر (Wallex): {get_irt_rate_status()}\n"
         f"   • شاخص ترس/طمع: {get_fg_status()}\n"
-        f"   • هوش مصنوعی (Gemma): {'✅ فعال' if GEMINI_API_KEY else '❌ غیرفعال'}\n"
+        f"   • هوش مصنوعی (Grok): {'✅ فعال' if GROK_API_KEY else '❌ غیرفعال'}\n"
         f"{'────────────────────'}\n"
         f"💾 **دیتابیس:**\n"
         f"   • مسیر: `{DB_PATH}`\n"
@@ -1226,10 +1214,9 @@ def get_admin_stats_text() -> str:
     return text
 
 # ===========================
-# تست کامل سیستم (رفع نهایی event loop)
+# تست کامل سیستم
 # ===========================
 def run_system_test() -> str:
-    """اجرای تست کامل سیستم بدون خطای event loop"""
     result = []
     result.append("🧪 گزارش تست کامل سیستم")
     result.append("=" * 40)
@@ -1248,7 +1235,7 @@ def run_system_test() -> str:
     result.append(f"   • BOT_TOKEN: {'✅ تنظیم شده' if BOT_TOKEN else '❌ تنظیم نشده'}")
     result.append(f"   • ADMIN_USER_IDS: {'✅ تنظیم شده' if ADMIN_USER_IDS else '❌ تنظیم نشده'}")
     result.append(f"   • CHANNEL_ID: {'✅ تنظیم شده' if CHANNEL_ID else '❌ تنظیم نشده'}")
-    result.append(f"   • GEMINI_API_KEY: {'✅ تنظیم شده' if GEMINI_API_KEY else '❌ تنظیم نشده'}")
+    result.append(f"   • GROK_API_KEY: {'✅ تنظیم شده' if GROK_API_KEY else '❌ تنظیم نشده'}")
     result.append(f"   • DB_PATH: {DB_PATH}")
     
     try:
@@ -1259,10 +1246,8 @@ def run_system_test() -> str:
     except Exception as e:
         result.append(f"\n💾 دیتابیس: ❌ خطا: {e}")
     
-    # ===== وضعیت صرافی‌ها =====
     result.append("\n🏛 وضعیت صرافی‌ها:")
     try:
-        # فقط وضعیت موجود را نمایش بده (بدون به‌روزرسانی)
         for name, data in cache.exchange_status.items():
             if data["online"]:
                 result.append(f"   • {name}: ✅ آنلاین")
@@ -1271,7 +1256,6 @@ def run_system_test() -> str:
     except Exception as e:
         result.append(f"   ❌ خطا: {e}")
     
-    # ===== تست داده‌های فیوچرز =====
     result.append("\n📊 تست داده‌های فیوچرز:")
     for code in ["BTC", "ETH"]:
         data = get_futures_data(code)
@@ -1288,49 +1272,50 @@ def run_system_test() -> str:
         else:
             result.append(f"   • {code}: ❌ قیمت دریافت نشد")
     
-    # ===== شاخص ترس و طمع =====
     fg = get_fear_greed_index()
     if fg is not None:
         result.append(f"\n📈 شاخص ترس و طمع: ✅ دریافت شد ({fg})")
     else:
         result.append(f"\n📈 شاخص ترس و طمع: ❌ دریافت نشد")
     
-    # ===== نرخ تومان =====
     rate = fetch_irt_rate_sync()
     if rate and rate > 0:
         result.append(f"\n🇮🇷 نرخ تتر (Wallex): ✅ دریافت شد ({rate:,.0f} تومان)")
     else:
         result.append(f"\n🇮🇷 نرخ تتر (Wallex): ❌ دریافت نشد")
     
-    # ===== هوش مصنوعی =====
-    result.append(f"\n🤖 هوش مصنوعی (Gemma):")
-    if not GEMINI_API_KEY:
+    result.append(f"\n🤖 هوش مصنوعی (Grok):")
+    if not GROK_API_KEY:
         result.append("   ❌ کلید API تنظیم نشده است")
     else:
-        result.append("   ⏳ در حال تست (حداکثر ۹۰ ثانیه)...")
+        result.append("   ⏳ در حال تست (حداکثر ۳۰ ثانیه)...")
         try:
-            prompt = "Just say OK"
-            payload = {"contents": [{"parts": [{"text": prompt}]}]}
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-            data = http_post_json(url, payload, timeout=90)
-            if data.get("candidates"):
+            payload = {
+                "messages": [{"role": "user", "content": "Just say OK"}],
+                "model": GROK_MODEL,
+                "temperature": 0.1,
+                "max_tokens": 10,
+            }
+            data = http_post_json_grok(
+                "https://api.x.ai/v1/chat/completions",
+                payload,
+                timeout=30
+            )
+            if data.get("choices"):
                 result.append("   ✅ مدل فعال است و پاسخ می‌دهد")
             else:
                 result.append("   ⚠️ مدل پاسخ داد اما ساختار نامعتبر بود")
         except Exception as e:
             result.append(f"   ⏳ زمان‌بر بود (timeout) - سایر بخش‌ها OK هستند")
     
-    # ===== کانال تلگرام =====
     result.append(f"\n📢 کانال تلگرام:")
     if CHANNEL_ID:
         result.append(f"   ✅ شناسه کانال تنظیم شده: {CHANNEL_ID}")
     else:
         result.append(f"   ❌ شناسه کانال تنظیم نشده است")
     
-    # ===== بررسی شرایط سیگنال (بدون event loop) =====
     result.append("\n📊 شرایط سیگنال برای BTC:")
     try:
-        # فقط قیمت را از فیوچرز دریافت کن
         btc_data = get_futures_data("BTC")
         btc_price = btc_data.get("last_price", 0)
         if btc_price > 0:
@@ -1468,7 +1453,7 @@ def kb_reset_confirm():
 # ===========================
 registered_users: Set[int] = set()
 paused_users: Set[int] = set()
-_trend_warned: Set[int] = set()  # signal_idهایی که هشدار تغییر روند گرفته‌اند
+_trend_warned: Set[int] = set()
 signal_history: List[Dict] = []
 TOTAL_SIGNALS_GENERATED = 0
 LAST_REPORT_TIME = None
@@ -1775,7 +1760,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 # ===========================
-# هوش مصنوعی Gemma (فقط متن)
+# هوش مصنوعی Grok (xAI)
 # ===========================
 AI_PROMPT_TEMPLATE = (
     "You are a binary signal filter. Given this futures setup, reply with EXACTLY one word only:\n"
@@ -1786,32 +1771,34 @@ AI_PROMPT_TEMPLATE = (
 )
 
 def confirm_signal_with_ai(chart_png: Optional[bytes], context: dict) -> tuple[str, str]:
-    if not GEMINI_API_KEY:
-        return "unavailable", "GEMINI_API_KEY تنظیم نشده"
+    if not GROK_API_KEY:
+        return "unavailable", "GROK_API_KEY تنظیم نشده"
     
     prompt = AI_PROMPT_TEMPLATE.format(**context)
     
     payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 16,
-        }
+        "messages": [
+            {"role": "system", "content": "You are a binary signal filter. Reply with one word: CONFIRM or REJECT."},
+            {"role": "user", "content": prompt}
+        ],
+        "model": GROK_MODEL,
+        "temperature": 0.1,
+        "max_tokens": 16,
     }
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    data = http_post_json(url, payload, timeout=AI_TIMEOUT_SECONDS)
+    data = http_post_json_grok(
+        "https://api.x.ai/v1/chat/completions",
+        payload,
+        timeout=AI_TIMEOUT_SECONDS
+    )
     
     try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        text = data["choices"][0]["message"]["content"].strip()
         upper = text.upper()
         if "CONFIRM" in upper and "REJECT" not in upper:
             return "confirmed", "CONFIRM"
         if "REJECT" in upper:
             return "rejected", "REJECT"
-        # fallback: first word
         first = upper.split()[0] if upper else ""
         if first.startswith("CONFIRM"):
             return "confirmed", "CONFIRM"
@@ -1866,7 +1853,6 @@ async def monitor_open_signals(app: Application):
                 highest = row["highest_tp_hit"]
                 rtl = "\u200F"
 
-                # ——— حد ضرر ———
                 hit_sl = (price <= stop_loss) if direction == "long" else (price >= stop_loss)
                 if hit_sl:
                     text = (
@@ -1881,7 +1867,6 @@ async def monitor_open_signals(app: Application):
                     _trend_warned.discard(signal_id)
                     continue
 
-                # ——— تارگت‌ها ———
                 if highest < 1:
                     if (price >= targets[0] if direction == "long" else price <= targets[0]):
                         text = (
@@ -1917,7 +1902,6 @@ async def monitor_open_signals(app: Application):
                     _trend_warned.discard(signal_id)
                     continue
 
-                # ——— هشدار تغییر روند (قبل و بعد از تارگت) ———
                 if signal_id not in _trend_warned and CHANNEL_ID and reply_id:
                     try:
                         df_1h = await cache.get_ohlcv(code, MAIN_TF)
@@ -1954,7 +1938,6 @@ async def monitor_open_signals(app: Application):
                             )
                             await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=reply_id)
                             _trend_warned.add(signal_id)
-                            # اگر هنوز هیچ تارگتی نزده و روند خلاف قوی است → باطل + تلاش برای سیگنال مخالف
                             if highest == 0 and ind_4h and (
                                 (direction == "long" and ind_4h.trend_down and ind_4h.adx >= ADX_TREND_MIN) or
                                 (direction == "short" and ind_4h.trend_up and ind_4h.adx >= ADX_TREND_MIN)
@@ -1969,7 +1952,6 @@ async def monitor_open_signals(app: Application):
                                 clear_channel_thread(code)
                                 _trend_warned.discard(signal_id)
 
-                                # صدور فوری سیگنال مخالف (بدون فرصت‌سوزی)
                                 opp = "short" if direction == "long" else "long"
                                 try:
                                     new_id, rev_reason, rev_data = await evaluate_coin(
@@ -2001,7 +1983,7 @@ async def monitor_open_signals(app: Application):
             await asyncio.sleep(60)
 
 # ===========================
-# ارسال سیگنال (با در نظر گرفتن تنظیمات)
+# ارسال سیگنال
 # ===========================
 async def send_signal(app: Application, code: str, signal_id: int, direction: str, plan: RiskPlan, setup_type: str, ai_status: str, ai_text: str, ind: IndicatorSnapshot, funding: Optional[float], oi: Optional[float], rate: float):
     text = format_signal_message(code, direction, plan, setup_type, ai_status, ai_text, ind, funding, oi, rate)
@@ -2033,11 +2015,6 @@ async def evaluate_coin(
     prefer_direction: Optional[str] = None,
     cooldown_seconds: Optional[float] = None,
 ):
-    """
-    prefer_direction: فقط همین جهت را بررسی کن (مثلاً بعد از باطل شدن سیگنال مخالف)
-    skip_cooldown: نادیده گرفتن کول‌داون عادی
-    cooldown_seconds: اگر داده شود به‌جای کول‌داون پیش‌فرض استفاده می‌شود
-    """
     existing = get_open_signal_for_ticker(code)
     if existing:
         return None, "سیگنال باز وجود دارد", None
@@ -2057,17 +2034,14 @@ async def evaluate_coin(
     direction = None
     setup_type = ""
 
-    # ——— مسیر ۱: روند صعودی (بدون نیاز اجباری به تقاطع) ———
     if ind_main.adx >= ADX_RANGE_THRESHOLD and ind_main.trend_up:
         if 30 <= ind_main.rsi <= 70:
             direction, setup_type = "long", "trend_up"
 
-    # ——— مسیر ۲: روند نزولی ———
     if direction is None and ind_main.adx >= ADX_RANGE_THRESHOLD and ind_main.trend_down:
         if 30 <= ind_main.rsi <= 70:
             direction, setup_type = "short", "trend_down"
 
-    # ——— مسیر ۳: رنج (برگشت از لبه یا نزدیک حمایت/مقاومت) ———
     if direction is None and ind_main.adx < ADX_RANGE_THRESHOLD:
         if ind_main.edge_reversal_up and ind_main.rsi <= 45:
             direction, setup_type = "long", "range_reversal"
@@ -2078,11 +2052,9 @@ async def evaluate_coin(
         elif ind_main.structure_breakout_down and ind_main.rsi <= 55 and ind_main.volume_ratio >= VOLUME_MIN_RATIO:
             direction, setup_type = "short", "range_breakout"
 
-    # اگر جهت خاصی خواسته شده (سیگنال مخالف)، فقط همان را قبول کن
     if prefer_direction and direction and direction != prefer_direction:
         return None, f"ستاپ پیدا شد ولی جهت مخالف خواسته نبود ({direction})", None
     if prefer_direction and direction is None:
-        # تلاش مجدد فقط روی مسیر ترجیحی در روند قوی
         if prefer_direction == "long" and ind_main.trend_up and ind_main.adx >= ADX_RANGE_THRESHOLD and 28 <= ind_main.rsi <= 72:
             direction, setup_type = "long", "trend_up_reverse"
         elif prefer_direction == "short" and ind_main.trend_down and ind_main.adx >= ADX_RANGE_THRESHOLD and 28 <= ind_main.rsi <= 72:
@@ -2100,7 +2072,6 @@ async def evaluate_coin(
         )
         return None, f"ستاپ شکل نگرفت ({detail})", None
 
-    # تأیید نرم تایم‌فریم بالاتر
     if direction == "long" and ind_higher and ind_higher.trend_down and ind_higher.adx >= ADX_TREND_MIN:
         return None, "تایم‌فریم ۴ ساعته هم‌جهت نیست (نزولی قوی)", None
     if direction == "short" and ind_higher and ind_higher.trend_up and ind_higher.adx >= ADX_TREND_MIN:
@@ -2125,7 +2096,7 @@ async def evaluate_coin(
             return None, "در کول‌داون بعد از آخرین بسته‌شدن", None
 
     ai_status, ai_text = "unavailable", ""
-    if GEMINI_API_KEY:
+    if GROK_API_KEY:
         context = {
             "direction": "لانگ" if direction == "long" else "شورت",
             "ticker": code,
@@ -2138,7 +2109,6 @@ async def evaluate_coin(
             "funding_rate": f"{funding_rate or 0:.4%}",
             "oi_change": "نامشخص",
         }
-        # غیرمسدودکننده — event loop فریز نمی‌شود
         ai_status, ai_text = await asyncio.to_thread(confirm_signal_with_ai, None, context)
 
     signal_id = record_signal(code, direction, plan.entry, plan.stop_loss, plan.targets, plan.leverage, plan.risk_reward, ai_status == "confirmed", ai_text)
