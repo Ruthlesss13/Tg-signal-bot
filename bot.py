@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل ارزهای دیجیتال - نسخه ۳.۱.۴
-رفع کامل خطای NoneType در تحلیل ارزها، بهبود نمایش شاخص ترس و طمع
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۰
+دریافت فاندینگ‌ریت و Open Interest از MEXC و Gate.io Futures
 """
 
 import asyncio
@@ -12,8 +12,10 @@ import json
 import logging
 import os
 import sqlite3
+import ssl
 import sys
 import time
+import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -50,7 +52,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.1.4"
+VERSION = "3.2.0"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -179,6 +181,12 @@ def safe_format_float(value, format_str: str = ".4f") -> str:
     val = safe_float(value)
     return f"{val:{format_str}}"
 
+def safe_format_percent(value) -> str:
+    """نمایش درصدی ایمن از مقدار (حتی اگر None باشد)"""
+    if value is None:
+        return "نامشخص"
+    return f"{value:.4%}"
+
 # ===========================
 # صرافی‌ها
 # ===========================
@@ -186,6 +194,7 @@ exchange_headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
 
+# اسپات (برای قیمت و OHLCV)
 exchange_mexc = ccxt.mexc({
     "enableRateLimit": True,
     "timeout": 8000,
@@ -202,6 +211,70 @@ exchange_gate = ccxt.gate({
     "headers": exchange_headers,
     "options": {"defaultType": "spot"}
 })
+
+# ===========================
+# دریافت داده‌های فیوچرز (با urllib)
+# ===========================
+def fetch_futures_data_mexc(symbol: str) -> dict:
+    """دریافت فاندینگ‌ریت، OI و قیمت از MEXC Futures"""
+    url = f"https://api.mexc.com/api/v1/contract/ticker?symbol={symbol}"
+    try:
+        ctx = ssl._create_unverified_context()
+        with urllib.request.urlopen(url, timeout=5, context=ctx) as response:
+            data = json.loads(response.read().decode())
+            if data.get("success") and data.get("data"):
+                d = data["data"]
+                return {
+                    "last_price": d.get("lastPrice"),
+                    "funding_rate": d.get("fundingRate"),
+                    "open_interest": d.get("holdVol"),  # holdVol = Open Interest
+                    "high_24h": d.get("high24Price"),
+                    "low_24h": d.get("lower24Price"),
+                    "volume_24h": d.get("volume24"),
+                }
+    except Exception as e:
+        logger.warning(f"MEXC futures data fetch failed for {symbol}: {e}")
+    return {}
+
+def fetch_futures_data_gateio(symbol: str) -> dict:
+    """دریافت فاندینگ‌ریت، OI و قیمت از Gate.io Futures"""
+    url = f"https://api.gateio.ws/api/v4/futures/usdt/tickers?contract={symbol}"
+    try:
+        ctx = ssl._create_unverified_context()
+        with urllib.request.urlopen(url, timeout=5, context=ctx) as response:
+            data = json.loads(response.read().decode())
+            if data and isinstance(data, list) and len(data) > 0:
+                d = data[0]
+                return {
+                    "last_price": d.get("last"),
+                    "funding_rate": d.get("funding_rate"),
+                    "open_interest": d.get("open_interest"),
+                    "high_24h": d.get("high_24h"),
+                    "low_24h": d.get("low_24h"),
+                    "volume_24h": d.get("volume_24h"),
+                }
+    except Exception as e:
+        logger.warning(f"Gate.io futures data fetch failed for {symbol}: {e}")
+    return {}
+
+def get_futures_data(code: str) -> dict:
+    """دریافت داده‌های فیوچرز از هر دو صرافی، اولویت با MEXC"""
+    symbol = f"{code}_USDT"
+    
+    # اول MEXC
+    data = fetch_futures_data_mexc(symbol)
+    if data.get("funding_rate") is not None:
+        data["exchange"] = "MEXC"
+        return data
+    
+    # اگر MEXC جواب نداد، Gate.io
+    data = fetch_futures_data_gateio(symbol)
+    if data.get("funding_rate") is not None:
+        data["exchange"] = "Gate.io"
+        return data
+    
+    # اگر هیچکدام جواب ندادند
+    return {"exchange": "نامشخص"}
 
 # ===========================
 # نرخ تومان
@@ -339,7 +412,7 @@ def get_db_stats() -> dict:
 init_db()
 
 # ===========================
-# کش قیمت
+# کش قیمت (اسپات)
 # ===========================
 class MarketCache:
     def __init__(self):
@@ -576,53 +649,31 @@ def get_fg_status() -> str:
         return f"✅ آخرین مقدار: {_fg_cache['value']} ({_fg_cache['last_update']})"
     return "🔴 در دسترس نیست (مشکل در دریافت از API)"
 
-def fetch_funding_rate(code: str) -> Optional[float]:
-    try:
-        ticker = exchange_mexc.fetch_ticker(f"{code}/USDT")
-        return ticker.get("fundingRate")
-    except:
-        pass
-    try:
-        ticker = exchange_gate.fetch_ticker(f"{code}/USDT")
-        return ticker.get("fundingRate")
-    except:
-        pass
-    return None
-
-def fetch_open_interest(code: str) -> Optional[float]:
-    try:
-        oi = exchange_mexc.fetch_open_interest(f"{code}/USDT")
-        return oi.get("openInterestAmount")
-    except:
-        pass
-    try:
-        oi = exchange_gate.fetch_open_interest(f"{code}/USDT")
-        return oi.get("openInterestAmount")
-    except:
-        pass
-    return None
-
-def check_filters(direction: str, indicators: IndicatorSnapshot, code: str) -> tuple[bool, str]:
+def check_filters(direction: str, indicators: IndicatorSnapshot, code: str, funding_rate: Optional[float] = None, oi: Optional[float] = None) -> tuple[bool, str]:
     if indicators.volume_ratio < VOLUME_MIN_RATIO:
         return False, f"نسبت حجم {indicators.volume_ratio:.2f} کمتر از {VOLUME_MIN_RATIO}"
-    funding = fetch_funding_rate(code)
-    if funding is not None and direction == "long" and funding > FUNDING_RATE_MAX_FOR_LONG:
-        return False, f"فاندینگ {funding:.4%} برای لانگ خیلی مثبت است"
-    oi = fetch_open_interest(code)
+    
+    if funding_rate is not None and direction == "long" and funding_rate > FUNDING_RATE_MAX_FOR_LONG:
+        return False, f"فاندینگ {funding_rate:.4%} برای لانگ خیلی مثبت است"
+    
     if oi is not None and oi <= 0:
         return False, "Open Interest صفر یا منفی است"
+    
     fg = get_fear_greed_index()
     if fg is not None:
         if direction == "long" and fg >= FEAR_GREED_EXTREME_GREED:
             return False, f"شاخص طمع شدید ({fg})"
         if direction == "short" and fg <= FEAR_GREED_EXTREME_FEAR:
             return False, f"شاخص ترس شدید ({fg})"
+    
     h = datetime.now(timezone.utc).hour
     if (h >= LOW_VOLUME_UTC_START_HOUR) or (h < LOW_VOLUME_UTC_END_HOUR):
         return False, f"ساعت {h}:00 UTC در بازه کم‌حجم"
+    
     is_reversal = indicators.edge_reversal_up or indicators.edge_reversal_down
     if indicators.adx < ADX_RANGE_THRESHOLD and not is_reversal:
         return False, f"ADX={indicators.adx:.1f} زیر {ADX_RANGE_THRESHOLD} (بازار رنج)"
+    
     return True, "تمام فیلترها عبور کردند"
 
 # ===========================
@@ -702,10 +753,16 @@ async def analyze_coin_full_status(code: str) -> str:
         if ind is None:
             return f"❌ تحلیل **{code}** ناموفق بود."
 
-        # داده‌های فیوچرز (موازی)
-        funding_task = asyncio.to_thread(fetch_funding_rate, code)
-        oi_task = asyncio.to_thread(fetch_open_interest, code)
-        funding, oi = await asyncio.gather(funding_task, oi_task)
+        # دریافت داده‌های فیوچرز (با urllib)
+        futures_data = get_futures_data(code)
+        funding = futures_data.get("funding_rate")
+        oi = futures_data.get("open_interest")
+        futures_exchange = futures_data.get("exchange", "نامشخص")
+        
+        # قیمت فیوچرز اگر موجود باشد، از آن استفاده کن
+        futures_price = futures_data.get("last_price")
+        if futures_price is not None and futures_price > 0:
+            price = futures_price
 
         # محاسبه تغییرات
         close_series = df_1h["close"]
@@ -722,6 +779,14 @@ async def analyze_coin_full_status(code: str) -> str:
             high_24h = df_1d["high"].iloc[-1]
             low_24h = df_1d["low"].iloc[-1]
             volume_24h = df_1d["volume"].iloc[-1]
+        
+        # استفاده از داده‌های فیوچرز برای های/لو/حجم اگر موجود باشند
+        if futures_data.get("high_24h"):
+            high_24h = futures_data["high_24h"]
+        if futures_data.get("low_24h"):
+            low_24h = futures_data["low_24h"]
+        if futures_data.get("volume_24h"):
+            volume_24h = futures_data["volume_24h"]
 
         if df_1d is not None and len(df_1d) >= 7:
             support_weekly = df_1d["low"].tail(7).min()
@@ -762,7 +827,14 @@ async def analyze_coin_full_status(code: str) -> str:
             score += 1
         if ind.adx > 30:
             score += 1
-        if score >= 4:
+        if funding is not None and abs(funding) < 0.0005:
+            score += 1
+        if oi is not None and oi > 0:
+            score += 1
+
+        if score >= 5:
+            signal_strength = "بسیار قوی 🌟"
+        elif score >= 4:
             signal_strength = "قوی 🟢"
         elif score >= 2:
             signal_strength = "متوسط 🟡"
@@ -820,9 +892,8 @@ async def analyze_coin_full_status(code: str) -> str:
         # وضعیت Swap (فعال است چون در فیوچرز هستیم)
         swap_status = "🟢 فعال"
 
-        # استفاده از safe_format_float برای جلوگیری از خطای NoneType
         text = (
-            f"📊 **تحلیل جامع {code}**\n"
+            f"📊 **تحلیل جامع فیوچرز {code}**\n"
             f"{'────────────────────'}\n"
             f"💰 **قیمت‌ها و تغییرات:**\n"
             f"   • دلاری: `{fmt_usd(price)}` USDT\n"
@@ -831,6 +902,7 @@ async def analyze_coin_full_status(code: str) -> str:
             f"   • تغییر ۲۴ساعته: `{format_percent(change_24h)}`\n"
             f"   • بیشترین ۲۴h: `{fmt_usd(safe_float(high_24h))}`\n"
             f"   • کمترین ۲۴h: `{fmt_usd(safe_float(low_24h))}`\n"
+            f"   • صرافی مرجع فیوچرز: `{futures_exchange}`\n"
             f"{'────────────────────'}\n"
             f"📈 **روند و رژیم بازار:**\n"
             f"   • روند کلی: {trend_fa}\n"
@@ -861,7 +933,7 @@ async def analyze_coin_full_status(code: str) -> str:
             f"   • مقاومت هفتگی: `{fmt_usd(safe_float(resistance_weekly))}`\n"
             f"{'────────────────────'}\n"
             f"📊 **داده‌های فیوچرز:**\n"
-            f"   • فاندینگ‌ریت: `{funding:.4%}` ({funding_interpret})\n"
+            f"   • فاندینگ‌ریت: `{safe_format_percent(funding)}` ({funding_interpret})\n"
             f"   • Open Interest: `{safe_float(oi):,.0f}` ({oi_interpret})\n"
             f"{'────────────────────'}\n"
             f"📊 **حجم معاملات:**\n"
@@ -874,7 +946,7 @@ async def analyze_coin_full_status(code: str) -> str:
             f"   • ADX: `{safe_format_float(adx_4h, '.1f')}`\n"
             f"{'────────────────────'}\n"
             f"📅 **بروزرسانی:** `{shamsi_now()}`\n"
-            f"🏛 **صرافی:** `{cache.active_exchange_name}`\n"
+            f"🏛 **صرافی اسپات:** `{cache.active_exchange_name}`\n"
         )
         
         # ذخیره در کش
@@ -898,7 +970,6 @@ def get_admin_stats_text() -> str:
     active_users = len(registered_users - paused_users)
     paused_users_count = len(paused_users)
 
-    # آمار سیگنال‌ها
     total_signals = db["total"]
     open_signals = db["open"]
     closed = db["tp3"] + db["sl"]
@@ -906,7 +977,6 @@ def get_admin_stats_text() -> str:
     losses = db["sl"]
     winrate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
 
-    # بهترین و بدترین ارز (از دیتابیس)
     best_coin = "نامشخص"
     worst_coin = "نامشخص"
     with _conn() as c:
@@ -943,8 +1013,8 @@ def get_admin_stats_text() -> str:
         f"   • بدترین ارز: `{worst_coin}`\n"
         f"{'────────────────────'}\n"
         f"🏛 **وضعیت سیستم:**\n"
-        f"   • صرافی فعال: `{cache.active_exchange_name}`\n"
-        f"   • صرافی‌ها:\n{get_exchange_status_text()}\n"
+        f"   • صرافی اسپات: `{cache.active_exchange_name}`\n"
+        f"   • صرافی‌های اسپات:\n{get_exchange_status_text()}\n"
         f"   • نرخ تتر (Wallex): {get_irt_rate_status()}\n"
         f"   • شاخص ترس/طمع: {get_fg_status()}\n"
         f"   • هوش مصنوعی (Gemini): {'✅ فعال' if GEMINI_API_KEY else '❌ غیرفعال'}\n"
@@ -970,7 +1040,7 @@ def get_admin_stats_text() -> str:
 # کیبوردها
 # ===========================
 MAIN_MENU_TEXT = (
-    "🤖 **ربات هوشمند تحلیل ارزهای دیجیتال**\n"
+    "🤖 **ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال**\n"
     "📊 قیمت لحظه‌ای | تحلیل تکنیکال | سیگنال معاملاتی\n"
     "⚡️ سریع و دقیق\n\n"
     "👇 **منوی اصلی:**"
@@ -1045,7 +1115,6 @@ signal_history: List[Dict] = []
 TOTAL_SIGNALS_GENERATED = 0
 LAST_REPORT_TIME = None
 
-# هندلرهای اصلی
 async def version_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🤖 **نسخه ربات:** `{VERSION}`\n📅 **زمان ساخت:** `{BUILD_TIME}`\n🆔 **شناسه:** `{context.bot.id}`",
@@ -1057,14 +1126,14 @@ async def info_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_adm = user_id in ADMIN_USER_IDS
     db = get_db_stats()
     text = (
-        f"📌 **اطلاعات ربات هوشمند تحلیل ارزهای دیجیتال**\n"
+        f"📌 **اطلاعات ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال**\n"
         f"{'────────────────────'}\n"
         f"🤖 **نسخه:** `{VERSION}`\n"
         f"📅 **ساخت:** `{BUILD_TIME}`\n"
         f"🆔 **شناسه:** `{context.bot.id}`\n"
         f"👤 **وضعیت شما:** {'👑 ادمین' if is_adm else '👤 کاربر عادی'}\n"
         f"📊 **تعداد ارزها:** `{len(COIN_CODES)}`\n"
-        f"🏛 **صرافی فعال:** `{cache.active_exchange_name}`\n"
+        f"🏛 **صرافی اسپات:** `{cache.active_exchange_name}`\n"
         f"📊 **کل سیگنال‌ها:** `{db['total']}`\n"
         f"🔄 **سیگنال‌های باز:** `{db['open']}`\n"
         f"{'────────────────────'}\n"
@@ -1092,7 +1161,7 @@ async def admin_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(ADMIN_PANEL_HEADER, reply_markup=kb_admin_panel(), parse_mode="Markdown")
 
 # ===========================
-# Callback Handler (بخش‌های اصلی)
+# Callback Handler
 # ===========================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1101,7 +1170,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     is_adm = user_id in ADMIN_USER_IDS
 
-    # مدیریت استارت/استاپ با ویرایش پیام قبلی
     if data == "bot_start_action":
         paused_users.discard(user_id)
         registered_users.add(user_id)
@@ -1159,7 +1227,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("coin_detail_"):
         code = data.split("_")[2]
-        await query.edit_message_text(f"⏳ در حال تحلیل جامع {code}...", parse_mode="Markdown")
+        await query.edit_message_text(f"⏳ در حال تحلیل جامع فیوچرز {code}...", parse_mode="Markdown")
         text = await analyze_coin_full_status(code)
         await query.edit_message_text(
             text,
@@ -1228,7 +1296,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def periodic_scan(app: Application):
     while True:
         try:
-            logger.info("🔍 اسکن دوره‌ای شروع شد...")
+            logger.info("🔍 اسکن دوره‌ای فیوچرز شروع شد...")
             for code in COIN_CODES:
                 try:
                     signal_id, reason, data = await evaluate_coin(code)
@@ -1237,7 +1305,7 @@ async def periodic_scan(app: Application):
                         await send_signal(app, code, signal_id, direction, plan, setup_type, ai_status, ai_text)
                 except Exception as e:
                     logger.exception(f"Error scanning {code}: {e}")
-            logger.info("✅ اسکن دوره‌ای تمام شد")
+            logger.info("✅ اسکن دوره‌ای فیوچرز تمام شد")
             await asyncio.sleep(SIGNAL_SCAN_INTERVAL_SECONDS)
         except Exception as e:
             logger.error(f"Scan loop error: {e}")
@@ -1248,9 +1316,14 @@ async def monitor_open_signals(app: Application):
         try:
             for row in open_signals():
                 code = row["ticker"]
-                price = (await cache.update_prices()).get(code, 0.0)
+                # قیمت از فیوچرز
+                futures_data = get_futures_data(code)
+                price = futures_data.get("last_price")
+                if price is None:
+                    price = (await cache.update_prices()).get(code, 0.0)
                 if price == 0.0:
                     continue
+                
                 targets = json.loads(row["targets"])
                 direction = row["direction"]
                 stop_loss = row["stop_loss"]
@@ -1292,7 +1365,7 @@ def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type:
     setup_label = "تعقیب روند" if setup_type == "trend" else "برگشت از لبه رنج"
     dir_fa = "لانگ 🟢" if direction == "long" else "شورت 🔴"
     text = (
-        f"🚨 **سیگنال جدید** — {code}\n"
+        f"🚨 **سیگنال جدید فیوچرز** — {code}\n"
         f"جهت: {dir_fa} | نوع: {setup_label}\n"
         f"ورود: {plan.entry:.6f}\n"
         f"حد ضرر: {plan.stop_loss:.6f}\n"
@@ -1326,14 +1399,13 @@ async def send_signal(app: Application, code: str, signal_id: int, direction: st
             logger.warning(f"Send to admin {admin_id} failed: {e}")
 
 # ===========================
-# ارزیابی ارز (به صورت async)
+# ارزیابی ارز (فیوچرز)
 # ===========================
 async def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
     existing = get_open_signal_for_ticker(code)
     if existing:
         return None, "سیگنال باز وجود دارد", None
 
-    # دریافت داده‌ها به صورت موازی
     df_main_task = cache.get_ohlcv(code, MAIN_TF)
     df_higher_task = cache.get_ohlcv(code, HIGHER_TF)
     df_main, df_higher = await asyncio.gather(df_main_task, df_higher_task)
@@ -1362,7 +1434,12 @@ async def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
     if direction is None:
         return None, f"هیچ ستاپ معتبری در رژیم {'روند' if ind_main.adx >= ADX_RANGE_THRESHOLD else 'رنج'} شکل نگرفت", None
 
-    ok, reason = check_filters(direction, ind_main, code)
+    # دریافت داده‌های فیوچرز
+    futures_data = get_futures_data(code)
+    funding_rate = futures_data.get("funding_rate")
+    oi = futures_data.get("open_interest")
+
+    ok, reason = check_filters(direction, ind_main, code, funding_rate, oi)
     if not ok:
         return None, reason, None
 
@@ -1374,17 +1451,15 @@ async def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
     if last_closed and time.time() - last_closed < SIGNAL_REOPEN_COOLDOWN_SECONDS:
         return None, "در کول‌داون بعد از آخرین بسته‌شدن", None
 
-    # AI (در صورت فعال بودن)
     chart_png = await asyncio.to_thread(render_candles_png, df_main, f"{code} ({MAIN_TF})") if MPLFINANCE_AVAILABLE else None
     ai_status, ai_text = "unavailable", ""
     if GEMINI_API_KEY and chart_png is not None:
-        funding = fetch_funding_rate(code)
         context = {
             "direction": "لانگ" if direction == "long" else "شورت",
             "ticker": code, "entry": f"{plan.entry:.6f}", "stop_loss": f"{plan.stop_loss:.6f}",
             "targets": ", ".join(f"{t:.6f}" for t in plan.targets),
             "rsi": f"{ind_main.rsi:.1f}", "adx": f"{ind_main.adx:.1f}", "volume_ratio": f"{ind_main.volume_ratio:.2f}",
-            "funding_rate": f"{funding or 0:.4%}", "oi_change": "نامشخص",
+            "funding_rate": f"{funding_rate or 0:.4%}", "oi_change": "نامشخص",
         }
         ai_status, ai_text = confirm_signal_with_ai(chart_png, context)
 
@@ -1392,7 +1467,7 @@ async def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
     return signal_id, "سیگنال صادر شد", (plan, setup_type, ai_status, ai_text, direction)
 
 # ===========================
-# بقیه توابع
+# توابع کمکی
 # ===========================
 def render_candles_png(df: pd.DataFrame, title: str) -> Optional[bytes]:
     if not MPLFINANCE_AVAILABLE:
