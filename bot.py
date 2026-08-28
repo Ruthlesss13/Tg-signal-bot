@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۸
-قالب پیام سیگنال پیشرفته، تنظیمات ارسال، ضریب اطمینان، بهبود مدیریت
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۹
+تنظیمات ارسال سیگنال با منوی دو سطحی، ایموجی پویا، دکمه بازگشت
 """
 
 import asyncio
@@ -52,7 +52,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.2.8"
+VERSION = "3.2.9"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -881,9 +881,8 @@ async def analyze_coin_full_status(code: str) -> str:
             score += 1
         if funding is not None and abs(funding) < 0.0005:
             score += 1
-        # OI به عنوان امتیاز اضافی (اختیاری)
         if oi is not None and oi > 0:
-            score += 0.5  # نیم امتیاز برای OI مثبت
+            score += 0.5
 
         confidence = min(100, int((score / max_score) * 100))
         if confidence >= 80:
@@ -1055,23 +1054,12 @@ def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type:
     setup_label = "تعقیب روند" if setup_type == "trend" else "برگشت از لبه رنج"
     dir_fa = "لانگ 🟢" if direction == "long" else "شورت 🔴"
     
-    # قدرت سیگنال و ضریب اطمینان
     strength, confidence_text, score = get_signal_strength_and_confidence(ind, funding, oi)
     
-    # قیمت ورود به تومان
-    entry_toman = plan.entry * rate
-    
-    # تارگت‌ها به صورت جداگانه
-    targets = plan.targets
     targets_lines = []
-    for i, t in enumerate(targets, 1):
-        t_toman = t * rate
+    for i, t in enumerate(plan.targets, 1):
         targets_lines.append(f"   • TP{i}: `${fmt_usd(t)}` USDT  |  {fmt_toman(t, rate)}")
     
-    # حد ضرر به تومان
-    sl_toman = plan.stop_loss * rate
-    
-    # وضعیت AI
     if ai_status == "confirmed":
         ai_line = f"✅ تأیید\n{ai_text}"
     elif ai_status == "rejected":
@@ -1079,7 +1067,6 @@ def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type:
     else:
         ai_line = "⏳ در دسترس نبود (timeout)"
 
-    # فاندینگ و OI
     funding_text = safe_format_percent(funding)
     oi_text = f"{safe_float(oi):,.0f}" if oi is not None else "نامشخص"
 
@@ -1336,6 +1323,11 @@ ADMIN_PANEL_HEADER = (
     "👇 **یکی از گزینه‌ها را انتخاب کنید:**"
 )
 
+SIGNAL_SETTINGS_HEADER = (
+    "📤 **تنظیمات ارسال سیگنال**\n\n"
+    "وضعیت فعلی:\n"
+)
+
 def kb_main_menu(is_admin_user=False):
     keyboard = [
         [InlineKeyboardButton("💵 قیمت لحظه‌ای ارزها", callback_data="coins_prices_all"),
@@ -1382,17 +1374,46 @@ def kb_admin_panel():
     ])
 
 def kb_signal_settings():
-    """کیبورد تنظیمات ارسال سیگنال"""
-    channel_status = "✅ فعال" if SEND_TO_CHANNEL else "❌ غیرفعال"
-    admin_status = "✅ فعال" if SEND_TO_ADMIN else "❌ غیرفعال"
+    """کیبورد تنظیمات ارسال سیگنال - سطح اول"""
+    channel_emoji = "✅" if SEND_TO_CHANNEL else "❌"
+    admin_emoji = "✅" if SEND_TO_ADMIN else "❌"
+    channel_status = "فعال" if SEND_TO_CHANNEL else "غیرفعال"
+    admin_status = "فعال" if SEND_TO_ADMIN else "غیرفعال"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"📢 ارسال به کانال: {channel_status}", callback_data="toggle_channel")],
-        [InlineKeyboardButton(f"📨 ارسال به ربات: {admin_status}", callback_data="toggle_admin")],
-        [InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", callback_data="admin_panel")]
+        [InlineKeyboardButton(f"📢 ارسال به کانال: {channel_emoji} {channel_status}", callback_data="signal_channel")],
+        [InlineKeyboardButton(f"📨 ارسال به ربات: {admin_emoji} {admin_status}", callback_data="signal_admin")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")]
     ])
 
+def kb_signal_submenu(target: str):
+    """کیبورد زیرمجموعه تنظیمات ارسال سیگنال"""
+    if target == "channel":
+        status = SEND_TO_CHANNEL
+        title = "📢 **تنظیم ارسال به کانال**"
+        current = "فعال" if status else "غیرفعال"
+        emoji = "✅" if status else "❌"
+        enable_text = "🟢 فعال کردن ارسال به کانال"
+        disable_text = "🔴 غیرفعال کردن ارسال به کانال"
+        enable_cb = "toggle_channel_on"
+        disable_cb = "toggle_channel_off"
+    else:
+        status = SEND_TO_ADMIN
+        title = "📨 **تنظیم ارسال به ربات**"
+        current = "فعال" if status else "غیرفعال"
+        emoji = "✅" if status else "❌"
+        enable_text = "🟢 فعال کردن ارسال به ربات"
+        disable_text = "🔴 غیرفعال کردن ارسال به ربات"
+        enable_cb = "toggle_admin_on"
+        disable_cb = "toggle_admin_off"
+    
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(enable_text, callback_data=enable_cb)],
+        [InlineKeyboardButton(disable_text, callback_data=disable_cb)],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_signal_settings")]
+    ]), title, current, emoji
+
 def kb_back_admin():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", callback_data="admin_panel")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")]])
 
 def kb_reset_confirm():
     return InlineKeyboardMarkup([
@@ -1465,6 +1486,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     is_adm = user_id in ADMIN_USER_IDS
 
+    # ===== مدیریت استارت/استاپ =====
     if data == "bot_start_action":
         paused_users.discard(user_id)
         registered_users.add(user_id)
@@ -1492,6 +1514,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ===== منوی اصلی =====
     if data == "main_menu":
         await query.edit_message_text(
             MAIN_MENU_TEXT,
@@ -1500,6 +1523,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ===== قیمت‌ها =====
     if data == "coins_prices_all":
         await query.edit_message_text("⏳ در حال دریافت قیمت‌ها...", parse_mode="Markdown")
         prices = await cache.update_prices()
@@ -1517,6 +1541,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=kb_prices_all_single(), parse_mode="Markdown")
         return
 
+    # ===== تحلیل ارزها =====
     if data == "coins_status_grid":
         await query.edit_message_text(
             COIN_SELECT_TEXT,
@@ -1539,6 +1564,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ===== پنل مدیریت =====
     if data == "admin_panel":
         if not is_adm: return
         await query.edit_message_text(
@@ -1548,39 +1574,118 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ===== تنظیمات ارسال سیگنال - سطح اول =====
     if data == "admin_signal_settings":
         if not is_adm: return
-        await query.edit_message_text(
-            "📤 **تنظیمات ارسال سیگنال**\n\n"
-            "در این بخش می‌توانید ارسال سیگنال‌ها را فعال یا غیرفعال کنید.\n"
-            "تغییرات به‌صورت خودکار ذخیره می‌شوند.",
-            reply_markup=kb_signal_settings(),
-            parse_mode="Markdown"
+        channel_emoji = "✅" if SEND_TO_CHANNEL else "❌"
+        admin_emoji = "✅" if SEND_TO_ADMIN else "❌"
+        channel_status = "فعال" if SEND_TO_CHANNEL else "غیرفعال"
+        admin_status = "فعال" if SEND_TO_ADMIN else "غیرفعال"
+        text = (
+            f"{SIGNAL_SETTINGS_HEADER}"
+            f"📢 ارسال به کانال: {channel_emoji} {channel_status}\n"
+            f"📨 ارسال به ربات: {admin_emoji} {admin_status}\n\n"
+            "برای تغییر هر یک از گزینه‌ها، روی آن کلیک کنید:"
         )
+        await query.edit_message_text(text, reply_markup=kb_signal_settings(), parse_mode="Markdown")
         return
 
-    if data == "toggle_channel":
+    # ===== تنظیم ارسال به کانال - سطح دوم =====
+    if data == "signal_channel":
         if not is_adm: return
-        SEND_TO_CHANNEL = not SEND_TO_CHANNEL
-        save_signal_settings()
-        await query.edit_message_text(
-            f"📢 ارسال به کانال: {'✅ فعال' if SEND_TO_CHANNEL else '❌ غیرفعال'}",
-            reply_markup=kb_signal_settings(),
-            parse_mode="Markdown"
+        kb, title, current, emoji = kb_signal_submenu("channel")
+        text = (
+            f"{title}\n\n"
+            f"وضعیت فعلی: {emoji} {current}\n\n"
+            "برای تغییر وضعیت، یکی از گزینه‌های زیر را انتخاب کنید:"
         )
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
         return
 
-    if data == "toggle_admin":
+    # ===== تنظیم ارسال به ربات - سطح دوم =====
+    if data == "signal_admin":
         if not is_adm: return
-        SEND_TO_ADMIN = not SEND_TO_ADMIN
-        save_signal_settings()
-        await query.edit_message_text(
-            f"📨 ارسال به ربات: {'✅ فعال' if SEND_TO_ADMIN else '❌ غیرفعال'}",
-            reply_markup=kb_signal_settings(),
-            parse_mode="Markdown"
+        kb, title, current, emoji = kb_signal_submenu("admin")
+        text = (
+            f"{title}\n\n"
+            f"وضعیت فعلی: {emoji} {current}\n\n"
+            "برای تغییر وضعیت، یکی از گزینه‌های زیر را انتخاب کنید:"
         )
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
         return
 
+    # ===== تغییر وضعیت کانال =====
+    if data == "toggle_channel_on":
+        if not is_adm: return
+        SEND_TO_CHANNEL = True
+        save_signal_settings()
+        # بازگشت به منوی تنظیمات با وضعیت جدید
+        channel_emoji = "✅" if SEND_TO_CHANNEL else "❌"
+        admin_emoji = "✅" if SEND_TO_ADMIN else "❌"
+        channel_status = "فعال" if SEND_TO_CHANNEL else "غیرفعال"
+        admin_status = "فعال" if SEND_TO_ADMIN else "غیرفعال"
+        text = (
+            f"{SIGNAL_SETTINGS_HEADER}"
+            f"📢 ارسال به کانال: {channel_emoji} {channel_status}\n"
+            f"📨 ارسال به ربات: {admin_emoji} {admin_status}\n\n"
+            "برای تغییر هر یک از گزینه‌ها، روی آن کلیک کنید:"
+        )
+        await query.edit_message_text(text, reply_markup=kb_signal_settings(), parse_mode="Markdown")
+        return
+
+    if data == "toggle_channel_off":
+        if not is_adm: return
+        SEND_TO_CHANNEL = False
+        save_signal_settings()
+        channel_emoji = "✅" if SEND_TO_CHANNEL else "❌"
+        admin_emoji = "✅" if SEND_TO_ADMIN else "❌"
+        channel_status = "فعال" if SEND_TO_CHANNEL else "غیرفعال"
+        admin_status = "فعال" if SEND_TO_ADMIN else "غیرفعال"
+        text = (
+            f"{SIGNAL_SETTINGS_HEADER}"
+            f"📢 ارسال به کانال: {channel_emoji} {channel_status}\n"
+            f"📨 ارسال به ربات: {admin_emoji} {admin_status}\n\n"
+            "برای تغییر هر یک از گزینه‌ها، روی آن کلیک کنید:"
+        )
+        await query.edit_message_text(text, reply_markup=kb_signal_settings(), parse_mode="Markdown")
+        return
+
+    # ===== تغییر وضعیت ربات =====
+    if data == "toggle_admin_on":
+        if not is_adm: return
+        SEND_TO_ADMIN = True
+        save_signal_settings()
+        channel_emoji = "✅" if SEND_TO_CHANNEL else "❌"
+        admin_emoji = "✅" if SEND_TO_ADMIN else "❌"
+        channel_status = "فعال" if SEND_TO_CHANNEL else "غیرفعال"
+        admin_status = "فعال" if SEND_TO_ADMIN else "غیرفعال"
+        text = (
+            f"{SIGNAL_SETTINGS_HEADER}"
+            f"📢 ارسال به کانال: {channel_emoji} {channel_status}\n"
+            f"📨 ارسال به ربات: {admin_emoji} {admin_status}\n\n"
+            "برای تغییر هر یک از گزینه‌ها، روی آن کلیک کنید:"
+        )
+        await query.edit_message_text(text, reply_markup=kb_signal_settings(), parse_mode="Markdown")
+        return
+
+    if data == "toggle_admin_off":
+        if not is_adm: return
+        SEND_TO_ADMIN = False
+        save_signal_settings()
+        channel_emoji = "✅" if SEND_TO_CHANNEL else "❌"
+        admin_emoji = "✅" if SEND_TO_ADMIN else "❌"
+        channel_status = "فعال" if SEND_TO_CHANNEL else "غیرفعال"
+        admin_status = "فعال" if SEND_TO_ADMIN else "غیرفعال"
+        text = (
+            f"{SIGNAL_SETTINGS_HEADER}"
+            f"📢 ارسال به کانال: {channel_emoji} {channel_status}\n"
+            f"📨 ارسال به ربات: {admin_emoji} {admin_status}\n\n"
+            "برای تغییر هر یک از گزینه‌ها، روی آن کلیک کنید:"
+        )
+        await query.edit_message_text(text, reply_markup=kb_signal_settings(), parse_mode="Markdown")
+        return
+
+    # ===== آمار سیگنال‌ها =====
     if data == "admin_signal_stats":
         if not is_adm: return
         s = stats_summary()
@@ -1597,12 +1702,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ===== آمار سیستم =====
     if data == "admin_system_stats":
         if not is_adm: return
         text = get_admin_stats_text()
         await query.edit_message_text(text, reply_markup=kb_back_admin(), parse_mode="Markdown")
         return
 
+    # ===== تست سیستم =====
     if data == "admin_system_test":
         if not is_adm: return
         await query.edit_message_text("⏳ در حال اجرای تست سیستم...", parse_mode=None)
@@ -1610,6 +1717,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=kb_back_admin(), parse_mode=None)
         return
 
+    # ===== صفر کردن آمار =====
     if data == "reset_stats_confirm":
         if not is_adm: return
         await query.edit_message_text(
@@ -1823,7 +1931,6 @@ async def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
 
     signal_id = record_signal(code, direction, plan.entry, plan.stop_loss, plan.targets, plan.leverage, plan.risk_reward, ai_status == "confirmed", ai_text)
     
-    # بازگرداندن داده‌های اضافی برای قالب‌بندی
     rate = fetch_irt_rate_sync()
     extra_data = (plan, setup_type, ai_status, ai_text, direction, ind_main, funding_rate, oi, rate)
     return signal_id, "سیگنال صادر شد", extra_data
