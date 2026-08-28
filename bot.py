@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۳.۰
-استفاده از قیمت فیوچرز در لیست قیمت‌ها، رفع خطاهای تست سیستم، بهبود پویایی
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۳.۱
+رفع خطای event loop در تست سیستم، اصلاح قیمت‌های اسپات، رفع TypeError
 """
 
 import asyncio
@@ -52,7 +52,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.3.0"
+VERSION = "3.3.1"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -290,15 +290,6 @@ def get_futures_data(code: str) -> dict:
         return data
     return {"exchange": "نامشخص", "last_price": None}
 
-def get_futures_price_all() -> Dict[str, float]:
-    """دریافت قیمت فیوچرز برای تمام ارزها به صورت همزمان"""
-    prices = {}
-    for code in COIN_CODES:
-        data = get_futures_data(code)
-        if data.get("last_price"):
-            prices[code] = data["last_price"]
-    return prices
-
 # ===========================
 # نرخ تومان (با urllib)
 # ===========================
@@ -504,7 +495,7 @@ def save_signal_settings():
 load_signal_settings()
 
 # ===========================
-# کش قیمت (اسپات) - فقط برای OHLCV استفاده می‌شود
+# کش قیمت (اسپات) - برای لیست قیمت‌ها و OHLCV
 # ===========================
 class MarketCache:
     def __init__(self):
@@ -514,30 +505,80 @@ class MarketCache:
         self.exchange_status = {"MEXC": {"online": False, "last_check": 0}, "Gate.io": {"online": False, "last_check": 0}}
 
     async def update_prices(self) -> Dict[str, float]:
-        """به‌روزرسانی قیمت‌ها از فیوچرز"""
+        """به‌روزرسانی قیمت‌ها از اسپات (برای لیست قیمت‌ها)"""
         now = time.time()
         if now - self.last_price_update < PRICE_TTL_SECONDS and self.prices:
             return self.prices
 
-        # دریافت قیمت از فیوچرز
+        symbols = [f"{code}/USDT" for code in COIN_CODES]
         new_prices = {}
-        for code in COIN_CODES:
-            data = get_futures_data(code)
-            if data.get("last_price"):
-                new_prices[code] = data["last_price"]
-                # به‌روزرسانی وضعیت صرافی
-                if data.get("exchange") == "MEXC":
-                    self.exchange_status["MEXC"] = {"online": True, "last_check": now}
-                elif data.get("exchange") == "Gate.io":
-                    self.exchange_status["Gate.io"] = {"online": True, "last_check": now}
+
+        # ۱. MEXC
+        try:
+            tickers = await asyncio.to_thread(exchange_mexc.fetch_tickers, symbols)
+            for code in COIN_CODES:
+                sym = f"{code}/USDT"
+                if sym in tickers and tickers[sym].get("last") is not None:
+                    new_prices[code] = float(tickers[sym]["last"])
+            if new_prices:
+                self.active_exchange_name = "MEXC"
+                self.exchange_status["MEXC"] = {"online": True, "last_check": now}
+                self.prices = new_prices
+                self.last_price_update = now
+                return self.prices
+        except Exception as e:
+            logger.warning(f"MEXC fetch_tickers failed: {e}")
+            self.exchange_status["MEXC"] = {"online": False, "last_check": now}
+
+        # ۲. Gate.io
+        try:
+            gate_symbols = [f"{code}/USDT" for code in COIN_CODES]
+            tickers = await asyncio.to_thread(exchange_gate.fetch_tickers, gate_symbols)
+            for i, code in enumerate(COIN_CODES):
+                sym = gate_symbols[i]
+                if sym in tickers and tickers[sym].get("last") is not None:
+                    new_prices[code] = float(tickers[sym]["last"])
+            if new_prices:
+                self.active_exchange_name = "Gate.io"
+                self.exchange_status["Gate.io"] = {"online": True, "last_check": now}
+                self.prices = new_prices
+                self.last_price_update = now
+                return self.prices
+        except Exception as e:
+            logger.warning(f"Gate.io fetch_tickers failed: {e}")
+            self.exchange_status["Gate.io"] = {"online": False, "last_check": now}
+
+        # ۳. Fallback تکی
+        async def fetch_one(code):
+            try:
+                ticker = await asyncio.to_thread(exchange_mexc.fetch_ticker, f"{code}/USDT")
+                if ticker and ticker.get("last") is not None:
+                    return code, float(ticker["last"])
+            except:
+                pass
+            try:
+                ticker = await asyncio.to_thread(exchange_gate.fetch_ticker, f"{code}/USDT")
+                if ticker and ticker.get("last") is not None:
+                    return code, float(ticker["last"])
+            except:
+                pass
+            return code, None
+
+        missing_codes = [code for code in COIN_CODES if code not in new_prices]
+        if missing_codes:
+            tasks = [fetch_one(code) for code in missing_codes]
+            results = await asyncio.gather(*tasks)
+            for code, price in results:
+                if price is not None:
+                    new_prices[code] = price
 
         if new_prices:
             self.prices = new_prices
             self.last_price_update = now
-            self.active_exchange_name = "MEXC/Gate (Futures)"
         return self.prices
 
     async def get_ohlcv(self, code: str, timeframe: str = "1h") -> Optional[pd.DataFrame]:
+        """دریافت OHLCV از اسپات (برای تحلیل تکنیکال)"""
         try:
             raw = await asyncio.to_thread(exchange_mexc.fetch_ohlcv, f"{code}/USDT", timeframe, limit=OHLCV_LIMIT)
             if raw:
@@ -740,7 +781,7 @@ def build_risk_plan(direction: str, entry: float, atr: float, account_balance_us
     return RiskPlan(direction, entry, stop_loss, targets, leverage, position_size_usdt, risk_reward, True, "ok")
 
 # ===========================
-# تحلیل کامل ارز
+# تحلیل کامل ارز (استفاده از فیوچرز برای قیمت و OHLCV از اسپات)
 # ===========================
 async def analyze_coin_full_status(code: str) -> str:
     cache_key = f"{code}_{int(time.time() / 60)}"
@@ -757,6 +798,7 @@ async def analyze_coin_full_status(code: str) -> str:
         rate = await fetch_irt_rate()
         irt_price = price * rate
 
+        # دریافت OHLCV از اسپات
         tasks = [
             cache.get_ohlcv(code, "1h"),
             cache.get_ohlcv(code, "4h"),
@@ -1115,8 +1157,8 @@ def get_admin_stats_text() -> str:
         f"   • بدترین ارز: `{worst_coin}`\n"
         f"{'────────────────────'}\n"
         f"🏛 **وضعیت سیستم:**\n"
-        f"   • صرافی فیوچرز: `{cache.active_exchange_name}`\n"
-        f"   • وضعیت صرافی‌های فیوچرز:\n{get_exchange_status_text()}\n"
+        f"   • صرافی اسپات: `{cache.active_exchange_name}`\n"
+        f"   • صرافی‌های اسپات:\n{get_exchange_status_text()}\n"
         f"   • نرخ تتر (Wallex): {get_irt_rate_status()}\n"
         f"   • شاخص ترس/طمع: {get_fg_status()}\n"
         f"   • هوش مصنوعی (Gemma): {'✅ فعال' if GEMINI_API_KEY else '❌ غیرفعال'}\n"
@@ -1141,10 +1183,10 @@ def get_admin_stats_text() -> str:
     return text
 
 # ===========================
-# تست کامل سیستم (اصلاح‌شده)
+# تست کامل سیستم (اصلاح‌شده - بدون event loop)
 # ===========================
 def run_system_test() -> str:
-    """اجرای تست کامل سیستم با مدیریت خطا و به‌روزرسانی وضعیت صرافی‌ها"""
+    """اجرای تست کامل سیستم بدون استفاده از asyncio.run (رفع خطای event loop)"""
     result = []
     result.append("🧪 گزارش تست کامل سیستم")
     result.append("=" * 40)
@@ -1174,31 +1216,33 @@ def run_system_test() -> str:
     except Exception as e:
         result.append(f"\n💾 دیتابیس: ❌ خطا: {e}")
     
-    # ===== به‌روزرسانی وضعیت صرافی‌ها با دریافت قیمت =====
-    result.append("\n🏛 وضعیت صرافی‌های فیوچرز:")
-    # دریافت قیمت برای به‌روزرسانی وضعیت
-    import asyncio
+    # ===== به‌روزرسانی وضعیت صرافی‌ها =====
+    result.append("\n🏛 وضعیت صرافی‌های اسپات:")
     try:
-        # استفاده از event loop موجود
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # اگر loop در حال اجراست، از create_task استفاده کن
-            future = asyncio.create_task(cache.update_prices())
-            # صبر برای اتمام (در محیط sync نمی‌توانیم await کنیم)
-            # به جای آن، یک بار قیمت‌ها را دریافت می‌کنیم و وضعیت به‌روز می‌شود
-        else:
-            # اگر loop در حال اجرا نیست، از run_until_complete استفاده کن
-            loop.run_until_complete(cache.update_prices())
-    except:
-        # در صورت خطا، سعی می‌کنیم یک loop جدید بسازیم
+        # استفاده از asyncio.run با مدیریت خطا
+        import asyncio
         try:
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            new_loop.run_until_complete(cache.update_prices())
-        except Exception as e:
-            result.append(f"   ⚠️ خطا در به‌روزرسانی وضعیت: {e}")
+            # اگر event loop در حال اجراست، از create_task استفاده می‌کنیم
+            loop = asyncio.get_running_loop()
+            # نمی‌توانیم در اینجا await کنیم، پس از اجرا می‌گذریم
+            result.append("   ⏳ در حال به‌روزرسانی وضعیت...")
+            # یک task جدید برای به‌روزرسانی قیمت‌ها ایجاد می‌کنیم
+            asyncio.create_task(cache.update_prices())
+            result.append("   ⏳ وضعیت در حال به‌روزرسانی است...")
+        except RuntimeError:
+            # اگر event loop در حال اجرا نیست، از run_until_complete استفاده می‌کنیم
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(cache.update_prices())
+                loop.close()
+                result.append("   ✅ وضعیت صرافی‌ها به‌روز شد")
+            except Exception as e:
+                result.append(f"   ❌ خطا در به‌روزرسانی: {e}")
+    except Exception as e:
+        result.append(f"   ⚠️ خطا: {e}")
     
-    # نمایش وضعیت صرافی‌ها
+    # نمایش وضعیت صرافی‌ها (حتی اگر به‌روز نشده باشد)
     for name, data in cache.exchange_status.items():
         if data["online"]:
             result.append(f"   • {name}: ✅ آنلاین")
@@ -1262,40 +1306,70 @@ def run_system_test() -> str:
         result.append(f"   ❌ شناسه کانال تنظیم نشده است")
     
     # ===== بررسی شرایط سیگنال برای BTC (بدون asyncio.run) =====
-    result.append("\n📊 شرایط سیگنال برای BTC:")
+    result.append("\n📊 شرایط سیگنال برای BTC (اسپات):")
     try:
-        # دریافت قیمت و اندیکاتورها به صورت مستقیم
-        prices = get_futures_price_all()
-        btc_price = prices.get('BTC', 0)
-        if btc_price > 0:
-            result.append(f"   • قیمت فیوچرز BTC: ${btc_price:.2f}")
-            # دریافت OHLCV و محاسبه EMA200 و RSI
-            df = None
+        # دریافت قیمت‌های اسپات
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            # نمی‌توانیم await کنیم، پس از مقدار کش استفاده می‌کنیم
+            prices = cache.prices
+            if not prices:
+                result.append("   ⚠️ قیمت‌ها در کش موجود نیستند، لطفاً ابتدا قیمت‌ها را به‌روز کنید.")
+            else:
+                btc_price = prices.get('BTC', 0)
+                if btc_price > 0:
+                    result.append(f"   • قیمت اسپات BTC: ${btc_price:.2f}")
+                    # استفاده از OHLCV موجود
+                    try:
+                        df = loop.run_until_complete(cache.get_ohlcv('BTC', '1h'))
+                        if df is not None and len(df) > 200:
+                            ema200 = EMAIndicator(df['close'], window=200).ema_indicator().iloc[-1]
+                            rsi_val = RSIIndicator(df['close'], window=14).rsi().iloc[-1]
+                            result.append(f"   • EMA200: ${ema200:.2f}")
+                            result.append(f"   • RSI: {rsi_val:.1f}")
+                            condition = btc_price > ema200 and rsi_val < 32
+                            result.append(f"   • شرط سیگنال (price > EMA200 and RSI < 32): {'✅ برقرار' if condition else '❌ برقرار نیست'}")
+                            if not condition:
+                                if btc_price <= ema200:
+                                    result.append(f"     ➡️ قیمت ({btc_price:.2f}) کمتر از EMA200 ({ema200:.2f}) است.")
+                                if rsi_val >= 32:
+                                    result.append(f"     ➡️ RSI ({rsi_val:.1f}) بالاتر از ۳۲ است.")
+                        else:
+                            result.append("   ❌ داده OHLCV کافی برای BTC در دسترس نیست")
+                    except RuntimeError:
+                        result.append("   ⚠️ event loop در حال اجراست، نمی‌توان منتظر ماند. لطفاً دوباره تلاش کنید.")
+                else:
+                    result.append("   ❌ قیمت BTC در کش موجود نیست")
+        except RuntimeError:
+            # اگر event loop در حال اجرا نیست، یک loop جدید بساز
             try:
-                # تلاش برای دریافت OHLCV
-                import asyncio
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                df = loop.run_until_complete(cache.get_ohlcv('BTC', '1h'))
-                if df is not None and len(df) > 200:
-                    ema200 = EMAIndicator(df['close'], window=200).ema_indicator().iloc[-1]
-                    rsi_val = RSIIndicator(df['close'], window=14).rsi().iloc[-1]
-                    result.append(f"   • EMA200: ${ema200:.2f}")
-                    result.append(f"   • RSI: {rsi_val:.1f}")
-                    condition = btc_price > ema200 and rsi_val < 32
-                    result.append(f"   • شرط سیگنال (price > EMA200 and RSI < 32): {'✅ برقرار' if condition else '❌ برقرار نیست'}")
-                    if not condition:
-                        if btc_price <= ema200:
-                            result.append(f"     ➡️ قیمت ({btc_price:.2f}) کمتر از EMA200 ({ema200:.2f}) است.")
-                        if rsi_val >= 32:
-                            result.append(f"     ➡️ RSI ({rsi_val:.1f}) بالاتر از ۳۲ است.")
+                prices = loop.run_until_complete(cache.update_prices())
+                btc_price = prices.get('BTC', 0)
+                if btc_price > 0:
+                    result.append(f"   • قیمت اسپات BTC: ${btc_price:.2f}")
+                    df = loop.run_until_complete(cache.get_ohlcv('BTC', '1h'))
+                    if df is not None and len(df) > 200:
+                        ema200 = EMAIndicator(df['close'], window=200).ema_indicator().iloc[-1]
+                        rsi_val = RSIIndicator(df['close'], window=14).rsi().iloc[-1]
+                        result.append(f"   • EMA200: ${ema200:.2f}")
+                        result.append(f"   • RSI: {rsi_val:.1f}")
+                        condition = btc_price > ema200 and rsi_val < 32
+                        result.append(f"   • شرط سیگنال (price > EMA200 and RSI < 32): {'✅ برقرار' if condition else '❌ برقرار نیست'}")
+                        if not condition:
+                            if btc_price <= ema200:
+                                result.append(f"     ➡️ قیمت ({btc_price:.2f}) کمتر از EMA200 ({ema200:.2f}) است.")
+                            if rsi_val >= 32:
+                                result.append(f"     ➡️ RSI ({rsi_val:.1f}) بالاتر از ۳۲ است.")
+                    else:
+                        result.append("   ❌ داده OHLCV کافی برای BTC در دسترس نیست")
                 else:
-                    result.append("   ❌ داده OHLCV کافی برای BTC در دسترس نیست")
+                    result.append("   ❌ قیمت BTC دریافت نشد")
                 loop.close()
             except Exception as e:
-                result.append(f"   ❌ خطا در محاسبه اندیکاتورها: {e}")
-        else:
-            result.append("   ❌ قیمت BTC در دسترس نیست")
+                result.append(f"   ❌ خطا: {e}")
     except Exception as e:
         result.append(f"   ❌ خطا در بررسی شرایط: {e}")
     
@@ -1450,7 +1524,7 @@ async def info_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🆔 **شناسه:** `{context.bot.id}`\n"
         f"👤 **وضعیت شما:** {'👑 ادمین' if is_adm else '👤 کاربر عادی'}\n"
         f"📊 **تعداد ارزها:** `{len(COIN_CODES)}`\n"
-        f"🏛 **صرافی فیوچرز:** `{cache.active_exchange_name}`\n"
+        f"🏛 **صرافی اسپات:** `{cache.active_exchange_name}`\n"
         f"📊 **کل سیگنال‌ها:** `{db['total']}`\n"
         f"🔄 **سیگنال‌های باز:** `{db['open']}`\n"
         f"{'────────────────────'}\n"
@@ -1525,25 +1599,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ===== قیمت‌ها (از فیوچرز) =====
+    # ===== قیمت‌ها (از اسپات) =====
     if data == "coins_prices_all":
-        await query.edit_message_text("⏳ در حال دریافت قیمت‌های فیوچرز...", parse_mode="Markdown")
-        # دریافت قیمت از فیوچرز
-        prices = {}
-        for code in COIN_CODES:
-            fdata = get_futures_data(code)
-            if fdata.get("last_price"):
-                prices[code] = fdata["last_price"]
+        await query.edit_message_text("⏳ در حال دریافت قیمت‌های اسپات...", parse_mode="Markdown")
+        prices = await cache.update_prices()
         rate = await fetch_irt_rate()
         exchange_emoji = "🇲" if "MEXC" in cache.active_exchange_name else "🇬"
         text = (
-            f"💵 **لیست قیمت فیوچرز ۳۰ ارز دیجیتال برتر**\n"
+            f"💵 **لیست قیمت لحظه‌ای ۳۰ ارز دیجیتال برتر**\n"
             f"📅 {shamsi_now()}\n"
             f"🇮🇷 نرخ تتر: {rate:,.0f} تومان\n"
             f"{'────────────────────'}\n"
         )
         for code in COIN_CODES:
             p = prices.get(code, 0.0)
+            if isinstance(p, str):
+                try:
+                    p = float(p)
+                except:
+                    p = 0.0
             if p > 0:
                 text += f"‎{exchange_emoji} **{code}**: {fmt_usd(p)} USDT\n‎🇮🇷 {fmt_toman(p, rate)}\n\n"
             else:
@@ -1551,7 +1625,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=kb_prices_all_single(), parse_mode="Markdown")
         return
 
-    # ===== تحلیل ارزها =====
+    # ===== تحلیل ارزها (استفاده از فیوچرز) =====
     if data == "coins_status_grid":
         await query.edit_message_text(
             COIN_SELECT_TEXT,
@@ -1871,7 +1945,7 @@ async def send_signal(app: Application, code: str, signal_id: int, direction: st
                 logger.warning(f"Send to admin {admin_id} failed: {e}")
 
 # ===========================
-# ارزیابی ارز (فیوچرز)
+# ارزیابی ارز (فیوچرز + اسپات OHLCV)
 # ===========================
 async def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
     existing = get_open_signal_for_ticker(code)
