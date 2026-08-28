@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۷
-رفع خطای parse_mode در تست سیستم، بهبود شرایط سیگنال
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۸
+قالب پیام سیگنال پیشرفته، تنظیمات ارسال، ضریب اطمینان، بهبود مدیریت
 """
 
 import asyncio
@@ -52,7 +52,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.2.7"
+VERSION = "3.2.8"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -93,11 +93,11 @@ COIN_CODES = [
     "TIA", "WIF", "FLOKI", "SEI", "RUNE"
 ]
 
-# تنظیمات فیوچرز (نرم‌تر کردن شرایط)
+# تنظیمات فیوچرز
 EMA_FAST = 50
 EMA_SLOW = 200
 RSI_PERIOD = 14
-RSI_MIN = 35   # کاهش از ۴۵ به ۳۵ برای سیگنال‌های بیشتر
+RSI_MIN = 35
 RSI_MAX = 65
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD = 14
@@ -105,7 +105,7 @@ VOLUME_MA_PERIOD = 20
 STRUCTURE_LOOKBACK = 20
 ADX_PERIOD = 14
 ADX_RANGE_THRESHOLD = 20
-VOLUME_MIN_RATIO = 1.2   # کاهش از ۱.۵ به ۱.۲
+VOLUME_MIN_RATIO = 1.2
 FUNDING_RATE_MAX_FOR_LONG = 0.0005
 NEWS_BLACKOUT_MINUTES = 30
 LOW_VOLUME_UTC_START_HOUR = 23
@@ -127,11 +127,17 @@ MAIN_TF = "1h"
 HIGHER_TF = "4h"
 PRICE_TTL_SECONDS = 30
 IRT_RATE_TTL_SECONDS = 60
-SIGNAL_SCAN_INTERVAL_SECONDS = 10 * 60  # کاهش از ۱۵ به ۱۰ دقیقه
+SIGNAL_SCAN_INTERVAL_SECONDS = 10 * 60
 SIGNAL_REOPEN_COOLDOWN_SECONDS = 45 * 60
 CHANNEL_MONITOR_INTERVAL_SECONDS = 5 * 60
-AI_TIMEOUT_SECONDS = 60
+AI_TIMEOUT_SECONDS = 90
 GEMINI_MODEL = "gemma-4-26b-a4b-it"
+
+# ===========================
+# تنظیمات ارسال سیگنال (پیش‌فرض فعال)
+# ===========================
+SEND_TO_CHANNEL = True
+SEND_TO_ADMIN = True
 
 # ===========================
 # کش برای سرعت بخشیدن
@@ -223,7 +229,7 @@ def http_get_json(url: str, timeout: int = 8) -> dict:
         logger.warning(f"HTTP GET failed for {url}: {e}")
         return {}
 
-def http_post_json(url: str, payload: dict, timeout: int = 60) -> dict:
+def http_post_json(url: str, payload: dict, timeout: int = 90) -> dict:
     try:
         data = json.dumps(payload).encode()
         req = urllib.request.Request(
@@ -462,6 +468,31 @@ def get_db_stats() -> dict:
         return {"total": total, "open": open_count, "tp3": tp3, "sl": sl}
 
 init_db()
+
+# ===========================
+# وضعیت ارسال سیگنال (ذخیره در فایل state)
+# ===========================
+SIGNAL_SETTINGS_FILE = os.path.join(DATA_DIR, "signal_settings.json")
+
+def load_signal_settings():
+    global SEND_TO_CHANNEL, SEND_TO_ADMIN
+    try:
+        if os.path.exists(SIGNAL_SETTINGS_FILE):
+            with open(SIGNAL_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                SEND_TO_CHANNEL = data.get("send_to_channel", True)
+                SEND_TO_ADMIN = data.get("send_to_admin", True)
+    except Exception as e:
+        logger.warning(f"Error loading signal settings: {e}")
+
+def save_signal_settings():
+    try:
+        with open(SIGNAL_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"send_to_channel": SEND_TO_CHANNEL, "send_to_admin": SEND_TO_ADMIN}, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Error saving signal settings: {e}")
+
+load_signal_settings()
 
 # ===========================
 # کش قیمت (اسپات)
@@ -745,7 +776,7 @@ def build_risk_plan(direction: str, entry: float, atr: float, account_balance_us
     return RiskPlan(direction, entry, stop_loss, targets, leverage, position_size_usdt, risk_reward, True, "ok")
 
 # ===========================
-# تحلیل کامل ارز
+# تحلیل کامل ارز و محاسبه ضریب اطمینان
 # ===========================
 async def analyze_coin_full_status(code: str) -> str:
     cache_key = f"{code}_{int(time.time() / 60)}"
@@ -835,7 +866,9 @@ async def analyze_coin_full_status(code: str) -> str:
 
         fg_text = get_fg_text()
 
+        # محاسبه امتیاز و ضریب اطمینان
         score = 0
+        max_score = 6
         if ind.trend_up or ind.trend_down:
             score += 1
         if ind.rsi_in_zone:
@@ -848,8 +881,19 @@ async def analyze_coin_full_status(code: str) -> str:
             score += 1
         if funding is not None and abs(funding) < 0.0005:
             score += 1
+        # OI به عنوان امتیاز اضافی (اختیاری)
         if oi is not None and oi > 0:
-            score += 1
+            score += 0.5  # نیم امتیاز برای OI مثبت
+
+        confidence = min(100, int((score / max_score) * 100))
+        if confidence >= 80:
+            confidence_text = "بسیار بالا 🌟"
+        elif confidence >= 60:
+            confidence_text = "بالا 🟢"
+        elif confidence >= 40:
+            confidence_text = "متوسط 🟡"
+        else:
+            confidence_text = "پایین 🔴"
 
         if score >= 5:
             signal_strength = "بسیار قوی 🌟"
@@ -920,6 +964,7 @@ async def analyze_coin_full_status(code: str) -> str:
             f"   • روند کلی: {trend_fa}\n"
             f"   • رژیم بازار: {regime} (ADX: {safe_format_float(ind.adx, '.1f')})\n"
             f"   • قدرت سیگنال: {signal_strength}\n"
+            f"   • ضریب اطمینان: `{confidence}%` ({confidence_text})\n"
             f"   • وضعیت Swap: {swap_status}\n"
             f"   • شاخص ترس و طمع: `{fg_text}`\n"
             f"{'────────────────────'}\n"
@@ -967,6 +1012,104 @@ async def analyze_coin_full_status(code: str) -> str:
     except Exception as e:
         logger.error(f"Error analyzing {code}: {e}")
         return f"❌ خطا در تحلیل **{code}**: {safe_str(e)}"
+
+# ===========================
+# قالب پیام سیگنال جدید
+# ===========================
+def get_signal_strength_and_confidence(ind: IndicatorSnapshot, funding: Optional[float], oi: Optional[float]) -> tuple[str, str, int]:
+    """محاسبه قدرت سیگنال، ضریب اطمینان و امتیاز"""
+    score = 0
+    max_score = 6
+    if ind.trend_up or ind.trend_down:
+        score += 1
+    if ind.rsi_in_zone:
+        score += 1
+    if ind.macd_cross_up or ind.macd_cross_down:
+        score += 1
+    if ind.volume_ratio > 2.0:
+        score += 1
+    if ind.adx > 30:
+        score += 1
+    if funding is not None and abs(funding) < 0.0005:
+        score += 1
+    if oi is not None and oi > 0:
+        score += 0.5
+
+    confidence = min(100, int((score / max_score) * 100))
+    if confidence >= 80:
+        strength = "بسیار قوی 🌟"
+        conf_text = f"{confidence}% (بسیار بالا 🌟)"
+    elif confidence >= 60:
+        strength = "قوی 🟢"
+        conf_text = f"{confidence}% (بالا 🟢)"
+    elif confidence >= 40:
+        strength = "متوسط 🟡"
+        conf_text = f"{confidence}% (متوسط 🟡)"
+    else:
+        strength = "ضعیف 🔴"
+        conf_text = f"{confidence}% (پایین 🔴)"
+    return strength, conf_text, score
+
+def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type: str, ai_status: str, ai_text: str, ind: IndicatorSnapshot, funding: Optional[float], oi: Optional[float], rate: float) -> str:
+    """قالب‌بندی پیام سیگنال با اطلاعات کامل"""
+    setup_label = "تعقیب روند" if setup_type == "trend" else "برگشت از لبه رنج"
+    dir_fa = "لانگ 🟢" if direction == "long" else "شورت 🔴"
+    
+    # قدرت سیگنال و ضریب اطمینان
+    strength, confidence_text, score = get_signal_strength_and_confidence(ind, funding, oi)
+    
+    # قیمت ورود به تومان
+    entry_toman = plan.entry * rate
+    
+    # تارگت‌ها به صورت جداگانه
+    targets = plan.targets
+    targets_lines = []
+    for i, t in enumerate(targets, 1):
+        t_toman = t * rate
+        targets_lines.append(f"   • TP{i}: `${fmt_usd(t)}` USDT  |  {fmt_toman(t, rate)}")
+    
+    # حد ضرر به تومان
+    sl_toman = plan.stop_loss * rate
+    
+    # وضعیت AI
+    if ai_status == "confirmed":
+        ai_line = f"✅ تأیید\n{ai_text}"
+    elif ai_status == "rejected":
+        ai_line = f"⚠️ عدم تأیید (فقط اطلاعاتی)\n{ai_text}"
+    else:
+        ai_line = "⏳ در دسترس نبود (timeout)"
+
+    # فاندینگ و OI
+    funding_text = safe_format_percent(funding)
+    oi_text = f"{safe_float(oi):,.0f}" if oi is not None else "نامشخص"
+
+    text = (
+        f"🚨 **سیگنال جدید فیوچرز** — #{code}\n"
+        f"📊 **جهت:** {dir_fa} | **استراتژی:** {setup_label}\n"
+        f"📈 **قدرت سیگنال:** {strength}\n"
+        f"🎯 **ضریب اطمینان:** {confidence_text}\n\n"
+        f"💰 **قیمت ورود:**\n"
+        f"   • دلاری: `{fmt_usd(plan.entry)}` USDT\n"
+        f"   • تومانی: `{fmt_toman(plan.entry, rate)}`\n\n"
+        f"🎯 **سطح‌های هدف:**\n"
+        + "\n".join(targets_lines) + "\n\n"
+        f"🛑 **حد ضرر:**\n"
+        f"   • دلاری: `{fmt_usd(plan.stop_loss)}` USDT\n"
+        f"   • تومانی: `{fmt_toman(plan.stop_loss, rate)}`\n\n"
+        f"⚙️ **مدیریت ریسک:**\n"
+        f"   • اهرم: `{plan.leverage}x`\n"
+        f"   • نسبت ریسک به ریوارد: `1:{plan.risk_reward:.2f}`\n\n"
+        f"📊 **داده‌های تکمیلی:**\n"
+        f"   • RSI: `{ind.rsi:.1f}`\n"
+        f"   • ADX: `{ind.adx:.1f}`\n"
+        f"   • حجم معاملات: `{ind.volume_ratio:.2f}x` نسبت به میانگین\n"
+        f"   • فاندینگ‌ریت: `{funding_text}`\n"
+        f"   • Open Interest: `{oi_text}`\n"
+        f"   • شاخص ترس و طمع: `{get_fg_text()}`\n\n"
+        f"📅 **زمان:** `{shamsi_now()}`\n"
+        f"🤖 **تأیید هوش مصنوعی:** {ai_line}"
+    )
+    return text
 
 # ===========================
 # پنل مدیریت کامل
@@ -1045,19 +1188,19 @@ def get_admin_stats_text() -> str:
         f"   • فیلتر حجم: `{VOLUME_MIN_RATIO}x`\n"
         f"   • کول‌داون: `{SIGNAL_REOPEN_COOLDOWN_SECONDS//60} دقیقه`\n"
         f"   • پوزیشن‌های همزمان: `{MAX_CONCURRENT_POSITIONS}`\n"
+        f"   • ارسال به کانال: {'✅ فعال' if SEND_TO_CHANNEL else '❌ غیرفعال'}\n"
+        f"   • ارسال به ربات: {'✅ فعال' if SEND_TO_ADMIN else '❌ غیرفعال'}\n"
     )
     return text
 
 # ===========================
-# تست کامل سیستم (رفع خطای parse_mode)
+# تست کامل سیستم
 # ===========================
 def run_system_test() -> str:
-    """اجرای تست کامل سیستم با مدیریت خطا و بدون استفاده از Markdown"""
     result = []
     result.append("🧪 گزارش تست کامل سیستم")
     result.append("=" * 40)
     
-    # ۱. اطلاعات ربات
     result.append("\n🤖 اطلاعات ربات:")
     result.append(f"   • نسخه: {VERSION}")
     result.append(f"   • زمان ساخت: {BUILD_TIME}")
@@ -1068,7 +1211,6 @@ def run_system_test() -> str:
     minutes = (uptime % 3600) // 60
     result.append(f"   • آپتایم: {days} روز {hours} ساعت {minutes} دقیقه")
     
-    # ۲. متغیرهای محیطی
     result.append("\n🔑 متغیرهای محیطی:")
     result.append(f"   • BOT_TOKEN: {'✅ تنظیم شده' if BOT_TOKEN else '❌ تنظیم نشده'}")
     result.append(f"   • ADMIN_USER_IDS: {'✅ تنظیم شده' if ADMIN_USER_IDS else '❌ تنظیم نشده'}")
@@ -1076,7 +1218,6 @@ def run_system_test() -> str:
     result.append(f"   • GEMINI_API_KEY: {'✅ تنظیم شده' if GEMINI_API_KEY else '❌ تنظیم نشده'}")
     result.append(f"   • DB_PATH: {DB_PATH}")
     
-    # ۳. وضعیت دیتابیس
     try:
         db = get_db_stats()
         result.append(f"\n💾 دیتابیس: ✅ متصل")
@@ -1085,7 +1226,6 @@ def run_system_test() -> str:
     except Exception as e:
         result.append(f"\n💾 دیتابیس: ❌ خطا: {e}")
     
-    # ۴. وضعیت صرافی‌ها (اسپات)
     result.append("\n🏛 صرافی‌های اسپات:")
     for name, data in cache.exchange_status.items():
         if data["online"]:
@@ -1093,7 +1233,6 @@ def run_system_test() -> str:
         else:
             result.append(f"   • {name}: 🔴 آفلاین")
     
-    # ۵. تست دریافت قیمت فیوچرز
     result.append("\n📊 تست داده‌های فیوچرز:")
     for code in ["BTC", "ETH"]:
         data = get_futures_data(code)
@@ -1110,31 +1249,28 @@ def run_system_test() -> str:
         else:
             result.append(f"   • {code}: ❌ قیمت دریافت نشد")
     
-    # ۶. شاخص ترس و طمع
     fg = get_fear_greed_index()
     if fg is not None:
         result.append(f"\n📈 شاخص ترس و طمع: ✅ دریافت شد ({fg})")
     else:
         result.append(f"\n📈 شاخص ترس و طمع: ❌ دریافت نشد")
     
-    # ۷. نرخ تومان
     rate = fetch_irt_rate_sync()
     if rate and rate > 0:
         result.append(f"\n🇮🇷 نرخ تتر (Wallex): ✅ دریافت شد ({rate:,.0f} تومان)")
     else:
         result.append(f"\n🇮🇷 نرخ تتر (Wallex): ❌ دریافت نشد")
     
-    # ۸. هوش مصنوعی (با مدیریت Timeout)
     result.append(f"\n🤖 هوش مصنوعی (Gemma):")
     if not GEMINI_API_KEY:
         result.append("   ❌ کلید API تنظیم نشده است")
     else:
-        result.append("   ⏳ در حال تست (حداکثر ۶۰ ثانیه)...")
+        result.append("   ⏳ در حال تست (حداکثر ۹۰ ثانیه)...")
         try:
             prompt = "Just say OK"
             payload = {"contents": [{"parts": [{"text": prompt}]}]}
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-            data = http_post_json(url, payload, timeout=60)
+            data = http_post_json(url, payload, timeout=90)
             if data.get("candidates"):
                 result.append("   ✅ مدل فعال است و پاسخ می‌دهد")
             else:
@@ -1142,14 +1278,12 @@ def run_system_test() -> str:
         except Exception as e:
             result.append(f"   ⏳ زمان‌بر بود (timeout) - سایر بخش‌ها OK هستند")
     
-    # ۹. کانال تلگرام
     result.append(f"\n📢 کانال تلگرام:")
     if CHANNEL_ID:
         result.append(f"   ✅ شناسه کانال تنظیم شده: {CHANNEL_ID}")
     else:
         result.append(f"   ❌ شناسه کانال تنظیم نشده است")
     
-    # ۱۰. شرایط سیگنال برای BTC (آخرین)
     result.append("\n📊 شرایط سیگنال برای BTC:")
     try:
         import asyncio
@@ -1241,9 +1375,20 @@ def kb_admin_panel():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📈 آمار دقیق سیگنال‌ها و عملکرد", callback_data="admin_signal_stats")],
         [InlineKeyboardButton("👥 آمار کاربران و وضعیت سیستم", callback_data="admin_system_stats")],
+        [InlineKeyboardButton("📤 تنظیمات ارسال سیگنال", callback_data="admin_signal_settings")],
         [InlineKeyboardButton("🧪 تست کامل سیستم", callback_data="admin_system_test")],
         [InlineKeyboardButton("🗑 صفر کردن تمام آمار سیگنال‌ها", callback_data="reset_stats_confirm")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")]
+    ])
+
+def kb_signal_settings():
+    """کیبورد تنظیمات ارسال سیگنال"""
+    channel_status = "✅ فعال" if SEND_TO_CHANNEL else "❌ غیرفعال"
+    admin_status = "✅ فعال" if SEND_TO_ADMIN else "❌ غیرفعال"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"📢 ارسال به کانال: {channel_status}", callback_data="toggle_channel")],
+        [InlineKeyboardButton(f"📨 ارسال به ربات: {admin_status}", callback_data="toggle_admin")],
+        [InlineKeyboardButton("🔙 بازگشت به پنل مدیریت", callback_data="admin_panel")]
     ])
 
 def kb_back_admin():
@@ -1313,6 +1458,7 @@ async def admin_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
 # Callback Handler
 # ===========================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global SEND_TO_CHANNEL, SEND_TO_ADMIN
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -1398,6 +1544,39 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             ADMIN_PANEL_HEADER,
             reply_markup=kb_admin_panel(),
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "admin_signal_settings":
+        if not is_adm: return
+        await query.edit_message_text(
+            "📤 **تنظیمات ارسال سیگنال**\n\n"
+            "در این بخش می‌توانید ارسال سیگنال‌ها را فعال یا غیرفعال کنید.\n"
+            "تغییرات به‌صورت خودکار ذخیره می‌شوند.",
+            reply_markup=kb_signal_settings(),
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "toggle_channel":
+        if not is_adm: return
+        SEND_TO_CHANNEL = not SEND_TO_CHANNEL
+        save_signal_settings()
+        await query.edit_message_text(
+            f"📢 ارسال به کانال: {'✅ فعال' if SEND_TO_CHANNEL else '❌ غیرفعال'}",
+            reply_markup=kb_signal_settings(),
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "toggle_admin":
+        if not is_adm: return
+        SEND_TO_ADMIN = not SEND_TO_ADMIN
+        save_signal_settings()
+        await query.edit_message_text(
+            f"📨 ارسال به ربات: {'✅ فعال' if SEND_TO_ADMIN else '❌ غیرفعال'}",
+            reply_markup=kb_signal_settings(),
             parse_mode="Markdown"
         )
         return
@@ -1492,8 +1671,8 @@ async def periodic_scan(app: Application):
                 try:
                     signal_id, reason, data = await evaluate_coin(code)
                     if signal_id and data:
-                        plan, setup_type, ai_status, ai_text, direction = data
-                        await send_signal(app, code, signal_id, direction, plan, setup_type, ai_status, ai_text)
+                        plan, setup_type, ai_status, ai_text, direction, ind, funding, oi, rate = data
+                        await send_signal(app, code, signal_id, direction, plan, setup_type, ai_status, ai_text, ind, funding, oi, rate)
                 except Exception as e:
                     logger.exception(f"Error scanning {code}: {e}")
             logger.info("✅ اسکن دوره‌ای فیوچرز تمام شد")
@@ -1549,44 +1728,30 @@ async def monitor_open_signals(app: Application):
             await asyncio.sleep(60)
 
 # ===========================
-# ارسال سیگنال
+# ارسال سیگنال (با در نظر گرفتن تنظیمات)
 # ===========================
-def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type: str, ai_status: str, ai_text: str) -> str:
-    setup_label = "تعقیب روند" if setup_type == "trend" else "برگشت از لبه رنج"
-    dir_fa = "لانگ 🟢" if direction == "long" else "شورت 🔴"
-    text = (
-        f"🚨 **سیگنال جدید فیوچرز** — {code}\n"
-        f"جهت: {dir_fa} | نوع: {setup_label}\n"
-        f"ورود: {plan.entry:.6f}\n"
-        f"حد ضرر: {plan.stop_loss:.6f}\n"
-        f"تارگت‌ها: {', '.join(f'{t:.6f}' for t in plan.targets)}\n"
-        f"اهرم: {plan.leverage}x | RR: 1:{plan.risk_reward:.2f}\n"
-        f"{shamsi_now()}\n"
-    )
-    if ai_status == "confirmed":
-        text += f"\n🤖 **AI:** ✅ تأیید\n{ai_text}"
-    elif ai_status == "rejected":
-        text += f"\n🤖 **AI:** ⚠️ عدم تأیید (فقط اطلاعاتی)\n{ai_text}"
-    else:
-        text += f"\n🤖 **AI:** در دسترس نبود"
-    return text
-
-async def send_signal(app: Application, code: str, signal_id: int, direction: str, plan: RiskPlan, setup_type: str, ai_status: str, ai_text: str):
-    text = format_signal_message(code, direction, plan, setup_type, ai_status, ai_text)
+async def send_signal(app: Application, code: str, signal_id: int, direction: str, plan: RiskPlan, setup_type: str, ai_status: str, ai_text: str, ind: IndicatorSnapshot, funding: Optional[float], oi: Optional[float], rate: float):
+    """ارسال سیگنال با در نظر گرفتن تنظیمات SEND_TO_CHANNEL و SEND_TO_ADMIN"""
+    text = format_signal_message(code, direction, plan, setup_type, ai_status, ai_text, ind, funding, oi, rate)
     thread = get_channel_thread(code)
     reply_to_id = thread["message_id"] if thread else None
-    if CHANNEL_ID:
+    
+    # ارسال به کانال
+    if SEND_TO_CHANNEL and CHANNEL_ID:
         try:
             msg = await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=reply_to_id)
             set_channel_thread(code, signal_id, msg.message_id, hashlib.sha256(text.encode()).hexdigest())
             set_channel_message_id(signal_id, msg.message_id)
         except Exception as e:
             logger.warning(f"Send to channel failed: {e}")
-    for admin_id in ADMIN_USER_IDS:
-        try:
-            await app.bot.send_message(admin_id, text, parse_mode="Markdown")
-        except Exception as e:
-            logger.warning(f"Send to admin {admin_id} failed: {e}")
+    
+    # ارسال به ادمین‌ها
+    if SEND_TO_ADMIN:
+        for admin_id in ADMIN_USER_IDS:
+            try:
+                await app.bot.send_message(admin_id, text, parse_mode="Markdown")
+            except Exception as e:
+                logger.warning(f"Send to admin {admin_id} failed: {e}")
 
 # ===========================
 # ارزیابی ارز (فیوچرز)
@@ -1657,7 +1822,11 @@ async def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
         ai_status, ai_text = confirm_signal_with_ai(None, context)
 
     signal_id = record_signal(code, direction, plan.entry, plan.stop_loss, plan.targets, plan.leverage, plan.risk_reward, ai_status == "confirmed", ai_text)
-    return signal_id, "سیگنال صادر شد", (plan, setup_type, ai_status, ai_text, direction)
+    
+    # بازگرداندن داده‌های اضافی برای قالب‌بندی
+    rate = fetch_irt_rate_sync()
+    extra_data = (plan, setup_type, ai_status, ai_text, direction, ind_main, funding_rate, oi, rate)
+    return signal_id, "سیگنال صادر شد", extra_data
 
 # ===========================
 # توابع کمکی
