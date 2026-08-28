@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۳
-اضافه شدن شاخص ترس و طمع به تحلیل ارزها، کشیده‌تر کردن عنوان لیست قیمت
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۴
+استفاده از مدل Gemma (فقط متن) با Timeout 45 ثانیه
 """
 
 import asyncio
@@ -52,7 +52,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.2.3"
+VERSION = "3.2.4"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -130,8 +130,8 @@ IRT_RATE_TTL_SECONDS = 60
 SIGNAL_SCAN_INTERVAL_SECONDS = 15 * 60
 SIGNAL_REOPEN_COOLDOWN_SECONDS = 45 * 60
 CHANNEL_MONITOR_INTERVAL_SECONDS = 5 * 60
-AI_TIMEOUT_SECONDS = 12
-GEMINI_MODEL = "gemini-2.0-flash"
+AI_TIMEOUT_SECONDS = 45
+GEMINI_MODEL = "gemma-4-26b-a4b-it"
 
 # ===========================
 # کش برای سرعت بخشیدن
@@ -223,7 +223,7 @@ def http_get_json(url: str, timeout: int = 8) -> dict:
         logger.warning(f"HTTP GET failed for {url}: {e}")
         return {}
 
-def http_post_json(url: str, payload: dict, timeout: int = 12) -> dict:
+def http_post_json(url: str, payload: dict, timeout: int = 45) -> dict:
     try:
         data = json.dumps(payload).encode()
         req = urllib.request.Request(
@@ -340,7 +340,6 @@ def get_fg_status() -> str:
     return "🔴 در دسترس نیست"
 
 def get_fg_text() -> str:
-    """دریافت متن تفسیر شاخص ترس و طمع"""
     fg = get_fear_greed_index()
     if fg is None:
         return "نامشخص"
@@ -834,7 +833,6 @@ async def analyze_coin_full_status(code: str) -> str:
 
         stoch_rsi = StochRSIIndicator(df_1h["close"], window=14).stochrsi().iloc[-1] * 100 if len(df_1h) > 20 else 50
 
-        # دریافت شاخص ترس و طمع
         fg_text = get_fg_text()
 
         score = 0
@@ -1308,6 +1306,37 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 # ===========================
+# هوش مصنوعی Gemma (فقط متن)
+# ===========================
+AI_PROMPT_TEMPLATE = (
+    "جهت: {direction} | {ticker} | RSI:{rsi} | ADX:{adx} | حجم:{volume_ratio}x | فاندینگ:{funding_rate} | OI:{oi_change}\n"
+    "فقط با کلمه CONFIRM یا REJECT پاسخ بده."
+)
+
+def confirm_signal_with_ai(chart_png: Optional[bytes], context: dict) -> tuple[str, str]:
+    """ارسال فقط متن به AI (بدون تصویر)"""
+    if not GEMINI_API_KEY:
+        return "unavailable", "GEMINI_API_KEY تنظیم نشده"
+    
+    prompt = AI_PROMPT_TEMPLATE.format(**context)
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    data = http_post_json(url, payload, timeout=AI_TIMEOUT_SECONDS)
+    
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        status = "confirmed" if text.upper().startswith("CONFIRM") else "rejected"
+        return status, text
+    except (KeyError, ValueError, TypeError):
+        return "unavailable", "پاسخ نامعتبر از AI"
+
+# ===========================
 # توابع اسکن و مانیتورینگ
 # ===========================
 async def periodic_scan(app: Application):
@@ -1373,42 +1402,6 @@ async def monitor_open_signals(app: Application):
         except Exception as e:
             logger.error(f"Monitor error: {e}")
             await asyncio.sleep(60)
-
-# ===========================
-# هوش مصنوعی Gemini (با urllib)
-# ===========================
-AI_PROMPT_TEMPLATE = (
-    "شما یک تحلیل‌گر ریسک‌گریز هستید. فقط اگر روند، حجم، فاندینگ و Open Interest همگی با سیگنال زیر هم‌جهت باشند با کلمه CONFIRM پاسخ دهید، در غیر این صورت REJECT.\n\n"
-    "جهت: {direction}\nنماد: {ticker}\nورود: {entry}\nحد ضرر: {stop_loss}\nتارگت‌ها: {targets}\n"
-    "RSI: {rsi} | ADX: {adx} | حجم: {volume_ratio}\nفاندینگ: {funding_rate} | OI: {oi_change}\n"
-)
-
-def confirm_signal_with_ai(chart_png: Optional[bytes], context: dict) -> tuple[str, str]:
-    if not GEMINI_API_KEY:
-        return "unavailable", "GEMINI_API_KEY تنظیم نشده"
-    if chart_png is None:
-        return "unavailable", "چارت در دسترس نیست"
-    
-    prompt = AI_PROMPT_TEMPLATE.format(**context)
-    image_b64 = base64.b64encode(chart_png).decode("ascii")
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": "image/png", "data": image_b64}}
-            ]
-        }]
-    }
-    
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    data = http_post_json(url, payload, timeout=AI_TIMEOUT_SECONDS)
-    
-    try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        status = "confirmed" if text.upper().startswith("CONFIRM") else "rejected"
-        return status, text
-    except (KeyError, ValueError, TypeError):
-        return "unavailable", "پاسخ نامعتبر از AI"
 
 # ===========================
 # ارسال سیگنال
@@ -1502,17 +1495,22 @@ async def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
     if last_closed and time.time() - last_closed < SIGNAL_REOPEN_COOLDOWN_SECONDS:
         return None, "در کول‌داون بعد از آخرین بسته‌شدن", None
 
-    chart_png = await asyncio.to_thread(render_candles_png, df_main, f"{code} ({MAIN_TF})") if MPLFINANCE_AVAILABLE else None
+    # AI (فقط متن، بدون تصویر)
     ai_status, ai_text = "unavailable", ""
-    if GEMINI_API_KEY and chart_png is not None:
+    if GEMINI_API_KEY:
         context = {
             "direction": "لانگ" if direction == "long" else "شورت",
-            "ticker": code, "entry": f"{plan.entry:.6f}", "stop_loss": f"{plan.stop_loss:.6f}",
+            "ticker": code,
+            "entry": f"{plan.entry:.6f}",
+            "stop_loss": f"{plan.stop_loss:.6f}",
             "targets": ", ".join(f"{t:.6f}" for t in plan.targets),
-            "rsi": f"{ind_main.rsi:.1f}", "adx": f"{ind_main.adx:.1f}", "volume_ratio": f"{ind_main.volume_ratio:.2f}",
-            "funding_rate": f"{funding_rate or 0:.4%}", "oi_change": "نامشخص",
+            "rsi": f"{ind_main.rsi:.1f}",
+            "adx": f"{ind_main.adx:.1f}",
+            "volume_ratio": f"{ind_main.volume_ratio:.2f}",
+            "funding_rate": f"{funding_rate or 0:.4%}",
+            "oi_change": "نامشخص",
         }
-        ai_status, ai_text = confirm_signal_with_ai(chart_png, context)
+        ai_status, ai_text = confirm_signal_with_ai(None, context)
 
     signal_id = record_signal(code, direction, plan.entry, plan.stop_loss, plan.targets, plan.leverage, plan.risk_reward, ai_status == "confirmed", ai_text)
     return signal_id, "سیگنال صادر شد", (plan, setup_type, ai_status, ai_text, direction)
@@ -1521,17 +1519,8 @@ async def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
 # توابع کمکی
 # ===========================
 def render_candles_png(df: pd.DataFrame, title: str) -> Optional[bytes]:
-    if not MPLFINANCE_AVAILABLE:
-        return None
-    try:
-        plot_df = df.set_index("timestamp")[["open", "high", "low", "close", "volume"]].tail(120)
-        buf = io.BytesIO()
-        mpf.plot(plot_df, type="candle", style="charles", volume=True, title=title, savefig=dict(fname=buf, dpi=110, bbox_inches="tight"))
-        buf.seek(0)
-        return buf.read()
-    except Exception as e:
-        logger.warning(f"Chart rendering failed: {e}")
-        return None
+    # غیرفعال شده (چون از تصویر استفاده نمی‌کنیم)
+    return None
 
 def stats_summary() -> dict:
     with _conn() as c:
