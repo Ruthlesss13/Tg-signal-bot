@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۵.۱
-- جایگزینی AI با Grok (xAI)
-- بهبود پرامپت
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۶.۰
+هوش مصنوعی: OpenRouter با دو مدل رایگان (Mixtral 8x7B + Llama 3 8B)
 """
 
 import asyncio
@@ -53,7 +52,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.5.1"
+VERSION = "3.6.0"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -79,7 +78,7 @@ ADMIN_USER_IDS = {
     int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()
 }
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
-GROK_API_KEY = os.getenv("GROK_API_KEY", "")  # کلید API Grok
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 DB_PATH = os.getenv("DB_PATH", "cryptobot.sqlite3")
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -135,8 +134,16 @@ SIGNAL_REOPEN_COOLDOWN_SECONDS = 45 * 60
 REVERSE_SIGNAL_COOLDOWN_SECONDS = 5 * 60
 CHANNEL_MONITOR_INTERVAL_SECONDS = 5 * 60
 AI_TIMEOUT_SECONDS = 30
-GROK_MODEL = "grok-1"  # یا grok-2-beta
 CROSS_LOOKBACK = 4
+
+# ===========================
+# مدل‌های OpenRouter (اصلی + Fallback)
+# ===========================
+OPENROUTER_MODELS = [
+    "mistralai/mixtral-8x7b-instruct:free",
+    "meta-llama/llama-3-8b-instruct:free",
+]
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # ===========================
 # تنظیمات ارسال سیگنال (پیش‌فرض فعال)
@@ -234,8 +241,8 @@ def http_get_json(url: str, timeout: int = 8) -> dict:
         logger.warning(f"HTTP GET failed for {url}: {e}")
         return {}
 
-def http_post_json_grok(url: str, payload: dict, timeout: int = 30) -> dict:
-    """ارسال درخواست به Grok API (xAI)"""
+def http_post_json_openrouter(url: str, payload: dict, timeout: int = 30) -> dict:
+    """ارسال درخواست به OpenRouter API"""
     try:
         data = json.dumps(payload).encode()
         req = urllib.request.Request(
@@ -243,7 +250,9 @@ def http_post_json_grok(url: str, payload: dict, timeout: int = 30) -> dict:
             data=data,
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {GROK_API_KEY}"
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "HTTP-Referer": "https://railway.app",
+                "X-Title": "Crypto Signal Bot",
             },
             method="POST"
         )
@@ -491,15 +500,18 @@ def load_signal_settings():
                 data = json.load(f)
                 SEND_TO_CHANNEL = data.get("send_to_channel", True)
                 SEND_TO_ADMIN = data.get("send_to_admin", True)
+                logger.info("Signal settings loaded successfully.")
     except Exception as e:
         logger.warning(f"Error loading signal settings: {e}")
 
 def save_signal_settings():
     try:
+        os.makedirs(os.path.dirname(SIGNAL_SETTINGS_FILE), exist_ok=True)
         with open(SIGNAL_SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({"send_to_channel": SEND_TO_CHANNEL, "send_to_admin": SEND_TO_ADMIN}, f, indent=2)
+        logger.info("Signal settings saved successfully.")
     except Exception as e:
-        logger.warning(f"Error saving signal settings: {e}")
+        logger.error(f"Error saving signal settings: {e}")
 
 load_signal_settings()
 
@@ -1127,7 +1139,7 @@ def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type:
         f"{rtl}   Open Interest: `{oi_text}`\n"
         f"{rtl}   شاخص ترس و طمع: `{get_fg_text()}`\n\n"
         f"{rtl}📅 **زمان:** `{shamsi_now()}`\n"
-        f"{rtl}🤖 **تأیید هوش مصنوعی (Grok):** {ai_line}"
+        f"{rtl}🤖 **تأیید هوش مصنوعی (OpenRouter):** {ai_line}"
     )
     return text
 
@@ -1192,7 +1204,7 @@ def get_admin_stats_text() -> str:
         f"   • وضعیت صرافی‌ها:\n{get_exchange_status_text()}\n"
         f"   • نرخ تتر (Wallex): {get_irt_rate_status()}\n"
         f"   • شاخص ترس/طمع: {get_fg_status()}\n"
-        f"   • هوش مصنوعی (Grok): {'✅ فعال' if GROK_API_KEY else '❌ غیرفعال'}\n"
+        f"   • هوش مصنوعی (OpenRouter): {'✅ فعال' if OPENROUTER_API_KEY else '❌ غیرفعال'}\n"
         f"{'────────────────────'}\n"
         f"💾 **دیتابیس:**\n"
         f"   • مسیر: `{DB_PATH}`\n"
@@ -1214,9 +1226,10 @@ def get_admin_stats_text() -> str:
     return text
 
 # ===========================
-# تست کامل سیستم
+# تست کامل سیستم (رفع نهایی event loop)
 # ===========================
 def run_system_test() -> str:
+    """اجرای تست کامل سیستم بدون خطای event loop"""
     result = []
     result.append("🧪 گزارش تست کامل سیستم")
     result.append("=" * 40)
@@ -1235,7 +1248,7 @@ def run_system_test() -> str:
     result.append(f"   • BOT_TOKEN: {'✅ تنظیم شده' if BOT_TOKEN else '❌ تنظیم نشده'}")
     result.append(f"   • ADMIN_USER_IDS: {'✅ تنظیم شده' if ADMIN_USER_IDS else '❌ تنظیم نشده'}")
     result.append(f"   • CHANNEL_ID: {'✅ تنظیم شده' if CHANNEL_ID else '❌ تنظیم نشده'}")
-    result.append(f"   • GROK_API_KEY: {'✅ تنظیم شده' if GROK_API_KEY else '❌ تنظیم نشده'}")
+    result.append(f"   • OPENROUTER_API_KEY: {'✅ تنظیم شده' if OPENROUTER_API_KEY else '❌ تنظیم نشده'}")
     result.append(f"   • DB_PATH: {DB_PATH}")
     
     try:
@@ -1246,6 +1259,7 @@ def run_system_test() -> str:
     except Exception as e:
         result.append(f"\n💾 دیتابیس: ❌ خطا: {e}")
     
+    # ===== وضعیت صرافی‌ها =====
     result.append("\n🏛 وضعیت صرافی‌ها:")
     try:
         for name, data in cache.exchange_status.items():
@@ -1256,6 +1270,7 @@ def run_system_test() -> str:
     except Exception as e:
         result.append(f"   ❌ خطا: {e}")
     
+    # ===== تست داده‌های فیوچرز =====
     result.append("\n📊 تست داده‌های فیوچرز:")
     for code in ["BTC", "ETH"]:
         data = get_futures_data(code)
@@ -1272,48 +1287,50 @@ def run_system_test() -> str:
         else:
             result.append(f"   • {code}: ❌ قیمت دریافت نشد")
     
+    # ===== شاخص ترس و طمع =====
     fg = get_fear_greed_index()
     if fg is not None:
         result.append(f"\n📈 شاخص ترس و طمع: ✅ دریافت شد ({fg})")
     else:
         result.append(f"\n📈 شاخص ترس و طمع: ❌ دریافت نشد")
     
+    # ===== نرخ تومان =====
     rate = fetch_irt_rate_sync()
     if rate and rate > 0:
         result.append(f"\n🇮🇷 نرخ تتر (Wallex): ✅ دریافت شد ({rate:,.0f} تومان)")
     else:
         result.append(f"\n🇮🇷 نرخ تتر (Wallex): ❌ دریافت نشد")
     
-    result.append(f"\n🤖 هوش مصنوعی (Grok):")
-    if not GROK_API_KEY:
+    # ===== هوش مصنوعی =====
+    result.append(f"\n🤖 هوش مصنوعی (OpenRouter):")
+    if not OPENROUTER_API_KEY:
         result.append("   ❌ کلید API تنظیم نشده است")
     else:
         result.append("   ⏳ در حال تست (حداکثر ۳۰ ثانیه)...")
+        model = OPENROUTER_MODELS[0]
         try:
             payload = {
+                "model": model,
                 "messages": [{"role": "user", "content": "Just say OK"}],
-                "model": GROK_MODEL,
-                "temperature": 0.1,
-                "max_tokens": 10,
+                "max_tokens": 5,
+                "temperature": 0,
             }
-            data = http_post_json_grok(
-                "https://api.x.ai/v1/chat/completions",
-                payload,
-                timeout=30
-            )
+            data = http_post_json_openrouter(OPENROUTER_URL, payload, timeout=30)
             if data.get("choices"):
-                result.append("   ✅ مدل فعال است و پاسخ می‌دهد")
+                result.append(f"   ✅ مدل فعال است ({model})")
             else:
                 result.append("   ⚠️ مدل پاسخ داد اما ساختار نامعتبر بود")
         except Exception as e:
             result.append(f"   ⏳ زمان‌بر بود (timeout) - سایر بخش‌ها OK هستند")
     
+    # ===== کانال تلگرام =====
     result.append(f"\n📢 کانال تلگرام:")
     if CHANNEL_ID:
         result.append(f"   ✅ شناسه کانال تنظیم شده: {CHANNEL_ID}")
     else:
         result.append(f"   ❌ شناسه کانال تنظیم نشده است")
     
+    # ===== بررسی شرایط سیگنال (بدون event loop) =====
     result.append("\n📊 شرایط سیگنال برای BTC:")
     try:
         btc_data = get_futures_data("BTC")
@@ -1760,7 +1777,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 # ===========================
-# هوش مصنوعی Grok (xAI)
+# هوش مصنوعی OpenRouter (با دو مدل و Fallback)
 # ===========================
 AI_PROMPT_TEMPLATE = (
     "You are a binary signal filter. Given this futures setup, reply with EXACTLY one word only:\n"
@@ -1771,40 +1788,46 @@ AI_PROMPT_TEMPLATE = (
 )
 
 def confirm_signal_with_ai(chart_png: Optional[bytes], context: dict) -> tuple[str, str]:
-    if not GROK_API_KEY:
-        return "unavailable", "GROK_API_KEY تنظیم نشده"
+    """تأیید سیگنال با OpenRouter (دو مدل رایگان با Fallback)"""
+    if not OPENROUTER_API_KEY:
+        return "unavailable", "OPENROUTER_API_KEY تنظیم نشده"
     
     prompt = AI_PROMPT_TEMPLATE.format(**context)
     
-    payload = {
-        "messages": [
-            {"role": "system", "content": "You are a binary signal filter. Reply with one word: CONFIRM or REJECT."},
-            {"role": "user", "content": prompt}
-        ],
-        "model": GROK_MODEL,
-        "temperature": 0.1,
-        "max_tokens": 16,
-    }
+    for model in OPENROUTER_MODELS:
+        try:
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You are a binary signal filter. Reply with one word: CONFIRM or REJECT."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 16,
+                "temperature": 0.1,
+            }
+            
+            data = http_post_json_openrouter(OPENROUTER_URL, payload, timeout=AI_TIMEOUT_SECONDS)
+            
+            if data.get("choices"):
+                text = data["choices"][0]["message"]["content"].strip()
+                upper = text.upper()
+                if "CONFIRM" in upper and "REJECT" not in upper:
+                    return "confirmed", "CONFIRM"
+                if "REJECT" in upper:
+                    return "rejected", "REJECT"
+                first = upper.split()[0] if upper else ""
+                if first.startswith("CONFIRM"):
+                    return "confirmed", "CONFIRM"
+                return "rejected", "REJECT"
+            else:
+                logger.warning(f"OpenRouter model {model} returned invalid response, trying next...")
+                continue
+                
+        except Exception as e:
+            logger.warning(f"OpenRouter model {model} failed: {e}, trying next...")
+            continue
     
-    data = http_post_json_grok(
-        "https://api.x.ai/v1/chat/completions",
-        payload,
-        timeout=AI_TIMEOUT_SECONDS
-    )
-    
-    try:
-        text = data["choices"][0]["message"]["content"].strip()
-        upper = text.upper()
-        if "CONFIRM" in upper and "REJECT" not in upper:
-            return "confirmed", "CONFIRM"
-        if "REJECT" in upper:
-            return "rejected", "REJECT"
-        first = upper.split()[0] if upper else ""
-        if first.startswith("CONFIRM"):
-            return "confirmed", "CONFIRM"
-        return "rejected", "REJECT"
-    except (KeyError, ValueError, TypeError, IndexError):
-        return "unavailable", "پاسخ نامعتبر از AI"
+    return "unavailable", "همه مدل‌های OpenRouter ناموفق بودند"
 
 # ===========================
 # توابع اسکن و مانیتورینگ
@@ -1983,7 +2006,7 @@ async def monitor_open_signals(app: Application):
             await asyncio.sleep(60)
 
 # ===========================
-# ارسال سیگنال
+# ارسال سیگنال (با در نظر گرفتن تنظیمات)
 # ===========================
 async def send_signal(app: Application, code: str, signal_id: int, direction: str, plan: RiskPlan, setup_type: str, ai_status: str, ai_text: str, ind: IndicatorSnapshot, funding: Optional[float], oi: Optional[float], rate: float):
     text = format_signal_message(code, direction, plan, setup_type, ai_status, ai_text, ind, funding, oi, rate)
@@ -2096,7 +2119,7 @@ async def evaluate_coin(
             return None, "در کول‌داون بعد از آخرین بسته‌شدن", None
 
     ai_status, ai_text = "unavailable", ""
-    if GROK_API_KEY:
+    if OPENROUTER_API_KEY:
         context = {
             "direction": "لانگ" if direction == "long" else "شورت",
             "ticker": code,
