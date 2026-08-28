@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۶
-رفع مشکل Timeout در تست سیستم
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۷
+رفع خطای parse_mode در تست سیستم، بهبود شرایط سیگنال
 """
 
 import asyncio
@@ -52,7 +52,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.2.6"
+VERSION = "3.2.7"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -93,11 +93,11 @@ COIN_CODES = [
     "TIA", "WIF", "FLOKI", "SEI", "RUNE"
 ]
 
-# تنظیمات فیوچرز
+# تنظیمات فیوچرز (نرم‌تر کردن شرایط)
 EMA_FAST = 50
 EMA_SLOW = 200
 RSI_PERIOD = 14
-RSI_MIN = 45
+RSI_MIN = 35   # کاهش از ۴۵ به ۳۵ برای سیگنال‌های بیشتر
 RSI_MAX = 65
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD = 14
@@ -105,7 +105,7 @@ VOLUME_MA_PERIOD = 20
 STRUCTURE_LOOKBACK = 20
 ADX_PERIOD = 14
 ADX_RANGE_THRESHOLD = 20
-VOLUME_MIN_RATIO = 1.5
+VOLUME_MIN_RATIO = 1.2   # کاهش از ۱.۵ به ۱.۲
 FUNDING_RATE_MAX_FOR_LONG = 0.0005
 NEWS_BLACKOUT_MINUTES = 30
 LOW_VOLUME_UTC_START_HOUR = 23
@@ -127,7 +127,7 @@ MAIN_TF = "1h"
 HIGHER_TF = "4h"
 PRICE_TTL_SECONDS = 30
 IRT_RATE_TTL_SECONDS = 60
-SIGNAL_SCAN_INTERVAL_SECONDS = 15 * 60
+SIGNAL_SCAN_INTERVAL_SECONDS = 10 * 60  # کاهش از ۱۵ به ۱۰ دقیقه
 SIGNAL_REOPEN_COOLDOWN_SECONDS = 45 * 60
 CHANNEL_MONITOR_INTERVAL_SECONDS = 5 * 60
 AI_TIMEOUT_SECONDS = 60
@@ -1049,44 +1049,44 @@ def get_admin_stats_text() -> str:
     return text
 
 # ===========================
-# تست کامل سیستم (رفع Timeout)
+# تست کامل سیستم (رفع خطای parse_mode)
 # ===========================
 def run_system_test() -> str:
-    """اجرای تست کامل سیستم با مدیریت Timeout"""
+    """اجرای تست کامل سیستم با مدیریت خطا و بدون استفاده از Markdown"""
     result = []
-    result.append("🧪 **گزارش تست کامل سیستم**")
+    result.append("🧪 گزارش تست کامل سیستم")
     result.append("=" * 40)
     
     # ۱. اطلاعات ربات
-    result.append("\n🤖 **اطلاعات ربات:**")
-    result.append(f"   • نسخه: `{VERSION}`")
-    result.append(f"   • زمان ساخت: `{BUILD_TIME}`")
-    result.append(f"   • زمان اجرا: `{shamsi_now()}`")
+    result.append("\n🤖 اطلاعات ربات:")
+    result.append(f"   • نسخه: {VERSION}")
+    result.append(f"   • زمان ساخت: {BUILD_TIME}")
+    result.append(f"   • زمان اجرا: {shamsi_now()}")
     uptime = int(time.time() - START_TIME)
     days = uptime // 86400
     hours = (uptime % 86400) // 3600
     minutes = (uptime % 3600) // 60
-    result.append(f"   • آپتایم: `{days} روز {hours} ساعت {minutes} دقیقه`")
+    result.append(f"   • آپتایم: {days} روز {hours} ساعت {minutes} دقیقه")
     
     # ۲. متغیرهای محیطی
-    result.append("\n🔑 **متغیرهای محیطی:**")
+    result.append("\n🔑 متغیرهای محیطی:")
     result.append(f"   • BOT_TOKEN: {'✅ تنظیم شده' if BOT_TOKEN else '❌ تنظیم نشده'}")
     result.append(f"   • ADMIN_USER_IDS: {'✅ تنظیم شده' if ADMIN_USER_IDS else '❌ تنظیم نشده'}")
     result.append(f"   • CHANNEL_ID: {'✅ تنظیم شده' if CHANNEL_ID else '❌ تنظیم نشده'}")
     result.append(f"   • GEMINI_API_KEY: {'✅ تنظیم شده' if GEMINI_API_KEY else '❌ تنظیم نشده'}")
-    result.append(f"   • DB_PATH: `{DB_PATH}`")
+    result.append(f"   • DB_PATH: {DB_PATH}")
     
     # ۳. وضعیت دیتابیس
     try:
         db = get_db_stats()
-        result.append(f"\n💾 **دیتابیس:** ✅ متصل")
-        result.append(f"   • تعداد سیگنال‌ها: `{db['total']}`")
-        result.append(f"   • سیگنال‌های باز: `{db['open']}`")
+        result.append(f"\n💾 دیتابیس: ✅ متصل")
+        result.append(f"   • تعداد سیگنال‌ها: {db['total']}")
+        result.append(f"   • سیگنال‌های باز: {db['open']}")
     except Exception as e:
-        result.append(f"\n💾 **دیتابیس:** ❌ خطا: {e}")
+        result.append(f"\n💾 دیتابیس: ❌ خطا: {e}")
     
     # ۴. وضعیت صرافی‌ها (اسپات)
-    result.append("\n🏛 **صرافی‌های اسپات:**")
+    result.append("\n🏛 صرافی‌های اسپات:")
     for name, data in cache.exchange_status.items():
         if data["online"]:
             result.append(f"   • {name}: ✅ آنلاین")
@@ -1094,7 +1094,7 @@ def run_system_test() -> str:
             result.append(f"   • {name}: 🔴 آفلاین")
     
     # ۵. تست دریافت قیمت فیوچرز
-    result.append("\n📊 **تست داده‌های فیوچرز:**")
+    result.append("\n📊 تست داده‌های فیوچرز:")
     for code in ["BTC", "ETH"]:
         data = get_futures_data(code)
         if data.get("last_price"):
@@ -1113,19 +1113,19 @@ def run_system_test() -> str:
     # ۶. شاخص ترس و طمع
     fg = get_fear_greed_index()
     if fg is not None:
-        result.append(f"\n📈 **شاخص ترس و طمع:** ✅ دریافت شد ({fg})")
+        result.append(f"\n📈 شاخص ترس و طمع: ✅ دریافت شد ({fg})")
     else:
-        result.append(f"\n📈 **شاخص ترس و طمع:** ❌ دریافت نشد")
+        result.append(f"\n📈 شاخص ترس و طمع: ❌ دریافت نشد")
     
     # ۷. نرخ تومان
     rate = fetch_irt_rate_sync()
     if rate and rate > 0:
-        result.append(f"\n🇮🇷 **نرخ تتر (Wallex):** ✅ دریافت شد ({rate:,.0f} تومان)")
+        result.append(f"\n🇮🇷 نرخ تتر (Wallex): ✅ دریافت شد ({rate:,.0f} تومان)")
     else:
-        result.append(f"\n🇮🇷 **نرخ تتر (Wallex):** ❌ دریافت نشد")
+        result.append(f"\n🇮🇷 نرخ تتر (Wallex): ❌ دریافت نشد")
     
     # ۸. هوش مصنوعی (با مدیریت Timeout)
-    result.append(f"\n🤖 **هوش مصنوعی (Gemma):**")
+    result.append(f"\n🤖 هوش مصنوعی (Gemma):")
     if not GEMINI_API_KEY:
         result.append("   ❌ کلید API تنظیم نشده است")
     else:
@@ -1143,14 +1143,41 @@ def run_system_test() -> str:
             result.append(f"   ⏳ زمان‌بر بود (timeout) - سایر بخش‌ها OK هستند")
     
     # ۹. کانال تلگرام
-    result.append(f"\n📢 **کانال تلگرام:**")
+    result.append(f"\n📢 کانال تلگرام:")
     if CHANNEL_ID:
-        result.append(f"   ✅ شناسه کانال تنظیم شده: `{CHANNEL_ID}`")
+        result.append(f"   ✅ شناسه کانال تنظیم شده: {CHANNEL_ID}")
     else:
         result.append(f"   ❌ شناسه کانال تنظیم نشده است")
     
+    # ۱۰. شرایط سیگنال برای BTC (آخرین)
+    result.append("\n📊 شرایط سیگنال برای BTC:")
+    try:
+        import asyncio
+        async def check_btc():
+            prices = await cache.update_prices()
+            btc_price = prices.get('BTC', 0)
+            df = await cache.get_ohlcv('BTC', '1h')
+            if df is not None and btc_price > 0:
+                ema200 = EMAIndicator(df['close'], window=200).ema_indicator().iloc[-1]
+                rsi_val = RSIIndicator(df['close'], window=14).rsi().iloc[-1]
+                result.append(f"   • قیمت: ${btc_price:.2f}")
+                result.append(f"   • EMA200: ${ema200:.2f}")
+                result.append(f"   • RSI: {rsi_val:.1f}")
+                condition = btc_price > ema200 and rsi_val < 32
+                result.append(f"   • شرط سیگنال (price > EMA200 and RSI < 32): {'✅ برقرار' if condition else '❌ برقرار نیست'}")
+                if not condition:
+                    if btc_price <= ema200:
+                        result.append(f"     ➡️ قیمت ({btc_price:.2f}) کمتر از EMA200 ({ema200:.2f}) است.")
+                    if rsi_val >= 32:
+                        result.append(f"     ➡️ RSI ({rsi_val:.1f}) بالاتر از ۳۲ است.")
+            else:
+                result.append("   ❌ داده‌های BTC در دسترس نیست")
+        asyncio.run(check_btc())
+    except Exception as e:
+        result.append(f"   ❌ خطا در بررسی شرایط: {e}")
+    
     result.append("\n" + "=" * 40)
-    result.append("✅ **تست سیستم با موفقیت انجام شد.**")
+    result.append("✅ تست سیستم با موفقیت انجام شد.")
     
     return "\n".join(result)
 
@@ -1399,9 +1426,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "admin_system_test":
         if not is_adm: return
-        await query.edit_message_text("⏳ در حال اجرای تست سیستم...", parse_mode="Markdown")
+        await query.edit_message_text("⏳ در حال اجرای تست سیستم...", parse_mode=None)
         text = run_system_test()
-        await query.edit_message_text(text, reply_markup=kb_back_admin(), parse_mode="Markdown")
+        await query.edit_message_text(text, reply_markup=kb_back_admin(), parse_mode=None)
         return
 
     if data == "reset_stats_confirm":
