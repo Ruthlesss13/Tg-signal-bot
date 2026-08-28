@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۴
-استفاده از مدل Gemma (فقط متن) با Timeout 45 ثانیه
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۵
+اضافه شدن گزینه تست سیستم، کشیده‌تر کردن متن لیست ارزها
 """
 
 import asyncio
@@ -52,7 +52,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.2.4"
+VERSION = "3.2.5"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -1058,6 +1058,11 @@ MAIN_MENU_TEXT = (
     "👇 **منوی اصلی:**"
 )
 
+COIN_SELECT_TEXT = (
+    "📊 **تحلیل تکنیکال و داده‌های فیوچرز ارزهای دیجیتال**\n"
+    "جهت مشاهده تحلیل کامل (اندیکاتورها، فاندینگ، Open Interest، شاخص ترس و طمع)، یکی از ارزهای زیر را انتخاب کنید:"
+)
+
 ADMIN_PANEL_HEADER = (
     "👑 **پنل مدیریت اختصاصی ادمین**\n"
     "در این بخش می‌توانید آمار، وضعیت سیستم و تنظیمات را مدیریت کنید.\n\n"
@@ -1103,6 +1108,7 @@ def kb_admin_panel():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📈 آمار دقیق سیگنال‌ها و عملکرد", callback_data="admin_signal_stats")],
         [InlineKeyboardButton("👥 آمار کاربران و وضعیت سیستم", callback_data="admin_system_stats")],
+        [InlineKeyboardButton("🧪 تست کامل سیستم", callback_data="admin_system_test")],
         [InlineKeyboardButton("🗑 صفر کردن تمام آمار سیگنال‌ها", callback_data="reset_stats_confirm")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")]
     ])
@@ -1125,6 +1131,114 @@ signal_history: List[Dict] = []
 TOTAL_SIGNALS_GENERATED = 0
 LAST_REPORT_TIME = None
 
+# ===========================
+# تست کامل سیستم
+# ===========================
+def run_system_test() -> str:
+    """اجرای تست کامل سیستم و بازگشت گزارش"""
+    result = []
+    result.append("🧪 **گزارش تست کامل سیستم**")
+    result.append("=" * 40)
+    
+    # ۱. اطلاعات ربات
+    result.append("\n🤖 **اطلاعات ربات:**")
+    result.append(f"   • نسخه: `{VERSION}`")
+    result.append(f"   • زمان ساخت: `{BUILD_TIME}`")
+    result.append(f"   • زمان اجرا: `{shamsi_now()}`")
+    uptime = int(time.time() - START_TIME)
+    days = uptime // 86400
+    hours = (uptime % 86400) // 3600
+    minutes = (uptime % 3600) // 60
+    result.append(f"   • آپتایم: `{days} روز {hours} ساعت {minutes} دقیقه`")
+    
+    # ۲. متغیرهای محیطی
+    result.append("\n🔑 **متغیرهای محیطی:**")
+    result.append(f"   • BOT_TOKEN: {'✅ تنظیم شده' if BOT_TOKEN else '❌ تنظیم نشده'}")
+    result.append(f"   • ADMIN_USER_IDS: {'✅ تنظیم شده' if ADMIN_USER_IDS else '❌ تنظیم نشده'}")
+    result.append(f"   • CHANNEL_ID: {'✅ تنظیم شده' if CHANNEL_ID else '❌ تنظیم نشده'}")
+    result.append(f"   • GEMINI_API_KEY: {'✅ تنظیم شده' if GEMINI_API_KEY else '❌ تنظیم نشده'}")
+    result.append(f"   • DB_PATH: `{DB_PATH}`")
+    
+    # ۳. وضعیت دیتابیس
+    try:
+        db = get_db_stats()
+        result.append(f"\n💾 **دیتابیس:** ✅ متصل")
+        result.append(f"   • تعداد سیگنال‌ها: `{db['total']}`")
+        result.append(f"   • سیگنال‌های باز: `{db['open']}`")
+    except Exception as e:
+        result.append(f"\n💾 **دیتابیس:** ❌ خطا: {e}")
+    
+    # ۴. وضعیت صرافی‌ها (اسپات)
+    result.append("\n🏛 **صرافی‌های اسپات:**")
+    for name, data in cache.exchange_status.items():
+        if data["online"]:
+            result.append(f"   • {name}: ✅ آنلاین")
+        else:
+            result.append(f"   • {name}: 🔴 آفلاین")
+    
+    # ۵. تست دریافت قیمت فیوچرز
+    result.append("\n📊 **تست داده‌های فیوچرز:**")
+    for code in ["BTC", "ETH"]:
+        data = get_futures_data(code)
+        if data.get("last_price"):
+            result.append(f"   • {code}: ✅ قیمت دریافت شد (${data['last_price']})")
+            if data.get("funding_rate") is not None:
+                result.append(f"     - فاندینگ‌ریت: {data['funding_rate']:.4%}")
+            else:
+                result.append(f"     - فاندینگ‌ریت: ❌ دریافت نشد")
+            if data.get("open_interest"):
+                result.append(f"     - Open Interest: {data['open_interest']:,.0f}")
+            else:
+                result.append(f"     - Open Interest: ❌ دریافت نشد")
+        else:
+            result.append(f"   • {code}: ❌ قیمت دریافت نشد")
+    
+    # ۶. شاخص ترس و طمع
+    fg = get_fear_greed_index()
+    if fg is not None:
+        result.append(f"\n📈 **شاخص ترس و طمع:** ✅ دریافت شد ({fg})")
+    else:
+        result.append(f"\n📈 **شاخص ترس و طمع:** ❌ دریافت نشد")
+    
+    # ۷. نرخ تومان
+    rate = fetch_irt_rate_sync()
+    if rate and rate > 0:
+        result.append(f"\n🇮🇷 **نرخ تتر (Wallex):** ✅ دریافت شد ({rate:,.0f} تومان)")
+    else:
+        result.append(f"\n🇮🇷 **نرخ تتر (Wallex):** ❌ دریافت نشد")
+    
+    # ۸. هوش مصنوعی
+    result.append(f"\n🤖 **هوش مصنوعی (Gemma):**")
+    if not GEMINI_API_KEY:
+        result.append("   ❌ کلید API تنظیم نشده است")
+    else:
+        try:
+            prompt = "Just say OK"
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+            data = http_post_json(url, payload, timeout=30)
+            if data.get("candidates"):
+                result.append("   ✅ مدل فعال است و پاسخ می‌دهد")
+            else:
+                result.append("   ⚠️ مدل پاسخ داد اما ساختار نامعتبر بود")
+        except Exception as e:
+            result.append(f"   ❌ خطا در ارتباط با AI: {e}")
+    
+    # ۹. کانال تلگرام
+    result.append(f"\n📢 **کانال تلگرام:**")
+    if CHANNEL_ID:
+        result.append(f"   ✅ شناسه کانال تنظیم شده: `{CHANNEL_ID}`")
+    else:
+        result.append(f"   ❌ شناسه کانال تنظیم نشده است")
+    
+    result.append("\n" + "=" * 40)
+    result.append("✅ **تست سیستم با موفقیت انجام شد.**")
+    
+    return "\n".join(result)
+
+# ===========================
+# هندلرها
+# ===========================
 async def version_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🤖 **نسخه ربات:** `{VERSION}`\n📅 **زمان ساخت:** `{BUILD_TIME}`\n🆔 **شناسه:** `{context.bot.id}`",
@@ -1234,7 +1348,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "coins_status_grid":
         await query.edit_message_text(
-            "📊 **تحلیل تکنیکال ارزها**\nارز مورد نظر را انتخاب کنید:",
+            COIN_SELECT_TEXT,
             reply_markup=kb_status_grid(),
             parse_mode="Markdown"
         )
@@ -1285,6 +1399,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=kb_back_admin(), parse_mode="Markdown")
         return
 
+    if data == "admin_system_test":
+        if not is_adm: return
+        await query.edit_message_text("⏳ در حال اجرای تست سیستم...", parse_mode="Markdown")
+        text = run_system_test()
+        await query.edit_message_text(text, reply_markup=kb_back_admin(), parse_mode="Markdown")
+        return
+
     if data == "reset_stats_confirm":
         if not is_adm: return
         await query.edit_message_text(
@@ -1314,7 +1435,6 @@ AI_PROMPT_TEMPLATE = (
 )
 
 def confirm_signal_with_ai(chart_png: Optional[bytes], context: dict) -> tuple[str, str]:
-    """ارسال فقط متن به AI (بدون تصویر)"""
     if not GEMINI_API_KEY:
         return "unavailable", "GEMINI_API_KEY تنظیم نشده"
     
@@ -1519,7 +1639,6 @@ async def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
 # توابع کمکی
 # ===========================
 def render_candles_png(df: pd.DataFrame, title: str) -> Optional[bytes]:
-    # غیرفعال شده (چون از تصویر استفاده نمی‌کنیم)
     return None
 
 def stats_summary() -> dict:
