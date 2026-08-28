@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۰
-دریافت فاندینگ‌ریت و Open Interest از MEXC و Gate.io Futures
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۲
+جایگزینی کامل requests با urllib، اصلاح متن لیست ارزها
 """
 
 import asyncio
@@ -16,6 +16,7 @@ import ssl
 import sys
 import time
 import urllib.request
+import urllib.error
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,7 +25,6 @@ from typing import Optional, List, Dict, Set
 import ccxt
 import jdatetime
 import pandas as pd
-import requests
 from dotenv import load_dotenv
 from ta.momentum import RSIIndicator, StochRSIIndicator
 from ta.trend import EMAIndicator, MACD, ADXIndicator
@@ -52,7 +52,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.2.0"
+VERSION = "3.2.2"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -137,7 +137,7 @@ GEMINI_MODEL = "gemini-2.0-flash"
 # کش برای سرعت بخشیدن
 # ===========================
 _analysis_cache = {}
-_cache_ttl = 60  # کش تحلیل برای ۶۰ ثانیه
+_cache_ttl = 60
 
 # ===========================
 # ابزارهای تاریخ و قیمت
@@ -177,12 +177,10 @@ def safe_str(value) -> str:
     return str(value)
 
 def safe_format_float(value, format_str: str = ".4f") -> str:
-    """تبدیل مطمئن عدد به رشته با فرمت مشخص"""
     val = safe_float(value)
     return f"{val:{format_str}}"
 
 def safe_format_percent(value) -> str:
-    """نمایش درصدی ایمن از مقدار (حتی اگر None باشد)"""
     if value is None:
         return "نامشخص"
     return f"{value:.4%}"
@@ -194,7 +192,6 @@ exchange_headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
 
-# اسپات (برای قیمت و OHLCV)
 exchange_mexc = ccxt.mexc({
     "enableRateLimit": True,
     "timeout": 8000,
@@ -213,94 +210,136 @@ exchange_gate = ccxt.gate({
 })
 
 # ===========================
+# ابزارهای urllib برای درخواست‌های HTTP
+# ===========================
+_ssl_ctx = ssl._create_unverified_context()
+
+def http_get_json(url: str, timeout: int = 8) -> dict:
+    """دریافت JSON با urllib و مدیریت خطا"""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout, context=_ssl_ctx) as response:
+            data = response.read().decode()
+            return json.loads(data)
+    except Exception as e:
+        logger.warning(f"HTTP GET failed for {url}: {e}")
+        return {}
+
+def http_post_json(url: str, payload: dict, timeout: int = 12) -> dict:
+    """ارسال POST با JSON و دریافت پاسخ"""
+    try:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx) as response:
+            resp_data = response.read().decode()
+            return json.loads(resp_data)
+    except Exception as e:
+        logger.warning(f"HTTP POST failed for {url}: {e}")
+        return {}
+
+# ===========================
 # دریافت داده‌های فیوچرز (با urllib)
 # ===========================
 def fetch_futures_data_mexc(symbol: str) -> dict:
-    """دریافت فاندینگ‌ریت، OI و قیمت از MEXC Futures"""
     url = f"https://api.mexc.com/api/v1/contract/ticker?symbol={symbol}"
-    try:
-        ctx = ssl._create_unverified_context()
-        with urllib.request.urlopen(url, timeout=5, context=ctx) as response:
-            data = json.loads(response.read().decode())
-            if data.get("success") and data.get("data"):
-                d = data["data"]
-                return {
-                    "last_price": d.get("lastPrice"),
-                    "funding_rate": d.get("fundingRate"),
-                    "open_interest": d.get("holdVol"),  # holdVol = Open Interest
-                    "high_24h": d.get("high24Price"),
-                    "low_24h": d.get("lower24Price"),
-                    "volume_24h": d.get("volume24"),
-                }
-    except Exception as e:
-        logger.warning(f"MEXC futures data fetch failed for {symbol}: {e}")
+    data = http_get_json(url, timeout=5)
+    if data.get("success") and data.get("data"):
+        d = data["data"]
+        return {
+            "last_price": d.get("lastPrice"),
+            "funding_rate": d.get("fundingRate"),
+            "open_interest": d.get("holdVol"),
+            "high_24h": d.get("high24Price"),
+            "low_24h": d.get("lower24Price"),
+            "volume_24h": d.get("volume24"),
+        }
     return {}
 
 def fetch_futures_data_gateio(symbol: str) -> dict:
-    """دریافت فاندینگ‌ریت، OI و قیمت از Gate.io Futures"""
     url = f"https://api.gateio.ws/api/v4/futures/usdt/tickers?contract={symbol}"
-    try:
-        ctx = ssl._create_unverified_context()
-        with urllib.request.urlopen(url, timeout=5, context=ctx) as response:
-            data = json.loads(response.read().decode())
-            if data and isinstance(data, list) and len(data) > 0:
-                d = data[0]
-                return {
-                    "last_price": d.get("last"),
-                    "funding_rate": d.get("funding_rate"),
-                    "open_interest": d.get("open_interest"),
-                    "high_24h": d.get("high_24h"),
-                    "low_24h": d.get("low_24h"),
-                    "volume_24h": d.get("volume_24h"),
-                }
-    except Exception as e:
-        logger.warning(f"Gate.io futures data fetch failed for {symbol}: {e}")
+    data = http_get_json(url, timeout=5)
+    if data and isinstance(data, list) and len(data) > 0:
+        d = data[0]
+        return {
+            "last_price": d.get("last"),
+            "funding_rate": d.get("funding_rate"),
+            "open_interest": d.get("open_interest"),
+            "high_24h": d.get("high_24h"),
+            "low_24h": d.get("low_24h"),
+            "volume_24h": d.get("volume_24h"),
+        }
     return {}
 
 def get_futures_data(code: str) -> dict:
-    """دریافت داده‌های فیوچرز از هر دو صرافی، اولویت با MEXC"""
     symbol = f"{code}_USDT"
-    
-    # اول MEXC
     data = fetch_futures_data_mexc(symbol)
     if data.get("funding_rate") is not None:
         data["exchange"] = "MEXC"
         return data
-    
-    # اگر MEXC جواب نداد، Gate.io
     data = fetch_futures_data_gateio(symbol)
     if data.get("funding_rate") is not None:
         data["exchange"] = "Gate.io"
         return data
-    
-    # اگر هیچکدام جواب ندادند
     return {"exchange": "نامشخص"}
 
 # ===========================
-# نرخ تومان
+# نرخ تومان (با urllib)
 # ===========================
 _irt_rate_cache = {"value": None, "ts": 0.0, "last_success": None}
 
-async def fetch_irt_rate() -> float:
+def fetch_irt_rate_sync() -> float:
     now = time.time()
     if _irt_rate_cache["value"] and (now - _irt_rate_cache["ts"] < IRT_RATE_TTL_SECONDS):
         return _irt_rate_cache["value"]
+    url = "https://api.wallex.ir/v1/markets"
+    data = http_get_json(url, timeout=5)
     try:
-        def _get():
-            return requests.get("https://api.wallex.ir/v1/markets", timeout=3)
-        r = await asyncio.to_thread(_get)
-        if r.status_code == 200:
-            rate = float(r.json()["result"]["symbols"]["USDTTMN"]["stats"]["lastPrice"])
-            _irt_rate_cache.update(value=rate, ts=now, last_success=shamsi_now())
-            return rate
-    except Exception as e:
-        logger.warning(f"Error fetching IRT rate: {e}")
-    return _irt_rate_cache["value"] or 65000.0
+        rate = float(data["result"]["symbols"]["USDTTMN"]["stats"]["lastPrice"])
+        _irt_rate_cache.update(value=rate, ts=now, last_success=shamsi_now())
+        return rate
+    except (KeyError, ValueError, TypeError):
+        logger.warning("Failed to parse IRT rate from Wallex")
+        return _irt_rate_cache["value"] or 65000.0
+
+async def fetch_irt_rate() -> float:
+    return await asyncio.to_thread(fetch_irt_rate_sync)
 
 def get_irt_rate_status() -> str:
     if _irt_rate_cache["value"]:
         return f"✅ آنلاین (آخرین: {_irt_rate_cache['last_success']})"
     return "🔴 آفلاین"
+
+# ===========================
+# شاخص ترس و طمع (با urllib)
+# ===========================
+_fg_cache = {"value": None, "ts": 0.0, "last_update": None}
+
+def fetch_fear_greed_index_sync() -> Optional[int]:
+    now = time.time()
+    if _fg_cache["value"] is not None and now - _fg_cache["ts"] < FEAR_GREED_TTL_SECONDS:
+        return _fg_cache["value"]
+    
+    url = "https://api.alternative.me/fng/"
+    data = http_get_json(url, timeout=5)
+    try:
+        value = int(data["data"][0]["value"])
+        _fg_cache.update(value=value, ts=now, last_update=shamsi_now())
+        return value
+    except (KeyError, ValueError, TypeError):
+        logger.warning("Failed to parse Fear&Greed index")
+        return _fg_cache["value"]
+
+def get_fear_greed_index() -> Optional[int]:
+    return fetch_fear_greed_index_sync()
+
+def get_fg_status() -> str:
+    if _fg_cache["value"] is not None:
+        return f"✅ آخرین مقدار: {_fg_cache['value']} ({_fg_cache['last_update']})"
+    return "🔴 در دسترس نیست"
 
 # ===========================
 # دیتابیس
@@ -429,7 +468,6 @@ class MarketCache:
         symbols = [f"{code}/USDT" for code in COIN_CODES]
         new_prices = {}
 
-        # ۱. MEXC
         try:
             tickers = await asyncio.to_thread(exchange_mexc.fetch_tickers, symbols)
             for code in COIN_CODES:
@@ -446,7 +484,6 @@ class MarketCache:
             logger.warning(f"MEXC fetch_tickers failed: {e}")
             self.exchange_status["MEXC"] = {"online": False, "last_check": now}
 
-        # ۲. Gate.io
         try:
             gate_symbols = [f"{code}/USDT" for code in COIN_CODES]
             tickers = await asyncio.to_thread(exchange_gate.fetch_tickers, gate_symbols)
@@ -464,7 +501,6 @@ class MarketCache:
             logger.warning(f"Gate.io fetch_tickers failed: {e}")
             self.exchange_status["Gate.io"] = {"online": False, "last_check": now}
 
-        # ۳. Fallback تکی
         async def fetch_one(code):
             try:
                 ticker = await asyncio.to_thread(exchange_mexc.fetch_ticker, f"{code}/USDT")
@@ -628,27 +664,6 @@ def compute_indicators(df: pd.DataFrame) -> Optional[IndicatorSnapshot]:
 # ===========================
 # فیلترها
 # ===========================
-_fg_cache = {"value": None, "ts": 0.0, "last_update": None}
-
-def get_fear_greed_index() -> Optional[int]:
-    now = time.time()
-    if _fg_cache["value"] is not None and now - _fg_cache["ts"] < FEAR_GREED_TTL_SECONDS:
-        return _fg_cache["value"]
-    try:
-        r = requests.get("https://api.alternative.me/fng/", timeout=3)
-        if r.status_code == 200:
-            value = int(r.json()["data"][0]["value"])
-            _fg_cache.update(value=value, ts=now, last_update=shamsi_now())
-            return value
-    except Exception as e:
-        logger.warning(f"Fear&Greed fetch failed: {e}")
-    return _fg_cache["value"]
-
-def get_fg_status() -> str:
-    if _fg_cache["value"] is not None:
-        return f"✅ آخرین مقدار: {_fg_cache['value']} ({_fg_cache['last_update']})"
-    return "🔴 در دسترس نیست (مشکل در دریافت از API)"
-
 def check_filters(direction: str, indicators: IndicatorSnapshot, code: str, funding_rate: Optional[float] = None, oi: Optional[float] = None) -> tuple[bool, str]:
     if indicators.volume_ratio < VOLUME_MIN_RATIO:
         return False, f"نسبت حجم {indicators.volume_ratio:.2f} کمتر از {VOLUME_MIN_RATIO}"
@@ -717,11 +732,10 @@ def build_risk_plan(direction: str, entry: float, atr: float, account_balance_us
     return RiskPlan(direction, entry, stop_loss, targets, leverage, position_size_usdt, risk_reward, True, "ok")
 
 # ===========================
-# تحلیل کامل ارز (با کش و مدیریت خطا)
+# تحلیل کامل ارز
 # ===========================
 async def analyze_coin_full_status(code: str) -> str:
-    """گزارش کامل تحلیل تکنیکال و فیوچرز برای یک ارز با کش"""
-    cache_key = f"{code}_{int(time.time() / 60)}"  # کش برای ۱ دقیقه
+    cache_key = f"{code}_{int(time.time() / 60)}"
     if cache_key in _analysis_cache:
         return _analysis_cache[cache_key]
 
@@ -734,7 +748,6 @@ async def analyze_coin_full_status(code: str) -> str:
         rate = await fetch_irt_rate()
         irt_price = price * rate
 
-        # دریافت داده‌های مختلف تایم‌فریم به صورت موازی
         tasks = [
             cache.get_ohlcv(code, "1h"),
             cache.get_ohlcv(code, "4h"),
@@ -753,18 +766,15 @@ async def analyze_coin_full_status(code: str) -> str:
         if ind is None:
             return f"❌ تحلیل **{code}** ناموفق بود."
 
-        # دریافت داده‌های فیوچرز (با urllib)
         futures_data = get_futures_data(code)
         funding = futures_data.get("funding_rate")
         oi = futures_data.get("open_interest")
         futures_exchange = futures_data.get("exchange", "نامشخص")
         
-        # قیمت فیوچرز اگر موجود باشد، از آن استفاده کن
         futures_price = futures_data.get("last_price")
         if futures_price is not None and futures_price > 0:
             price = futures_price
 
-        # محاسبه تغییرات
         close_series = df_1h["close"]
         price_1h_ago = close_series.iloc[-2] if len(close_series) > 1 else price
         change_1h = ((price - price_1h_ago) / price_1h_ago * 100) if price_1h_ago else 0
@@ -780,7 +790,6 @@ async def analyze_coin_full_status(code: str) -> str:
             low_24h = df_1d["low"].iloc[-1]
             volume_24h = df_1d["volume"].iloc[-1]
         
-        # استفاده از داده‌های فیوچرز برای های/لو/حجم اگر موجود باشند
         if futures_data.get("high_24h"):
             high_24h = futures_data["high_24h"]
         if futures_data.get("low_24h"):
@@ -795,27 +804,22 @@ async def analyze_coin_full_status(code: str) -> str:
             support_weekly = ind.structure_level if ind.structure_breakout_down else None
             resistance_weekly = ind.structure_level if ind.structure_breakout_up else None
 
-        # EMA مقادیر عددی
         ema20 = EMAIndicator(df_1h["close"], window=20).ema_indicator().iloc[-1]
         ema50 = EMAIndicator(df_1h["close"], window=50).ema_indicator().iloc[-1]
         ema200 = EMAIndicator(df_1h["close"], window=200).ema_indicator().iloc[-1]
 
-        # MACD مقادیر عددی
         macd_ind = MACD(df_1h["close"], window_fast=MACD_FAST, window_slow=MACD_SLOW, window_sign=MACD_SIGNAL)
         macd_line = macd_ind.macd().iloc[-1]
         macd_signal = macd_ind.macd_signal().iloc[-1]
         macd_hist = macd_ind.macd_diff().iloc[-1]
 
-        # بولینگر
         bb_ind = BollingerBands(df_1h["close"], window=20)
         bb_upper = bb_ind.bollinger_hband().iloc[-1]
         bb_middle = bb_ind.bollinger_mavg().iloc[-1]
         bb_lower = bb_ind.bollinger_lband().iloc[-1]
 
-        # استوکاستیک RSI
         stoch_rsi = StochRSIIndicator(df_1h["close"], window=14).stochrsi().iloc[-1] * 100 if len(df_1h) > 20 else 50
 
-        # قدرت سیگنال
         score = 0
         if ind.trend_up or ind.trend_down:
             score += 1
@@ -844,7 +848,6 @@ async def analyze_coin_full_status(code: str) -> str:
         regime = "روند" if ind.adx >= ADX_RANGE_THRESHOLD else "رنج"
         trend_fa = "صعودی 🚀" if ind.trend_up else "نزولی 🔻" if ind.trend_down else "خنثی ⚖️"
 
-        # تفسیر RSI
         if ind.rsi > 70:
             rsi_interpret = "اشباع خرید (overbought)"
         elif ind.rsi < 30:
@@ -854,7 +857,6 @@ async def analyze_coin_full_status(code: str) -> str:
         else:
             rsi_interpret = "منطقه معمولی"
 
-        # تفسیر ADX
         if ind.adx > 40:
             adx_interpret = "روند بسیار قوی"
         elif ind.adx > 25:
@@ -864,7 +866,6 @@ async def analyze_coin_full_status(code: str) -> str:
         else:
             adx_interpret = "بازار رنج (بدون روند)"
 
-        # تفسیر فاندینگ
         if funding is not None:
             if funding > 0.001:
                 funding_interpret = "منفی (لانگ‌ها هزینه می‌دهند)"
@@ -875,7 +876,6 @@ async def analyze_coin_full_status(code: str) -> str:
         else:
             funding_interpret = "نامشخص"
 
-        # تفسیر OI
         if oi is not None:
             if oi > 0:
                 oi_interpret = "وجود دارد"
@@ -884,12 +884,9 @@ async def analyze_coin_full_status(code: str) -> str:
         else:
             oi_interpret = "نامشخص"
 
-        # تایم‌فریم بالاتر
         trend_4h = "صعودی 🚀" if ind_4h and ind_4h.trend_up else "نزولی 🔻" if ind_4h and ind_4h.trend_down else "خنثی ⚖️" if ind_4h else "نامشخص"
         rsi_4h = ind_4h.rsi if ind_4h else None
         adx_4h = ind_4h.adx if ind_4h else None
-
-        # وضعیت Swap (فعال است چون در فیوچرز هستیم)
         swap_status = "🟢 فعال"
 
         text = (
@@ -949,7 +946,6 @@ async def analyze_coin_full_status(code: str) -> str:
             f"🏛 **صرافی اسپات:** `{cache.active_exchange_name}`\n"
         )
         
-        # ذخیره در کش
         _analysis_cache[cache_key] = text
         return text
     except Exception as e:
@@ -1075,7 +1071,6 @@ def kb_prices_all_single():
     ])
 
 def kb_status_grid():
-    """لیست ارزها با ایموجی سبز در ۴ ستون"""
     buttons = []
     row = []
     for i, code in enumerate(COIN_CODES):
@@ -1089,7 +1084,6 @@ def kb_status_grid():
     return InlineKeyboardMarkup(buttons)
 
 def kb_admin_panel():
-    """پنل مدیریت با دکمه‌های کشیده (یک ستونی) و متن بلند"""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📈 آمار دقیق سیگنال‌ها و عملکرد", callback_data="admin_signal_stats")],
         [InlineKeyboardButton("👥 آمار کاربران و وضعیت سیستم", callback_data="admin_system_stats")],
@@ -1210,7 +1204,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prices = await cache.update_prices()
         rate = await fetch_irt_rate()
         exchange_emoji = "🇲" if "MEXC" in cache.active_exchange_name else "🇬"
-        text = f"💵 **لیست قیمت ارزها**\n📅 {shamsi_now()}\n🇮🇷 نرخ تتر: {rate:,.0f} تومان\n{'────────────────────'}\n"
+        text = (
+            f"💵 **لیست قیمت لحظه‌ای ارزهای دیجیتال (۳۰ ارز)**\n"
+            f"📅 {shamsi_now()}\n"
+            f"🇮🇷 نرخ تتر: {rate:,.0f} تومان\n"
+            f"{'────────────────────'}\n"
+        )
         for code in COIN_CODES:
             p = prices.get(code, 0.0)
             text += f"‎{exchange_emoji} **{code}**: {fmt_usd(p)} USDT\n‎🇮🇷 {fmt_toman(p, rate)}\n\n"
@@ -1316,7 +1315,6 @@ async def monitor_open_signals(app: Application):
         try:
             for row in open_signals():
                 code = row["ticker"]
-                # قیمت از فیوچرز
                 futures_data = get_futures_data(code)
                 price = futures_data.get("last_price")
                 if price is None:
@@ -1357,6 +1355,42 @@ async def monitor_open_signals(app: Application):
         except Exception as e:
             logger.error(f"Monitor error: {e}")
             await asyncio.sleep(60)
+
+# ===========================
+# هوش مصنوعی Gemini (با urllib)
+# ===========================
+AI_PROMPT_TEMPLATE = (
+    "شما یک تحلیل‌گر ریسک‌گریز هستید. فقط اگر روند، حجم، فاندینگ و Open Interest همگی با سیگنال زیر هم‌جهت باشند با کلمه CONFIRM پاسخ دهید، در غیر این صورت REJECT.\n\n"
+    "جهت: {direction}\nنماد: {ticker}\nورود: {entry}\nحد ضرر: {stop_loss}\nتارگت‌ها: {targets}\n"
+    "RSI: {rsi} | ADX: {adx} | حجم: {volume_ratio}\nفاندینگ: {funding_rate} | OI: {oi_change}\n"
+)
+
+def confirm_signal_with_ai(chart_png: Optional[bytes], context: dict) -> tuple[str, str]:
+    if not GEMINI_API_KEY:
+        return "unavailable", "GEMINI_API_KEY تنظیم نشده"
+    if chart_png is None:
+        return "unavailable", "چارت در دسترس نیست"
+    
+    prompt = AI_PROMPT_TEMPLATE.format(**context)
+    image_b64 = base64.b64encode(chart_png).decode("ascii")
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/png", "data": image_b64}}
+            ]
+        }]
+    }
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    data = http_post_json(url, payload, timeout=AI_TIMEOUT_SECONDS)
+    
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        status = "confirmed" if text.upper().startswith("CONFIRM") else "rejected"
+        return status, text
+    except (KeyError, ValueError, TypeError):
+        return "unavailable", "پاسخ نامعتبر از AI"
 
 # ===========================
 # ارسال سیگنال
@@ -1434,7 +1468,6 @@ async def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
     if direction is None:
         return None, f"هیچ ستاپ معتبری در رژیم {'روند' if ind_main.adx >= ADX_RANGE_THRESHOLD else 'رنج'} شکل نگرفت", None
 
-    # دریافت داده‌های فیوچرز
     futures_data = get_futures_data(code)
     funding_rate = futures_data.get("funding_rate")
     oi = futures_data.get("open_interest")
@@ -1482,27 +1515,6 @@ def render_candles_png(df: pd.DataFrame, title: str) -> Optional[bytes]:
         logger.warning(f"Chart rendering failed: {e}")
         return None
 
-def confirm_signal_with_ai(chart_png: Optional[bytes], context: dict) -> tuple[str, str]:
-    if not GEMINI_API_KEY:
-        return "unavailable", "GEMINI_API_KEY تنظیم نشده"
-    if chart_png is None:
-        return "unavailable", "چارت در دسترس نیست"
-    prompt = AI_PROMPT_TEMPLATE.format(**context)
-    image_b64 = base64.b64encode(chart_png).decode("ascii")
-    payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/png", "data": image_b64}}]}]}
-    try:
-        resp = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-            params={"key": GEMINI_API_KEY}, json=payload, timeout=AI_TIMEOUT_SECONDS
-        )
-        resp.raise_for_status()
-        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        status = "confirmed" if text.upper().startswith("CONFIRM") else "rejected"
-        return status, text
-    except Exception as e:
-        logger.warning(f"AI failed: {e}")
-        return "unavailable", str(e)
-
 def stats_summary() -> dict:
     with _conn() as c:
         total = c.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"]
@@ -1512,12 +1524,6 @@ def stats_summary() -> dict:
     total_closed = wins + losses
     winrate = (wins / total_closed * 100) if total_closed else None
     return {"total_signals": total, "wins": wins, "losses": losses, "winrate": winrate, "rejected_by_ai": rejected_by_ai}
-
-AI_PROMPT_TEMPLATE = (
-    "شما یک تحلیل‌گر ریسک‌گریز هستید. فقط اگر روند، حجم، فاندینگ و Open Interest همگی با سیگنال زیر هم‌جهت باشند با کلمه CONFIRM پاسخ دهید، در غیر این صورت REJECT.\n\n"
-    "جهت: {direction}\nنماد: {ticker}\nورود: {entry}\nحد ضرر: {stop_loss}\nتارگت‌ها: {targets}\n"
-    "RSI: {rsi} | ADX: {adx} | حجم: {volume_ratio}\nفاندینگ: {funding_rate} | OI: {oi_change}\n"
-)
 
 # ===========================
 # راه‌اندازی
