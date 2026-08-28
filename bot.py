@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۲
-جایگزینی کامل requests با urllib، اصلاح متن لیست ارزها
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۳
+اضافه شدن شاخص ترس و طمع به تحلیل ارزها، کشیده‌تر کردن عنوان لیست قیمت
 """
 
 import asyncio
@@ -52,7 +52,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.2.2"
+VERSION = "3.2.3"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -215,7 +215,6 @@ exchange_gate = ccxt.gate({
 _ssl_ctx = ssl._create_unverified_context()
 
 def http_get_json(url: str, timeout: int = 8) -> dict:
-    """دریافت JSON با urllib و مدیریت خطا"""
     try:
         with urllib.request.urlopen(url, timeout=timeout, context=_ssl_ctx) as response:
             data = response.read().decode()
@@ -225,7 +224,6 @@ def http_get_json(url: str, timeout: int = 8) -> dict:
         return {}
 
 def http_post_json(url: str, payload: dict, timeout: int = 12) -> dict:
-    """ارسال POST با JSON و دریافت پاسخ"""
     try:
         data = json.dumps(payload).encode()
         req = urllib.request.Request(
@@ -340,6 +338,22 @@ def get_fg_status() -> str:
     if _fg_cache["value"] is not None:
         return f"✅ آخرین مقدار: {_fg_cache['value']} ({_fg_cache['last_update']})"
     return "🔴 در دسترس نیست"
+
+def get_fg_text() -> str:
+    """دریافت متن تفسیر شاخص ترس و طمع"""
+    fg = get_fear_greed_index()
+    if fg is None:
+        return "نامشخص"
+    if fg <= 25:
+        return f"{fg} (ترس شدید 😨)"
+    elif fg <= 45:
+        return f"{fg} (ترس 😰)"
+    elif fg <= 55:
+        return f"{fg} (خنثی 😐)"
+    elif fg <= 75:
+        return f"{fg} (طمع 😊)"
+    else:
+        return f"{fg} (طمع شدید 🤑)"
 
 # ===========================
 # دیتابیس
@@ -820,6 +834,9 @@ async def analyze_coin_full_status(code: str) -> str:
 
         stoch_rsi = StochRSIIndicator(df_1h["close"], window=14).stochrsi().iloc[-1] * 100 if len(df_1h) > 20 else 50
 
+        # دریافت شاخص ترس و طمع
+        fg_text = get_fg_text()
+
         score = 0
         if ind.trend_up or ind.trend_down:
             score += 1
@@ -906,6 +923,7 @@ async def analyze_coin_full_status(code: str) -> str:
             f"   • رژیم بازار: {regime} (ADX: {safe_format_float(ind.adx, '.1f')})\n"
             f"   • قدرت سیگنال: {signal_strength}\n"
             f"   • وضعیت Swap: {swap_status}\n"
+            f"   • شاخص ترس و طمع: `{fg_text}`\n"
             f"{'────────────────────'}\n"
             f"📊 **اندیکاتورهای تکنیکال (۱ساعته):**\n"
             f"   • RSI (14): `{safe_format_float(ind.rsi, '.1f')}` ({rsi_interpret})\n"
@@ -1205,7 +1223,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rate = await fetch_irt_rate()
         exchange_emoji = "🇲" if "MEXC" in cache.active_exchange_name else "🇬"
         text = (
-            f"💵 **لیست قیمت لحظه‌ای ارزهای دیجیتال (۳۰ ارز)**\n"
+            f"💵 **لیست قیمت لحظه‌ای ۳۰ ارز دیجیتال برتر**\n"
             f"📅 {shamsi_now()}\n"
             f"🇮🇷 نرخ تتر: {rate:,.0f} تومان\n"
             f"{'────────────────────'}\n"
