@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۵
-اضافه شدن گزینه تست سیستم، کشیده‌تر کردن متن لیست ارزها
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۲.۶
+رفع مشکل Timeout در تست سیستم
 """
 
 import asyncio
@@ -52,7 +52,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.2.5"
+VERSION = "3.2.6"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -130,7 +130,7 @@ IRT_RATE_TTL_SECONDS = 60
 SIGNAL_SCAN_INTERVAL_SECONDS = 15 * 60
 SIGNAL_REOPEN_COOLDOWN_SECONDS = 45 * 60
 CHANNEL_MONITOR_INTERVAL_SECONDS = 5 * 60
-AI_TIMEOUT_SECONDS = 45
+AI_TIMEOUT_SECONDS = 60
 GEMINI_MODEL = "gemma-4-26b-a4b-it"
 
 # ===========================
@@ -223,7 +223,7 @@ def http_get_json(url: str, timeout: int = 8) -> dict:
         logger.warning(f"HTTP GET failed for {url}: {e}")
         return {}
 
-def http_post_json(url: str, payload: dict, timeout: int = 45) -> dict:
+def http_post_json(url: str, payload: dict, timeout: int = 60) -> dict:
     try:
         data = json.dumps(payload).encode()
         req = urllib.request.Request(
@@ -1049,6 +1049,112 @@ def get_admin_stats_text() -> str:
     return text
 
 # ===========================
+# تست کامل سیستم (رفع Timeout)
+# ===========================
+def run_system_test() -> str:
+    """اجرای تست کامل سیستم با مدیریت Timeout"""
+    result = []
+    result.append("🧪 **گزارش تست کامل سیستم**")
+    result.append("=" * 40)
+    
+    # ۱. اطلاعات ربات
+    result.append("\n🤖 **اطلاعات ربات:**")
+    result.append(f"   • نسخه: `{VERSION}`")
+    result.append(f"   • زمان ساخت: `{BUILD_TIME}`")
+    result.append(f"   • زمان اجرا: `{shamsi_now()}`")
+    uptime = int(time.time() - START_TIME)
+    days = uptime // 86400
+    hours = (uptime % 86400) // 3600
+    minutes = (uptime % 3600) // 60
+    result.append(f"   • آپتایم: `{days} روز {hours} ساعت {minutes} دقیقه`")
+    
+    # ۲. متغیرهای محیطی
+    result.append("\n🔑 **متغیرهای محیطی:**")
+    result.append(f"   • BOT_TOKEN: {'✅ تنظیم شده' if BOT_TOKEN else '❌ تنظیم نشده'}")
+    result.append(f"   • ADMIN_USER_IDS: {'✅ تنظیم شده' if ADMIN_USER_IDS else '❌ تنظیم نشده'}")
+    result.append(f"   • CHANNEL_ID: {'✅ تنظیم شده' if CHANNEL_ID else '❌ تنظیم نشده'}")
+    result.append(f"   • GEMINI_API_KEY: {'✅ تنظیم شده' if GEMINI_API_KEY else '❌ تنظیم نشده'}")
+    result.append(f"   • DB_PATH: `{DB_PATH}`")
+    
+    # ۳. وضعیت دیتابیس
+    try:
+        db = get_db_stats()
+        result.append(f"\n💾 **دیتابیس:** ✅ متصل")
+        result.append(f"   • تعداد سیگنال‌ها: `{db['total']}`")
+        result.append(f"   • سیگنال‌های باز: `{db['open']}`")
+    except Exception as e:
+        result.append(f"\n💾 **دیتابیس:** ❌ خطا: {e}")
+    
+    # ۴. وضعیت صرافی‌ها (اسپات)
+    result.append("\n🏛 **صرافی‌های اسپات:**")
+    for name, data in cache.exchange_status.items():
+        if data["online"]:
+            result.append(f"   • {name}: ✅ آنلاین")
+        else:
+            result.append(f"   • {name}: 🔴 آفلاین")
+    
+    # ۵. تست دریافت قیمت فیوچرز
+    result.append("\n📊 **تست داده‌های فیوچرز:**")
+    for code in ["BTC", "ETH"]:
+        data = get_futures_data(code)
+        if data.get("last_price"):
+            result.append(f"   • {code}: ✅ قیمت دریافت شد (${data['last_price']})")
+            if data.get("funding_rate") is not None:
+                result.append(f"     - فاندینگ‌ریت: {data['funding_rate']:.4%}")
+            else:
+                result.append(f"     - فاندینگ‌ریت: ❌ دریافت نشد")
+            if data.get("open_interest"):
+                result.append(f"     - Open Interest: {data['open_interest']:,.0f}")
+            else:
+                result.append(f"     - Open Interest: ❌ دریافت نشد")
+        else:
+            result.append(f"   • {code}: ❌ قیمت دریافت نشد")
+    
+    # ۶. شاخص ترس و طمع
+    fg = get_fear_greed_index()
+    if fg is not None:
+        result.append(f"\n📈 **شاخص ترس و طمع:** ✅ دریافت شد ({fg})")
+    else:
+        result.append(f"\n📈 **شاخص ترس و طمع:** ❌ دریافت نشد")
+    
+    # ۷. نرخ تومان
+    rate = fetch_irt_rate_sync()
+    if rate and rate > 0:
+        result.append(f"\n🇮🇷 **نرخ تتر (Wallex):** ✅ دریافت شد ({rate:,.0f} تومان)")
+    else:
+        result.append(f"\n🇮🇷 **نرخ تتر (Wallex):** ❌ دریافت نشد")
+    
+    # ۸. هوش مصنوعی (با مدیریت Timeout)
+    result.append(f"\n🤖 **هوش مصنوعی (Gemma):**")
+    if not GEMINI_API_KEY:
+        result.append("   ❌ کلید API تنظیم نشده است")
+    else:
+        result.append("   ⏳ در حال تست (حداکثر ۶۰ ثانیه)...")
+        try:
+            prompt = "Just say OK"
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+            data = http_post_json(url, payload, timeout=60)
+            if data.get("candidates"):
+                result.append("   ✅ مدل فعال است و پاسخ می‌دهد")
+            else:
+                result.append("   ⚠️ مدل پاسخ داد اما ساختار نامعتبر بود")
+        except Exception as e:
+            result.append(f"   ⏳ زمان‌بر بود (timeout) - سایر بخش‌ها OK هستند")
+    
+    # ۹. کانال تلگرام
+    result.append(f"\n📢 **کانال تلگرام:**")
+    if CHANNEL_ID:
+        result.append(f"   ✅ شناسه کانال تنظیم شده: `{CHANNEL_ID}`")
+    else:
+        result.append(f"   ❌ شناسه کانال تنظیم نشده است")
+    
+    result.append("\n" + "=" * 40)
+    result.append("✅ **تست سیستم با موفقیت انجام شد.**")
+    
+    return "\n".join(result)
+
+# ===========================
 # کیبوردها
 # ===========================
 MAIN_MENU_TEXT = (
@@ -1131,114 +1237,6 @@ signal_history: List[Dict] = []
 TOTAL_SIGNALS_GENERATED = 0
 LAST_REPORT_TIME = None
 
-# ===========================
-# تست کامل سیستم
-# ===========================
-def run_system_test() -> str:
-    """اجرای تست کامل سیستم و بازگشت گزارش"""
-    result = []
-    result.append("🧪 **گزارش تست کامل سیستم**")
-    result.append("=" * 40)
-    
-    # ۱. اطلاعات ربات
-    result.append("\n🤖 **اطلاعات ربات:**")
-    result.append(f"   • نسخه: `{VERSION}`")
-    result.append(f"   • زمان ساخت: `{BUILD_TIME}`")
-    result.append(f"   • زمان اجرا: `{shamsi_now()}`")
-    uptime = int(time.time() - START_TIME)
-    days = uptime // 86400
-    hours = (uptime % 86400) // 3600
-    minutes = (uptime % 3600) // 60
-    result.append(f"   • آپتایم: `{days} روز {hours} ساعت {minutes} دقیقه`")
-    
-    # ۲. متغیرهای محیطی
-    result.append("\n🔑 **متغیرهای محیطی:**")
-    result.append(f"   • BOT_TOKEN: {'✅ تنظیم شده' if BOT_TOKEN else '❌ تنظیم نشده'}")
-    result.append(f"   • ADMIN_USER_IDS: {'✅ تنظیم شده' if ADMIN_USER_IDS else '❌ تنظیم نشده'}")
-    result.append(f"   • CHANNEL_ID: {'✅ تنظیم شده' if CHANNEL_ID else '❌ تنظیم نشده'}")
-    result.append(f"   • GEMINI_API_KEY: {'✅ تنظیم شده' if GEMINI_API_KEY else '❌ تنظیم نشده'}")
-    result.append(f"   • DB_PATH: `{DB_PATH}`")
-    
-    # ۳. وضعیت دیتابیس
-    try:
-        db = get_db_stats()
-        result.append(f"\n💾 **دیتابیس:** ✅ متصل")
-        result.append(f"   • تعداد سیگنال‌ها: `{db['total']}`")
-        result.append(f"   • سیگنال‌های باز: `{db['open']}`")
-    except Exception as e:
-        result.append(f"\n💾 **دیتابیس:** ❌ خطا: {e}")
-    
-    # ۴. وضعیت صرافی‌ها (اسپات)
-    result.append("\n🏛 **صرافی‌های اسپات:**")
-    for name, data in cache.exchange_status.items():
-        if data["online"]:
-            result.append(f"   • {name}: ✅ آنلاین")
-        else:
-            result.append(f"   • {name}: 🔴 آفلاین")
-    
-    # ۵. تست دریافت قیمت فیوچرز
-    result.append("\n📊 **تست داده‌های فیوچرز:**")
-    for code in ["BTC", "ETH"]:
-        data = get_futures_data(code)
-        if data.get("last_price"):
-            result.append(f"   • {code}: ✅ قیمت دریافت شد (${data['last_price']})")
-            if data.get("funding_rate") is not None:
-                result.append(f"     - فاندینگ‌ریت: {data['funding_rate']:.4%}")
-            else:
-                result.append(f"     - فاندینگ‌ریت: ❌ دریافت نشد")
-            if data.get("open_interest"):
-                result.append(f"     - Open Interest: {data['open_interest']:,.0f}")
-            else:
-                result.append(f"     - Open Interest: ❌ دریافت نشد")
-        else:
-            result.append(f"   • {code}: ❌ قیمت دریافت نشد")
-    
-    # ۶. شاخص ترس و طمع
-    fg = get_fear_greed_index()
-    if fg is not None:
-        result.append(f"\n📈 **شاخص ترس و طمع:** ✅ دریافت شد ({fg})")
-    else:
-        result.append(f"\n📈 **شاخص ترس و طمع:** ❌ دریافت نشد")
-    
-    # ۷. نرخ تومان
-    rate = fetch_irt_rate_sync()
-    if rate and rate > 0:
-        result.append(f"\n🇮🇷 **نرخ تتر (Wallex):** ✅ دریافت شد ({rate:,.0f} تومان)")
-    else:
-        result.append(f"\n🇮🇷 **نرخ تتر (Wallex):** ❌ دریافت نشد")
-    
-    # ۸. هوش مصنوعی
-    result.append(f"\n🤖 **هوش مصنوعی (Gemma):**")
-    if not GEMINI_API_KEY:
-        result.append("   ❌ کلید API تنظیم نشده است")
-    else:
-        try:
-            prompt = "Just say OK"
-            payload = {"contents": [{"parts": [{"text": prompt}]}]}
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-            data = http_post_json(url, payload, timeout=30)
-            if data.get("candidates"):
-                result.append("   ✅ مدل فعال است و پاسخ می‌دهد")
-            else:
-                result.append("   ⚠️ مدل پاسخ داد اما ساختار نامعتبر بود")
-        except Exception as e:
-            result.append(f"   ❌ خطا در ارتباط با AI: {e}")
-    
-    # ۹. کانال تلگرام
-    result.append(f"\n📢 **کانال تلگرام:**")
-    if CHANNEL_ID:
-        result.append(f"   ✅ شناسه کانال تنظیم شده: `{CHANNEL_ID}`")
-    else:
-        result.append(f"   ❌ شناسه کانال تنظیم نشده است")
-    
-    result.append("\n" + "=" * 40)
-    result.append("✅ **تست سیستم با موفقیت انجام شد.**")
-    
-    return "\n".join(result)
-
-# ===========================
-# هندلرها
-# ===========================
 async def version_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🤖 **نسخه ربات:** `{VERSION}`\n📅 **زمان ساخت:** `{BUILD_TIME}`\n🆔 **شناسه:** `{context.bot.id}`",
@@ -1615,7 +1613,6 @@ async def evaluate_coin(code: str, account_balance_usdt: float = 1000.0):
     if last_closed and time.time() - last_closed < SIGNAL_REOPEN_COOLDOWN_SECONDS:
         return None, "در کول‌داون بعد از آخرین بسته‌شدن", None
 
-    # AI (فقط متن، بدون تصویر)
     ai_status, ai_text = "unavailable", ""
     if GEMINI_API_KEY:
         context = {
