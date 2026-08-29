@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۵.۵
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۵.۶
 - سه مسیر جدا: روند صعودی / روند نزولی / محدوده
 - سیگنال به‌موقع و ضدفیک (اسکن ۵د / پایش ۳د)
 - هشدار تغییر روند با پاسخ روی پیام
@@ -58,7 +58,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.5.5"
+VERSION = "3.5.6"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -1184,8 +1184,8 @@ def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type:
         title = tp_titles.get(i, f"هدف {i}")
         targets_lines.append(
             f"{em} **{title}**\n"
-            f"   • 💵 `{fmt_usd(t)}` USDT\n"
-            f"   • 🇮🇷 {fmt_toman(t, rate)}"
+            f"💵 `{fmt_usd(t)}` USDT\n"
+            f"🇮🇷 {fmt_toman(t, rate)}"
         )
 
     if ai_status == "confirmed":
@@ -1218,14 +1218,14 @@ def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type:
         f"{rtl}📌 **نوع استراتژی:** {setup_label}\n"
         f"{rtl}📈 **قدرت سیگنال:** {strength}\n"
         f"{rtl}🎯 **میزان اطمینان:** {confidence_text}\n\n"
-        f"{rtl}💵 **قیمت ورود**\n"
-        f"{rtl}   • 💵 `{fmt_usd(plan.entry)}` USDT\n"
-        f"{rtl}   • 🇮🇷 {fmt_toman(plan.entry, rate)}\n\n"
+        f"{rtl}📥 **قیمت ورود**\n"
+        f"{rtl}💵 `{fmt_usd(plan.entry)}` USDT\n"
+        f"{rtl}🇮🇷 {fmt_toman(plan.entry, rate)}\n\n"
         f"{rtl}🎯 **اهداف قیمتی**\n"
-        + "\n".join(f"{rtl}{line}" for line in targets_lines) + "\n\n"
+        + "\n".join(f"{rtl}{sub}" for line in targets_lines for sub in line.split("\n")) + "\n\n"
         f"{rtl}🛑 **حد ضرر**\n"
-        f"{rtl}   • 💵 `{fmt_usd(plan.stop_loss)}` USDT\n"
-        f"{rtl}   • 🇮🇷 {fmt_toman(plan.stop_loss, rate)}\n\n"
+        f"{rtl}💵 `{fmt_usd(plan.stop_loss)}` USDT\n"
+        f"{rtl}🇮🇷 {fmt_toman(plan.stop_loss, rate)}\n\n"
         f"{rtl}⚙️ **مدیریت سرمایه**\n"
         f"{rtl}   • اهرم: `{plan.leverage}x`\n"
         f"{rtl}   • نسبت سود به زیان: `1:{plan.risk_reward:.2f}`\n\n"
