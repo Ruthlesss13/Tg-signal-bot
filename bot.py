@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۵.۴
+ربات هوشمند تحلیل فیوچرز ارزهای دیجیتال - نسخه ۳.۵.۵
 - سه مسیر جدا: روند صعودی / روند نزولی / محدوده
 - سیگنال به‌موقع و ضدفیک (اسکن ۵د / پایش ۳د)
 - هشدار تغییر روند با پاسخ روی پیام
@@ -58,7 +58,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "3.5.4"
+VERSION = "3.5.5"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
@@ -1247,73 +1247,6 @@ def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type:
 # ===========================
 # پنل مدیریت کامل (بدون کلمه اسپات)
 # ===========================
-def get_admin_stats_text() -> str:
-    db = get_db_stats()
-    uptime = int(time.time() - START_TIME)
-    days = uptime // 86400
-    hours = (uptime % 86400) // 3600
-    minutes = (uptime % 3600) // 60
-
-    total_users = len(registered_users)
-    active_users = len(registered_users - paused_users)
-    paused_users_count = len(paused_users)
-
-    total_signals = db["total"]
-    open_signals = db["open"]
-    closed = db["tp3"] + db["sl"]
-    wins = db["tp3"]
-    losses = db["sl"]
-    winrate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
-
-    best_coin = "نامشخص"
-    worst_coin = "نامشخص"
-    with _conn() as c:
-        best_row = c.execute("SELECT ticker, COUNT(*) as cnt FROM signals WHERE status='tp3' GROUP BY ticker ORDER BY cnt DESC LIMIT 1").fetchone()
-        if best_row:
-            best_coin = best_row["ticker"]
-        worst_row = c.execute("SELECT ticker, COUNT(*) as cnt FROM signals WHERE status='sl' GROUP BY ticker ORDER BY cnt DESC LIMIT 1").fetchone()
-        if worst_row:
-            worst_coin = worst_row["ticker"]
-
-    text = (
-        f"👑 **پنل مدیریت جامع**\n"
-        f"{'────────────────────'}\n"
-        f"🤖 **اطلاعات برنامه:**\n"
-        f"   • نسخه: `{VERSION}`\n"
-        f"   • زمان ساخت: `{BUILD_TIME}`\n"
-        f"   • زمان اجرا: `{shamsi_now()}`\n"
-        f"   • آپتایم: `{days} روز {hours} ساعت {minutes} دقیقه`\n"
-        f"   • پایتون: `{sys.version.split()[0]}`\n"
-        f"{'────────────────────'}\n"
-        f"👥 **آمار کاربران:**\n"
-        f"   • کل کاربران: `{total_users}`\n"
-        f"   • فعال: `{active_users}`\n"
-        f"   • متوقف: `{paused_users_count}`\n"
-        f"{'────────────────────'}\n"
-        f"📊 **آمار سیگنال‌ها:**\n"
-        f"   • کل تولیدشده: `{total_signals}`\n"
-        f"   • باز: `{open_signals}`\n"
-        f"   • رسیده به هدف اول (TP1): `{db['tp1']}`\n"
-        f"   • رسیده به هدف دوم (TP2): `{db['tp2']}`\n"
-        f"   • بسته شده: `{closed}`\n"
-        f"   • موفق (TP3): `{wins}`\n"
-        f"   • ناموفق (SL): `{losses}`\n"
-        f"   • وین‌ریت: `{winrate:.1f}%`\n"
-        f"   • بهترین ارز: `{best_coin}`\n"
-        f"   • بدترین ارز: `{worst_coin}`\n"
-        f"{'────────────────────'}\n"
-        f"⚙️ **تنظیمات فعال:**\n"
-        f"   • اهرم: `{MIN_LEVERAGE}-{MAX_LEVERAGE}x`\n"
-        f"   • حداقل RR: `1:{MIN_RISK_REWARD}`\n"
-        f"   • ریسک هر معامله: `{RISK_PER_TRADE_PCT}%`\n"
-        f"   • فیلتر حجم: `{VOLUME_MIN_RATIO}x`\n"
-        f"   • کول‌داون: `{SIGNAL_REOPEN_COOLDOWN_SECONDS//60} دقیقه`\n"
-        f"   • پوزیشن‌های همزمان: `{MAX_CONCURRENT_POSITIONS}`\n"
-        f"   • ارسال به کانال: {'✅ فعال' if SEND_TO_CHANNEL else '❌ غیرفعال'}\n"
-        f"   • ارسال به ربات: {'✅ فعال' if SEND_TO_ADMIN else '❌ غیرفعال'}\n"
-    )
-    return text
-
 # ===========================
 # تست کامل سیستم (رفع نهایی event loop)
 # ===========================
@@ -1332,6 +1265,24 @@ def run_system_test() -> str:
     hours = (uptime % 86400) // 3600
     minutes = (uptime % 3600) // 60
     result.append(f"   • آپتایم: {days} روز {hours} ساعت {minutes} دقیقه")
+
+    total_users = len(registered_users)
+    active_users = len(registered_users - paused_users)
+    paused_users_count = len(paused_users)
+    result.append("\n👥 آمار کاربران:")
+    result.append(f"   • کل کاربران: {total_users}")
+    result.append(f"   • فعال: {active_users}")
+    result.append(f"   • متوقف: {paused_users_count}")
+
+    result.append("\n⚙️ تنظیمات فعال:")
+    result.append(f"   • اهرم: {MIN_LEVERAGE}-{MAX_LEVERAGE}x")
+    result.append(f"   • حداقل RR: 1:{MIN_RISK_REWARD}")
+    result.append(f"   • ریسک هر معامله: {RISK_PER_TRADE_PCT}%")
+    result.append(f"   • فیلتر حجم: {VOLUME_MIN_RATIO}x")
+    result.append(f"   • کول‌داون: {SIGNAL_REOPEN_COOLDOWN_SECONDS//60} دقیقه")
+    result.append(f"   • پوزیشن‌های همزمان: {MAX_CONCURRENT_POSITIONS}")
+    result.append(f"   • ارسال به کانال: {'✅ فعال' if SEND_TO_CHANNEL else '❌ غیرفعال'}")
+    result.append(f"   • ارسال به ربات: {'✅ فعال' if SEND_TO_ADMIN else '❌ غیرفعال'}")
     
     result.append("\n🔑 متغیرهای محیطی:")
     result.append(f"   • BOT_TOKEN: {'✅ تنظیم شده' if BOT_TOKEN else '❌ تنظیم نشده'}")
@@ -1498,11 +1449,9 @@ def kb_status_grid():
 
 def kb_admin_panel():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📈 آمار دقیق سیگنال‌ها و عملکرد", callback_data="admin_signal_stats")],
-        [InlineKeyboardButton("👥 آمار کاربران و سیگنال‌ها", callback_data="admin_system_stats")],
+        [InlineKeyboardButton("📈 آمار و عملکردها", callback_data="admin_signal_stats")],
         [InlineKeyboardButton("📤 تنظیمات ارسال سیگنال", callback_data="admin_signal_settings")],
         [InlineKeyboardButton("🧪 وضعیت سیستم", callback_data="admin_system_test")],
-        [InlineKeyboardButton("🗑 صفر کردن تمام آمار سیگنال‌ها", callback_data="reset_stats_confirm")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")]
     ])
 
@@ -1546,10 +1495,16 @@ def kb_signal_submenu(target: str):
 def kb_back_admin():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")]])
 
+def kb_signal_stats_back():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑 حذف آمار", callback_data="reset_stats_confirm")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")]
+    ])
+
 def kb_reset_confirm():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⚠️ بله، تمام آمار سیگنال‌ها صفر شود", callback_data="reset_stats_do")],
-        [InlineKeyboardButton("❌ انصراف", callback_data="admin_panel")]
+        [InlineKeyboardButton("❌ انصراف", callback_data="admin_signal_stats")]
     ])
 
 # ===========================
@@ -1819,23 +1774,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         s = stats_summary()
         winrate = f"{s['winrate']:.1f}%" if s['winrate'] is not None else "بدون داده"
         await query.edit_message_text(
-            f"📈 **آمار سیگنال‌ها**\n{'────────────────────'}\n"
+            f"📈 **آمار و عملکردها**\n{'────────────────────'}\n"
             f"🔢 کل سیگنال‌های تولیدشده: `{s['total_signals']}`\n"
-            f"1️⃣ رسیده به هدف اول (TP1): `{s['tp1_hit']}`\n"
-            f"2️⃣ رسیده به هدف دوم (TP2): `{s['tp2_hit']}`\n"
-            f"✅ سیگنال‌های موفق (TP3): `{s['wins']}`\n"
-            f"❌ سیگنال‌های ناموفق (SL): `{s['losses']}`\n"
+            f"1️⃣ موفق (TP1): `{s['tp1_hit']}`\n"
+            f"2️⃣ موفق (TP2): `{s['tp2_hit']}`\n"
+            f"3️⃣ موفق (TP3): `{s['wins']}`\n"
+            f"❌ ناموفق (SL): `{s['losses']}`\n"
             f"🏆 نرخ پیروزی (وین‌ریت): `{winrate}`\n"
-            f"🤖 رد شده توسط هوش مصنوعی: `{s['rejected_by_ai']}`",
-            reply_markup=kb_back_admin(),
+            f"🤖 رد شده توسط هوش مصنوعی: `{s['rejected_by_ai']}`\n"
+            f"🥇 بهترین ارز: `{s['best_coin']}` (`{s['best_coin_count']}` سیگنال)\n"
+            f"🥉 بدترین ارز: `{s['worst_coin']}` (`{s['worst_coin_count']}` سیگنال)",
+            reply_markup=kb_signal_stats_back(),
             parse_mode="Markdown"
         )
-        return
-
-    if data == "admin_system_stats":
-        if not is_adm: return
-        text = get_admin_stats_text()
-        await query.edit_message_text(text, reply_markup=kb_back_admin(), parse_mode="Markdown")
         return
 
     if data == "admin_system_test":
@@ -1860,7 +1811,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("DELETE FROM signals")
         await query.edit_message_text(
             "✅ **تمامی آمار سیگنال‌ها با موفقیت صفر شد.**",
-            reply_markup=kb_back_admin(),
+            reply_markup=kb_signal_stats_back(),
             parse_mode="Markdown"
         )
         return
@@ -2333,11 +2284,17 @@ def stats_summary() -> dict:
         wins = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='tp3'").fetchone()["n"]
         losses = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='sl'").fetchone()["n"]
         rejected_by_ai = c.execute("SELECT COUNT(*) AS n FROM signals WHERE ai_confirmed=0").fetchone()["n"]
+        best_row = c.execute("SELECT ticker, COUNT(*) as cnt FROM signals WHERE status='tp3' GROUP BY ticker ORDER BY cnt DESC LIMIT 1").fetchone()
+        worst_row = c.execute("SELECT ticker, COUNT(*) as cnt FROM signals WHERE status='sl' GROUP BY ticker ORDER BY cnt DESC LIMIT 1").fetchone()
     total_closed = wins + losses
     winrate = (wins / total_closed * 100) if total_closed else None
     return {
         "total_signals": total, "tp1_hit": tp1_hit, "tp2_hit": tp2_hit,
         "wins": wins, "losses": losses, "winrate": winrate, "rejected_by_ai": rejected_by_ai,
+        "best_coin": best_row["ticker"] if best_row else "نامشخص",
+        "best_coin_count": best_row["cnt"] if best_row else 0,
+        "worst_coin": worst_row["ticker"] if worst_row else "نامشخص",
+        "worst_coin_count": worst_row["cnt"] if worst_row else 0,
     }
 
 # ===========================
