@@ -86,9 +86,13 @@ ADMIN_USER_IDS = {
 CHANNEL_ID = os.getenv("CHANNEL_ID", "")
 # پشتیبانی از هر دو نام متغیر برای سازگاری
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")
-DB_PATH = os.getenv("DB_PATH", "cryptobot.sqlite3")
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 os.makedirs(DATA_DIR, exist_ok=True)
+# مهم: پیش‌فرض دیتابیس هم داخل DATA_DIR قرار می‌گیرد تا اگر یک Volume
+# پایدار (مثلاً روی Railway) روی DATA_DIR مانت شده باشد، دیتابیس و تنظیمات
+# هر دو با آن حفظ شوند و با ریست/ری‌دیپلوی از بین نروند.
+DB_PATH = os.getenv("DB_PATH", os.path.join(DATA_DIR, "cryptobot.sqlite3"))
+logger.info(f"📁 DATA_DIR={os.path.abspath(DATA_DIR)} | DB_PATH={os.path.abspath(DB_PATH)}")
 
 # لیست ۳۰ ارز
 COIN_CODES = [
@@ -178,6 +182,23 @@ def fmt_toman(usd_value: float, rate: float) -> str:
     if toman >= 1:
         return f"{toman:,.0f} تومان"
     return f"{toman:.6f}".rstrip("0").rstrip(".") + " تومان"
+
+def format_duration_since(started_ts: Optional[float]) -> str:
+    """مدت زمان سپری‌شده از باز شدن سیگنال تا الان، به‌صورت خوانا (روز/ساعت/دقیقه)"""
+    if not started_ts:
+        return "نامشخص"
+    seconds = max(0, time.time() - started_ts)
+    total_minutes = int(seconds // 60)
+    days = total_minutes // 1440
+    hours = (total_minutes % 1440) // 60
+    minutes = total_minutes % 60
+    parts = []
+    if days > 0:
+        parts.append(f"{days} روز")
+    if hours > 0 or days > 0:
+        parts.append(f"{hours} ساعت")
+    parts.append(f"{minutes} دقیقه")
+    return " و ".join(parts)
 
 def format_percent(value: float) -> str:
     if value is None:
@@ -475,9 +496,11 @@ def get_db_stats() -> dict:
     with _conn() as c:
         total = c.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"]
         open_count = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='open'").fetchone()["n"]
+        tp1 = c.execute("SELECT COUNT(*) AS n FROM signals WHERE highest_tp_hit>=1").fetchone()["n"]
+        tp2 = c.execute("SELECT COUNT(*) AS n FROM signals WHERE highest_tp_hit>=2").fetchone()["n"]
         tp3 = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='tp3'").fetchone()["n"]
         sl = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='sl'").fetchone()["n"]
-        return {"total": total, "open": open_count, "tp3": tp3, "sl": sl}
+        return {"total": total, "open": open_count, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl}
 
 init_db()
 
@@ -503,6 +526,7 @@ def load_signal_settings():
                 data = json.load(f)
                 SEND_TO_CHANNEL = bool(data.get("send_to_channel", True))
                 SEND_TO_ADMIN = bool(data.get("send_to_admin", True))
+                logger.info(f"✅ تنظیمات ارسال سیگنال از فایل بارگذاری شد: {data}")
                 return
     except Exception as e:
         logger.warning(f"Error loading signal settings from file: {e}")
@@ -515,16 +539,21 @@ def load_signal_settings():
                 data = json.loads(row["value"])
                 SEND_TO_CHANNEL = bool(data.get("send_to_channel", True))
                 SEND_TO_ADMIN = bool(data.get("send_to_admin", True))
+                logger.info(f"✅ تنظیمات ارسال سیگنال از دیتابیس بارگذاری شد: {data}")
+            else:
+                logger.info("ℹ️ هیچ تنظیمات ذخیره‌شده‌ای پیدا نشد — مقدار پیش‌فرض (فعال) استفاده می‌شود.")
     except Exception as e:
         logger.warning(f"Error loading signal settings from DB: {e}")
 
 def save_signal_settings():
     data = {"send_to_channel": SEND_TO_CHANNEL, "send_to_admin": SEND_TO_ADMIN}
+    ok_file, ok_db = False, False
     # فایل
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         with open(SIGNAL_SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        ok_file = True
     except Exception as e:
         logger.warning(f"Error saving signal settings to file: {e}")
     # دیتابیس
@@ -535,9 +564,16 @@ def save_signal_settings():
                 "INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)",
                 ("signal_settings", json.dumps(data)),
             )
-            c.commit()
+        ok_db = True
     except Exception as e:
         logger.warning(f"Error saving signal settings to DB: {e}")
+    if ok_file or ok_db:
+        logger.info(f"💾 تنظیمات ارسال سیگنال ذخیره شد (فایل={ok_file}, دیتابیس={ok_db}): {data}")
+    else:
+        logger.error(
+            "❌ ذخیره تنظیمات ارسال سیگنال کاملاً ناموفق بود — احتمالاً DATA_DIR روی یک دیسک "
+            "پایدار (Volume) مانت نشده و با هر ری‌استارت/دیپلوی پاک می‌شود."
+        )
 
 load_signal_settings()
 
@@ -1148,14 +1184,14 @@ def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type:
         title = tp_titles.get(i, f"هدف {i}")
         targets_lines.append(
             f"{em} **{title}**\n"
-            f"   • دلاری: `{fmt_usd(t)}` USDT\n"
-            f"   • تومانی: {fmt_toman(t, rate)}"
+            f"   • 💵 `{fmt_usd(t)}` USDT\n"
+            f"   • 🇮🇷 {fmt_toman(t, rate)}"
         )
 
     if ai_status == "confirmed":
         ai_line = "✅ تأیید شد"
     elif ai_status == "rejected":
-        ai_line = "⚠️ تأیید نشد (فقط اطلاع‌رسانی)"
+        ai_line = "❌ رد شد"
     else:
         ai_line = "⏳ در دسترس نبود"
 
@@ -1183,13 +1219,13 @@ def format_signal_message(code: str, direction: str, plan: RiskPlan, setup_type:
         f"{rtl}📈 **قدرت سیگنال:** {strength}\n"
         f"{rtl}🎯 **میزان اطمینان:** {confidence_text}\n\n"
         f"{rtl}💵 **قیمت ورود**\n"
-        f"{rtl}   • دلاری: `{fmt_usd(plan.entry)}` USDT\n"
-        f"{rtl}   • تومانی: {fmt_toman(plan.entry, rate)}\n\n"
+        f"{rtl}   • 💵 `{fmt_usd(plan.entry)}` USDT\n"
+        f"{rtl}   • 🇮🇷 {fmt_toman(plan.entry, rate)}\n\n"
         f"{rtl}🎯 **اهداف قیمتی**\n"
         + "\n".join(f"{rtl}{line}" for line in targets_lines) + "\n\n"
         f"{rtl}🛑 **حد ضرر**\n"
-        f"{rtl}   • دلاری: `{fmt_usd(plan.stop_loss)}` USDT\n"
-        f"{rtl}   • تومانی: {fmt_toman(plan.stop_loss, rate)}\n\n"
+        f"{rtl}   • 💵 `{fmt_usd(plan.stop_loss)}` USDT\n"
+        f"{rtl}   • 🇮🇷 {fmt_toman(plan.stop_loss, rate)}\n\n"
         f"{rtl}⚙️ **مدیریت سرمایه**\n"
         f"{rtl}   • اهرم: `{plan.leverage}x`\n"
         f"{rtl}   • نسبت سود به زیان: `1:{plan.risk_reward:.2f}`\n\n"
@@ -1257,26 +1293,14 @@ def get_admin_stats_text() -> str:
         f"📊 **آمار سیگنال‌ها:**\n"
         f"   • کل تولیدشده: `{total_signals}`\n"
         f"   • باز: `{open_signals}`\n"
+        f"   • رسیده به هدف اول (TP1): `{db['tp1']}`\n"
+        f"   • رسیده به هدف دوم (TP2): `{db['tp2']}`\n"
         f"   • بسته شده: `{closed}`\n"
         f"   • موفق (TP3): `{wins}`\n"
         f"   • ناموفق (SL): `{losses}`\n"
         f"   • وین‌ریت: `{winrate:.1f}%`\n"
         f"   • بهترین ارز: `{best_coin}`\n"
         f"   • بدترین ارز: `{worst_coin}`\n"
-        f"{'────────────────────'}\n"
-        f"🏛 **وضعیت سیستم:**\n"
-        f"   • صرافی فعال: `{cache.active_exchange_name}`\n"
-        f"   • وضعیت صرافی‌ها:\n{get_exchange_status_text()}\n"
-        f"   • نرخ تتر (Wallex): {get_irt_rate_status()}\n"
-        f"   • شاخص ترس/طمع: {get_fg_status()}\n"
-        f"   • هوش مصنوعی: {'✅ فعال' if GROQ_API_KEY else '❌ غیرفعال'}\n"
-        f"{'────────────────────'}\n"
-        f"💾 **دیتابیس:**\n"
-        f"   • مسیر: `{DB_PATH}`\n"
-        f"   • تعداد رکوردها: `{total_signals}`\n"
-        f"{'────────────────────'}\n"
-        f"📢 **کانال تلگرام:**\n"
-        f"   • شناسه: `{CHANNEL_ID if CHANNEL_ID else 'تنظیم نشده'}`\n"
         f"{'────────────────────'}\n"
         f"⚙️ **تنظیمات فعال:**\n"
         f"   • اهرم: `{MIN_LEVERAGE}-{MAX_LEVERAGE}x`\n"
@@ -1475,9 +1499,9 @@ def kb_status_grid():
 def kb_admin_panel():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📈 آمار دقیق سیگنال‌ها و عملکرد", callback_data="admin_signal_stats")],
-        [InlineKeyboardButton("👥 آمار کاربران و وضعیت سیستم", callback_data="admin_system_stats")],
+        [InlineKeyboardButton("👥 آمار کاربران و سیگنال‌ها", callback_data="admin_system_stats")],
         [InlineKeyboardButton("📤 تنظیمات ارسال سیگنال", callback_data="admin_signal_settings")],
-        [InlineKeyboardButton("🧪 تست کامل سیستم", callback_data="admin_system_test")],
+        [InlineKeyboardButton("🧪 وضعیت سیستم", callback_data="admin_system_test")],
         [InlineKeyboardButton("🗑 صفر کردن تمام آمار سیگنال‌ها", callback_data="reset_stats_confirm")],
         [InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")]
     ])
@@ -1797,6 +1821,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"📈 **آمار سیگنال‌ها**\n{'────────────────────'}\n"
             f"🔢 کل سیگنال‌های تولیدشده: `{s['total_signals']}`\n"
+            f"1️⃣ رسیده به هدف اول (TP1): `{s['tp1_hit']}`\n"
+            f"2️⃣ رسیده به هدف دوم (TP2): `{s['tp2_hit']}`\n"
             f"✅ سیگنال‌های موفق (TP3): `{s['wins']}`\n"
             f"❌ سیگنال‌های ناموفق (SL): `{s['losses']}`\n"
             f"🏆 نرخ پیروزی (وین‌ریت): `{winrate}`\n"
@@ -1846,7 +1872,10 @@ AI_PROMPT_TEMPLATE = (
     "Crypto futures setup filter.\n"
     "Reply in EXACTLY this format (2 lines):\n"
     "CONFIRM or REJECT\n"
-    "Short reason in Persian (max 15 words)\n\n"
+    "A detailed, informative reason in Persian (2-4 full sentences). Explain what RSI, ADX, volume "
+    "ratio and funding rate indicate about this setup, and why that supports or undermines the trade. "
+    "Give real analysis, not just a repeat of the numbers — whether you CONFIRM or REJECT, the trader "
+    "should learn something useful from your explanation.\n\n"
     "Setup: {direction} {ticker} | RSI:{rsi} | ADX:{adx} | Vol:{volume_ratio}x | Funding:{funding_rate}\n"
     "CONFIRM if ADX>=18 and RSI 28-72 and direction looks ok. Else REJECT with reason."
 )
@@ -1864,13 +1893,15 @@ def confirm_signal_with_ai(chart_png: Optional[bytes], context: dict) -> tuple[s
                 "content": (
                     "Always answer with 2 lines.\n"
                     "Line1: only CONFIRM or REJECT\n"
-                    "Line2: short useful reason in Persian about RSI/ADX/volume/entry quality."
+                    "Line2: a detailed, informative reason in Persian (2-4 sentences) about RSI/ADX/"
+                    "volume/funding/entry quality — real analysis the trader can learn from, whether "
+                    "you CONFIRM or REJECT."
                 ),
             },
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.3,
-        "max_tokens": 120,
+        "max_tokens": 350,
     }
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -1917,7 +1948,7 @@ def confirm_signal_with_ai(chart_png: Optional[bytes], context: dict) -> tuple[s
         for bad in ("CONFIRM", "REJECT", "confirm", "reject"):
             if opinion.upper().startswith(bad):
                 opinion = opinion[len(bad):].lstrip(" :-–—|.")
-        opinion = opinion.strip()[:200]
+        opinion = opinion.strip()[:600]
 
         if upper.startswith("CONFIRM") and not upper.startswith("REJECT"):
             return "confirmed", opinion
@@ -1983,6 +2014,8 @@ async def monitor_open_signals(app: Application):
                 highest = row["highest_tp_hit"]
                 rtl = "\u200F"
 
+                duration_text = format_duration_since(row["created_ts"])
+
                 # ——— حد ضرر ———
                 hit_sl = (price <= stop_loss) if direction == "long" else (price >= stop_loss)
                 if hit_sl:
@@ -1992,7 +2025,8 @@ async def monitor_open_signals(app: Application):
                         f"{rtl}📌 جهت: {'خرید (لانگ) 🟢' if direction == 'long' else 'فروش (شورت) 🔴'}\n"
                         f"{rtl}💵 ورود: `{row['entry']:.6f}`\n"
                         f"{rtl}🛑 حد ضرر: `{stop_loss:.6f}`\n"
-                        f"{rtl}📉 قیمت فعلی: `{price:.6f}`\n\n"
+                        f"{rtl}📉 قیمت فعلی: `{price:.6f}`\n"
+                        f"{rtl}⏱ مدت باز بودن سیگنال: `{duration_text}`\n\n"
                         f"{rtl}سیگنال بسته شد.\n"
                         f"{rtl}📅 `{shamsi_now()}`"
                     )
@@ -2003,7 +2037,7 @@ async def monitor_open_signals(app: Application):
                     _trend_warned.discard(signal_id)
                     continue
 
-                # ——— تارگت‌ها ———
+                # ——— تارگت‌ها (هر تارگت ریپلای پیام تارگت قبلی — تارگت۱ ریپلای سیگنال اصلی) ———
                 if highest < 1:
                     if (price >= targets[0] if direction == "long" else price <= targets[0]):
                         text = (
@@ -2011,12 +2045,14 @@ async def monitor_open_signals(app: Application):
                             f"{rtl}━━━━━━━━━━━━━━━━━━━━\n\n"
                             f"{rtl}🎯 هدف اول: `{targets[0]:.6f}`\n"
                             f"{rtl}📉 قیمت فعلی: `{price:.6f}`\n"
-                            f"{rtl}🔒 حد ضرر به نقطه ورود منتقل شد: `{row['entry']:.6f}`\n\n"
+                            f"{rtl}🔒 حد ضرر به نقطه ورود منتقل شد: `{row['entry']:.6f}`\n"
+                            f"{rtl}⏱ مدت زمان رسیدن به این هدف: `{duration_text}`\n\n"
                             f"{rtl}می‌توانید بخشی از سود را ذخیره کنید.\n"
                             f"{rtl}📅 `{shamsi_now()}`"
                         )
                         if CHANNEL_ID and reply_id:
-                            await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=reply_id)
+                            msg = await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=reply_id)
+                            set_channel_message_id(signal_id, msg.message_id)
                         update_signal_progress(signal_id, 1, row["entry"])
                         continue
                 if highest < 2:
@@ -2026,12 +2062,14 @@ async def monitor_open_signals(app: Application):
                             f"{rtl}━━━━━━━━━━━━━━━━━━━━\n\n"
                             f"{rtl}🎯 هدف دوم: `{targets[1]:.6f}`\n"
                             f"{rtl}📉 قیمت فعلی: `{price:.6f}`\n"
-                            f"{rtl}🔒 حد ضرر به هدف اول منتقل شد: `{targets[0]:.6f}`\n\n"
+                            f"{rtl}🔒 حد ضرر به هدف اول منتقل شد: `{targets[0]:.6f}`\n"
+                            f"{rtl}⏱ مدت زمان رسیدن به این هدف: `{duration_text}`\n\n"
                             f"{rtl}ریسک معامله عملاً پوشش داده شد.\n"
                             f"{rtl}📅 `{shamsi_now()}`"
                         )
                         if CHANNEL_ID and reply_id:
-                            await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=reply_id)
+                            msg = await app.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", reply_to_message_id=reply_id)
+                            set_channel_message_id(signal_id, msg.message_id)
                         update_signal_progress(signal_id, 2, targets[0])
                         continue
                 if (price >= targets[2] if direction == "long" else price <= targets[2]):
@@ -2039,7 +2077,8 @@ async def monitor_open_signals(app: Application):
                         f"{rtl}3️⃣ هدف نهایی رسید | #{code}\n"
                         f"{rtl}━━━━━━━━━━━━━━━━━━━━\n\n"
                         f"{rtl}🎯 هدف نهایی: `{targets[2]:.6f}`\n"
-                        f"{rtl}📉 قیمت فعلی: `{price:.6f}`\n\n"
+                        f"{rtl}📉 قیمت فعلی: `{price:.6f}`\n"
+                        f"{rtl}⏱ مدت زمان کل سیگنال: `{duration_text}`\n\n"
                         f"{rtl}✅ سیگنال با موفقیت بسته شد.\n"
                         f"{rtl}📅 `{shamsi_now()}`"
                     )
@@ -2289,12 +2328,17 @@ def render_candles_png(df: pd.DataFrame, title: str) -> Optional[bytes]:
 def stats_summary() -> dict:
     with _conn() as c:
         total = c.execute("SELECT COUNT(*) AS n FROM signals").fetchone()["n"]
+        tp1_hit = c.execute("SELECT COUNT(*) AS n FROM signals WHERE highest_tp_hit>=1").fetchone()["n"]
+        tp2_hit = c.execute("SELECT COUNT(*) AS n FROM signals WHERE highest_tp_hit>=2").fetchone()["n"]
         wins = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='tp3'").fetchone()["n"]
         losses = c.execute("SELECT COUNT(*) AS n FROM signals WHERE status='sl'").fetchone()["n"]
         rejected_by_ai = c.execute("SELECT COUNT(*) AS n FROM signals WHERE ai_confirmed=0").fetchone()["n"]
     total_closed = wins + losses
     winrate = (wins / total_closed * 100) if total_closed else None
-    return {"total_signals": total, "wins": wins, "losses": losses, "winrate": winrate, "rejected_by_ai": rejected_by_ai}
+    return {
+        "total_signals": total, "tp1_hit": tp1_hit, "tp2_hit": tp2_hit,
+        "wins": wins, "losses": losses, "winrate": winrate, "rejected_by_ai": rejected_by_ai,
+    }
 
 # ===========================
 # راه‌اندازی
