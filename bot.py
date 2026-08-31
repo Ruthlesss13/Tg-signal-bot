@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Version 4.1.0
+# Version 4.1.3
 
 import asyncio
 import base64
@@ -50,7 +50,7 @@ except ImportError:
 # ===========================
 # نسخه‌گذاری
 # ===========================
-VERSION = "4.1.1"
+VERSION = "4.1.3"
 BUILD_TIME = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 START_TIME = time.time()
 
