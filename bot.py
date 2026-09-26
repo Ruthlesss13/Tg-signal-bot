@@ -90,7 +90,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.getenv("DB_PATH", os.path.join(DATA_DIR, "cryptobot.sqlite3"))
 logger.info(f"📁 DATA_DIR={os.path.abspath(DATA_DIR)} | DB_PATH={os.path.abspath(DB_PATH)}")
 
-# لیست ۳۰ ارز
+# لیست ۵۰ ارز
 COIN_CODES = [
     "BTC", "ETH", "SOL", "BNB", "XRP",
     "ADA", "DOGE", "AVAX", "LINK", "DOT",
@@ -2674,7 +2674,7 @@ async def _render_system_test_background(context, query, key, version):
 def _prices_text(prices: Dict[str, float], rate: float) -> str:
     exchange_emoji = "🇲" if "MEXC" in cache.active_exchange_name else "🇬"
     text = (
-        f"💵 **لیست قیمت لحظه‌ای ۳۰ ارز دیجیتال برتر**\n"
+        f"💵 **لیست قیمت لحظه‌ای ۵۰ ارز دیجیتال برتر**\n"
         f"📅 {shamsi_now()}\n"
         f"🇮🇷 نرخ تتر: {rate:,.0f} تومان\n"
         f"────────────────────\n"
